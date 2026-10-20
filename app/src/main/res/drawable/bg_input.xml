@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 之前的单态矩形只有一圈灰描边，聚焦和不聚焦完全一样，看起来像一张死表单。
+     这里换成状态选择器：聚焦时把描边换成品牌蓝并加粗（1dp→2dp 画在内侧，不影响文字位置）。 -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item android:state_enabled="false">
+        <shape android:shape="rectangle">
+            <corners android:radius="11dp" />
+            <solid android:color="@color/input_bg_disabled" />
+            <stroke
+                android:width="1dp"
+                android:color="@color/input_stroke" />
+        </shape>
+    </item>
+
+    <item android:state_focused="true">
+        <shape android:shape="rectangle">
+            <corners android:radius="11dp" />
+            <solid android:color="@color/input_bg" />
+            <stroke
+                android:width="2dp"
+                android:color="@color/input_stroke_focused" />
+        </shape>
+    </item>
+
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="11dp" />
+            <solid android:color="@color/input_bg" />
+            <stroke
+                android:width="1dp"
+                android:color="@color/input_stroke" />
+        </shape>
+    </item>
+</selector>

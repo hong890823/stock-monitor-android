@@ -1,0 +1,25 @@
+<resources>
+    <color name="quote_up">#FF7A72</color>
+    <color name="quote_down">#7BD389</color>
+    <color name="quote_flat">#9AA7B4</color>
+    <color name="surface_bg">#12151A</color>
+    <color name="card_bg">#1B1F27</color>
+    <color name="card_stroke">#303744</color>
+    <color name="input_bg">#202631</color>
+    <color name="input_bg_disabled">#1A1F27</color>
+    <color name="input_stroke">#4A5668</color>
+    <color name="input_stroke_focused">#9EC3FF</color>
+    <color name="input_hint">#7F8B9A</color>
+    <color name="input_selection">#3A5275</color>
+    <color name="chrome_stroke">#2A303A</color>
+    <color name="text_primary">#ECEFF4</color>
+    <color name="text_secondary">#A7B1BD</color>
+    <color name="brand_primary">#9EC3FF</color>
+    <color name="nav_active_indicator">#24365C</color>
+    <color name="warn">#FFB74D</color>
+    <color name="divider">#2A303A</color>
+    <color name="risk_good">#7BD389</color>
+    <color name="risk_watch">#FFB74D</color>
+    <color name="risk_alert">#FF8A80</color>
+    <color name="report_highlight">#FF8A80</color>
+</resources>

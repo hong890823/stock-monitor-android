@@ -1,0 +1,73 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+def localProperties = new Properties()
+def localPropertiesFile = rootProject.file('local.properties')
+if (localPropertiesFile.exists()) {
+    localPropertiesFile.withInputStream { localProperties.load(it) }
+}
+def configuredValue = { String key ->
+    localProperties.getProperty(key) ?: project.findProperty(key)?.toString() ?: ''
+}
+def buildConfigString = { String value ->
+    '"' + value.replace('\\', '\\\\').replace('"', '\\"') + '"'
+}
+
+android {
+    namespace 'com.example.stockmonitor'
+    compileSdk 35
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    defaultConfig {
+        applicationId 'com.example.stockmonitor'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+        buildConfigField 'String', 'TWELVE_DATA_API_KEY', buildConfigString(configuredValue('TWELVE_DATA_API_KEY'))
+        buildConfigField 'String', 'DEEPSEEK_API_KEY', buildConfigString(configuredValue('DEEPSEEK_API_KEY'))
+        buildConfigField 'String', 'DEEPSEEK_MODEL', buildConfigString(configuredValue('DEEPSEEK_MODEL') ?: 'deepseek-flash')
+        buildConfigField 'String', 'DEEPSEEK_BASE_URL', buildConfigString(configuredValue('DEEPSEEK_BASE_URL') ?: 'https://api.deepseek.com')
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+// debug 包用项目内共享签名（keystore/shared-debug-signing.gradle），多台电脑签名一致，覆盖安装不丢数据。
+apply from: rootProject.file('keystore/shared-debug-signing.gradle')
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.15.0'
+    implementation 'androidx.activity:activity-ktx:1.10.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.fragment:fragment:1.5.4'
+    implementation 'androidx.recyclerview:recyclerview:1.4.0'
+    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.2.1'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.6.2'
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0'
+
+    testImplementation 'junit:junit:4.13.2'
+    // Android 自带的 org.json 在本地单测里是空壳（调用会抛 not mocked），补一份真实现。
+    testImplementation 'org.json:json:20240303'
+}

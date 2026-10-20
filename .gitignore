@@ -1,0 +1,35 @@
+# ---- 本地配置与密钥（严禁提交）----
+# local.properties 里放着大模型 API Key（DEEPSEEK_API_KEY 等）和 sdk.dir。
+local.properties
+*.env
+.env*
+*secret*
+*credentials*
+
+# 签名密钥默认不进版本库（release 密钥等）。
+# 例外：keystore/shared-debug.keystore 是随项目走的 debug 签名（见
+# keystore/shared-debug-signing.gradle），多台电脑构建签名一致，覆盖安装不丢数据。
+*.keystore
+*.jks
+!keystore/shared-debug.keystore
+
+# ---- Gradle / 构建产物 ----
+.gradle/
+build/
+*.apk
+*.aab
+*.ap_
+*.dex
+.cxx/
+.externalNativeBuild/
+
+# ---- IDE / 系统文件 ----
+.idea/
+*.iml
+.kotlin/
+.DS_Store
+captures/
+*.hprof
+
+# ---- 本地工具与会话配置 ----
+.claude/

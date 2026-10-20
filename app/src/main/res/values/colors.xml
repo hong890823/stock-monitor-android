@@ -1,0 +1,32 @@
+<resources>
+    <!-- 中国市场习惯：涨为红，跌为绿 -->
+    <color name="quote_up">#E53935</color>
+    <color name="quote_down">#2E7D32</color>
+    <color name="quote_flat">#78909C</color>
+    <color name="surface_bg">#F2F4F8</color>
+    <color name="card_bg">#FFFFFF</color>
+    <color name="card_stroke">#D5DDE8</color>
+    <!-- 输入框：白卡片上用略深的填充把「可输入区」圈出来，描边只负责定形，不抢视觉。
+         聚焦时填充保持不变，只把描边换成品牌蓝并加粗，避免整块「弹出来」的躁动感。 -->
+    <color name="input_bg">#EEF2F8</color>
+    <color name="input_bg_disabled">#F4F6FA</color>
+    <color name="input_stroke">#E2E8F1</color>
+    <color name="input_stroke_focused">#0B57D0</color>
+    <!-- hint 要明显比正文淡，否则空输入框看起来像已经填了内容 -->
+    <color name="input_hint">#96A2B3</color>
+    <color name="input_selection">#B7D3FF</color>
+    <color name="chrome_stroke">#E0E6EF</color>
+    <color name="text_primary">#1B2430</color>
+    <color name="text_secondary">#5F6B7A</color>
+    <color name="brand_primary">#0B57D0</color>
+    <!-- 底部 Tab 选中胶囊的底色（M3 默认取 colorSecondaryContainer，默认是紫色）。 -->
+    <color name="nav_active_indicator">#D8E2FF</color>
+    <color name="warn">#EF6C00</color>
+    <color name="divider">#E4E8EF</color>
+    <!-- 基本面风险等级：与红涨绿跌无关，单独取名，避免两套语义混在一起 -->
+    <color name="risk_good">#2E7D32</color>
+    <color name="risk_watch">#EF6C00</color>
+    <color name="risk_alert">#C62828</color>
+    <!-- 报告里「关键数据」的高亮色：这是提示去看，不是涨跌红，所以单独取名 -->
+    <color name="report_highlight">#C62828</color>
+</resources>

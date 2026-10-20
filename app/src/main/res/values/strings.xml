@@ -1,0 +1,26 @@
+<resources>
+    <string name="app_name">股票监控</string>
+    <string name="app_subtitle">A股行情 · 技术分析 · 持仓监控</string>
+
+    <string name="tab_market">市场</string>
+    <string name="tab_screen">选股</string>
+    <string name="tab_portfolio">持仓</string>
+    <string name="tab_tools">工具</string>
+
+    <string name="channel_monitor_name">后台监控</string>
+    <string name="channel_monitor_desc">常驻通知，显示自选股行情</string>
+    <string name="channel_alert_name">行情提醒</string>
+    <string name="channel_alert_desc">持仓股跌幅预警、持仓信号变化与大盘提醒</string>
+    <string name="channel_signal_name">买卖点提醒</string>
+    <string name="channel_signal_desc">持仓信号或选股观察池买点已确认时发送通知</string>
+
+    <string name="disclaimer">本应用只做行情与技术面计算，不提供自动下单；所有信号均为条件式参考，不构成投资建议。</string>
+
+    <string name="report_title">报告</string>
+    <string name="action_copy">复制</string>
+    <string name="action_share">分享</string>
+    <string name="action_summary">盘面总结</string>
+    <string name="action_refresh">立即刷新</string>
+    <string name="action_settings">设置</string>
+    <string name="copied">已复制到剪贴板</string>
+</resources>

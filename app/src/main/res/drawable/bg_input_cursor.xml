@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 默认光标是纯黑的，在品牌蓝描边的输入框里很突兀，换成同色的细圆条。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <corners android:radius="1.5dp" />
+    <solid android:color="@color/input_stroke_focused" />
+    <size
+        android:width="2dp"
+        android:height="22dp" />
+</shape>
