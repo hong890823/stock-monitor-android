@@ -28,9 +28,94 @@ class ObservationEntryPolicyTest {
         assertFalse(ObservationEntryPolicy.leaderCanBuy(1, 4.0, 1.6, 10.0, pullback))
         assertFalse(ObservationEntryPolicy.leaderCanBuy(1, 4.0, 0.6, 10.0, pullback.copy(confirmed = false)))
         assertFalse(ObservationEntryPolicy.leaderCanBuy(1, 4.0, 0.6, 10.0, pullback.copy(trendWeak = true)))
-        assertFalse(ObservationEntryPolicy.leaderCanBuy(1, 4.0, 0.6, 10.0,
+        assertTrue(ObservationEntryPolicy.leaderCanBuy(1, 4.0, 0.6, 10.0,
             pullback.copy(marketFilter = MarketFilter.HEADWIND)))
         assertFalse(ObservationEntryPolicy.leaderCanBuy(1, 4.0, 0.6, 10.0, pullback.copy(stopPrice = 10.5)))
+    }
+
+    @Test
+    fun leaderCanUseTrendHoldWithoutMarketOrSectorGate() {
+        val trend = EntrySetup(
+            EntrySetupType.NONE, false, false, false, 12.0, 1.0, false,
+            MarketFilter.HEADWIND, null, "强势趋势延续",
+        )
+        val assessment = TrendAssessment(
+            shortTerm = ShortTermTrend.UP,
+            major = MajorTrend.UP,
+            reason = "趋势向上",
+            allowsOrdinaryBuy = true,
+            allowsAddPosition = true,
+            allowsTBuy = true,
+            allowsTSell = true,
+            allowsBottomReversal = false,
+            riskOnly = false,
+        )
+
+        assertTrue(
+            ObservationEntryPolicy.leaderCanBuy(
+                recentLimitUpDays = 2,
+                relativeStrengthPct = 8.0,
+                volumeRatio = 1.2,
+                price = 10.5,
+                trend = trend,
+                trendAssessment = assessment,
+                stopPrice = 9.8,
+                priceLocation = PriceLocation.LOW,
+                ma5 = 10.4,
+                ma20 = 10.0,
+                biasFromMa5Pct = 1.0,
+            ),
+        )
+    }
+
+    @Test
+    fun leaderEntryUsesPositionSensitiveBreakLine() {
+        val trend = EntrySetup(
+            EntrySetupType.NONE, false, false, false, 12.0, 1.0, false,
+            MarketFilter.HEADWIND, null, "强势趋势延续",
+        )
+        val assessment = TrendAssessment(
+            shortTerm = ShortTermTrend.UP,
+            major = MajorTrend.UP,
+            reason = "趋势向上",
+            allowsOrdinaryBuy = true,
+            allowsAddPosition = true,
+            allowsTBuy = true,
+            allowsTSell = true,
+            allowsBottomReversal = false,
+            riskOnly = false,
+        )
+
+        assertFalse(
+            ObservationEntryPolicy.leaderCanBuy(
+                recentLimitUpDays = 2,
+                relativeStrengthPct = 8.0,
+                volumeRatio = 1.2,
+                price = 9.8,
+                trend = trend,
+                trendAssessment = assessment,
+                stopPrice = 9.5,
+                priceLocation = PriceLocation.LOW,
+                ma5 = 10.0,
+                ma20 = 10.1,
+                biasFromMa5Pct = -2.0,
+            ),
+        )
+        assertFalse(
+            ObservationEntryPolicy.leaderCanBuy(
+                recentLimitUpDays = 2,
+                relativeStrengthPct = 8.0,
+                volumeRatio = 1.2,
+                price = 10.8,
+                trend = trend,
+                trendAssessment = assessment,
+                stopPrice = 10.0,
+                priceLocation = PriceLocation.HIGH,
+                ma5 = 11.0,
+                ma20 = 9.0,
+                biasFromMa5Pct = 8.5,
+            ),
+        )
     }
 
     @Test

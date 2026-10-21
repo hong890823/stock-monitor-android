@@ -6,6 +6,53 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class PortfolioSwingTest {
+    private val majorDown = TrendAssessment(
+        shortTerm = ShortTermTrend.DOWN,
+        major = MajorTrend.DOWN,
+        reason = "测试大趋势向下",
+        allowsOrdinaryBuy = false,
+        allowsAddPosition = false,
+        allowsTBuy = false,
+        allowsTSell = false,
+        allowsBottomReversal = false,
+        riskOnly = true,
+    )
+
+    private val majorBottoming = TrendAssessment(
+        shortTerm = ShortTermTrend.REBOUND,
+        major = MajorTrend.BOTTOMING,
+        reason = "测试连续5日不创新低",
+        allowsOrdinaryBuy = false,
+        allowsAddPosition = false,
+        allowsTBuy = false,
+        allowsTSell = false,
+        allowsBottomReversal = true,
+        riskOnly = false,
+    )
+
+    @Test
+    fun majorDownAllocatesNoNewCapital() {
+        val result = plan(evidence().copy(trendAssessment = majorDown)).rows.single()
+
+        assertEquals(SwingStatus.BLOCKED, result.status)
+        assertEquals(0.0, result.addQuantity, 0.0)
+        assertTrue(result.reason.contains("大趋势向下"))
+    }
+
+    @Test
+    fun bottomingTrialIsCappedAtQuarterInitialPosition() {
+        val result = plan(
+            evidence().copy(
+                trendAssessment = majorBottoming,
+                cycles = cycles.copy(weekTrend = SwingTrend.WEAK, monthTrend = SwingTrend.WEAK),
+            ),
+        ).rows.single()
+
+        assertEquals(SwingStatus.BOTTOM_TRIAL, result.status)
+        assertTrue(result.addQuantity <= 500.0 * 0.25)
+        assertTrue(result.reason.contains("25%"))
+    }
+
     @Test
     fun highPositionReductionBlocksBothNewCapitalAndAutomaticDeepLossT() {
         listOf(10.0, 30.0).forEach { cost ->

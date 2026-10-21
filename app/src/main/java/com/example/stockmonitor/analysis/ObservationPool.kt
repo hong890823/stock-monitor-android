@@ -35,7 +35,37 @@ object ObservationPool {
             }
             ObservationStrategy.LEADER -> signal.strongScore
         }.let { base -> if (signal.trendWeak) base - 2 else base }.coerceIn(0, 3)
-        val eligible = signal.confirmedEntry && signal.canBuy && !signal.riskFlag && !signal.trendWeak &&
+        val boxRange = signal.boxRange
+        val breakoutRisk = signal.breakoutRisk
+        val trendGate = when {
+            breakoutRisk?.risk == true -> breakoutRisk.reason
+            boxRange != null && boxRange.state in setOf(
+                BoxRangeState.BOX_RANGE,
+                BoxRangeState.BREAKOUT_CANDIDATE,
+                BoxRangeState.BREAKDOWN_RISK,
+                BoxRangeState.BREAKDOWN_CONFIRMED,
+                BoxRangeState.MISSING,
+            ) -> boxRange.summary
+            signal.trendAssessment?.major == MajorTrend.DOWN ->
+                "大趋势向下，不晋级正常买点，只保留风险处置"
+            signal.trendAssessment?.major == MajorTrend.BOTTOMING ->
+                "底部反转观察，最多按初始仓位25%轻仓试错，不晋级正常买点"
+            signal.highPosition?.riskPriority == true ->
+                "高位派发风险，停止正常买入并优先风险处置"
+            signal.highPosition?.phase == HighPositionPhase.SECOND_WAVE_CANDIDATE ->
+                "二波候选，等待突破确认，不晋级正常买点"
+            signal.highPosition?.phase == HighPositionPhase.CONSOLIDATION ->
+                "高位整理蓄势，未突破确认前不晋级正常买点"
+            signal.highPosition?.phase == HighPositionPhase.SECOND_WAVE_CONFIRMED &&
+                signal.highPosition.allowBuy -> null
+            signal.highPosition != null &&
+                signal.highPosition.phase != HighPositionPhase.NONE -> signal.highPosition.reason
+            signal.trendAssessment?.allowsOrdinaryBuy == false ->
+                "${signal.trendAssessment.summary}，不晋级正常买点"
+            else -> null
+        }
+        val eligible = breakoutRisk?.risk != true && trendGate == null && signal.confirmedEntry && signal.canBuy &&
+            !signal.riskFlag && !signal.trendWeak &&
             !signal.limitUpBlocked && !signal.limitUpShrinkAcceleration
         val leader = candidate.strategy == ObservationStrategy.LEADER
         val elapsed = signal.evaluatedAtMs - candidate.entryConfirmedAtMs
@@ -55,6 +85,16 @@ object ObservationPool {
             weakDays >= MAX_WEAK_DAYS -> ObservationStage.ELIMINATED
             observedDays >= MAX_OBSERVED_DAYS && !confirmed -> ObservationStage.ELIMINATED
             signal.limitUpShrinkAcceleration -> ObservationStage.OBSERVING
+            breakoutRisk?.risk == true -> ObservationStage.OBSERVING
+            signal.trendAssessment?.major == MajorTrend.DOWN -> ObservationStage.OBSERVING
+            signal.highPosition?.riskPriority == true -> ObservationStage.OBSERVING
+            signal.trendAssessment?.major == MajorTrend.BOTTOMING -> ObservationStage.NEAR_ENTRY
+            signal.highPosition?.phase == HighPositionPhase.SECOND_WAVE_CANDIDATE -> ObservationStage.NEAR_ENTRY
+            signal.highPosition?.phase == HighPositionPhase.CONSOLIDATION -> ObservationStage.NEAR_ENTRY
+            signal.boxRange?.state in setOf(
+                BoxRangeState.BOX_RANGE,
+                BoxRangeState.BREAKOUT_CANDIDATE,
+            ) -> ObservationStage.NEAR_ENTRY
             confirmed -> ObservationStage.BUY_CANDIDATE
             score >= 2 || signal.confirmedEntry -> ObservationStage.NEAR_ENTRY
             else -> ObservationStage.OBSERVING
@@ -64,11 +104,14 @@ object ObservationPool {
                 "强势资格与缩量回踩企稳条件连续${ENTRY_CONFIRMATION_ROUNDS}轮通过；仅为技术候选，不代表资金承接已获证实"
             } else signal.signalReason.ifBlank { "趋势入场已确认，等待执行纪律与仓位检查" }
             ObservationStage.NEAR_ENTRY -> when {
+                trendGate != null -> trendGate
                 signal.limitUpBlocked -> ObservationEligibility.LIMIT_WAIT_REASON
                 leader && eligible -> "回踩条件初步满足，等待下一轮新行情复评（$rounds/$ENTRY_CONFIRMATION_ROUNDS）"
                 else -> signal.signalReason.ifBlank { "条件逐步满足，等待最后的价格与量能确认" }
             }
             ObservationStage.OBSERVING -> when {
+                trendGate != null -> trendGate
+                breakoutRisk?.risk == true -> breakoutRisk.reason
                 signal.limitUpShrinkAcceleration -> ObservationEligibility.SHRINK_WAIT_REASON
                 signal.limitUpBlocked -> ObservationEligibility.LIMIT_WAIT_REASON
                 signal.trendWeak -> "出现走弱信号，继续观察，连续走弱将淘汰"
@@ -103,6 +146,7 @@ object ObservationPool {
                 !continuing || freshRound -> signal.quoteVolume
                 else -> candidate.entryConfirmationVolume
             },
+            breakoutRisk = breakoutRisk,
         )
     }
 }

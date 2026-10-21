@@ -12,6 +12,7 @@ import com.example.stockmonitor.core.WebResearchClient
 import com.example.stockmonitor.analysis.RecentMarketContext
 import com.example.stockmonitor.analysis.ReportMarkup
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -28,28 +29,25 @@ class AiAnalysisTest {
 
         assertEquals("持仓报告显示仓位偏高", result.portfolio)
         assertEquals("近5日大盘偏弱，行业同步走弱", result.marketContext)
-        assertEquals("数据暂缺", result.marketRisk)
-        assertEquals("数据暂缺", AiAnalysisResult.fromJson(org.json.JSONObject()).portfolio)
-        assertEquals("数据暂缺", AiAnalysisResult.fromJson(org.json.JSONObject()).marketContext)
-        assertEquals("数据暂缺", AiAnalysisResult.fromJson(org.json.JSONObject()).operationAdvice)
+        assertEquals("", result.marketRisk)
+        assertEquals("", AiAnalysisResult.fromJson(org.json.JSONObject()).portfolio)
+        assertEquals("", AiAnalysisResult.fromJson(org.json.JSONObject()).marketContext)
+        assertEquals("", AiAnalysisResult.fromJson(org.json.JSONObject()).operationAdvice)
     }
 
     @Test
-    fun promptRequiresAllReportsAndRecentMarketContext() {
+    fun promptRoutesToolsByQuestionScopeAndAvoidsUnrelatedCalls() {
         val prompt = AiAnalysisPrompt.system()
 
-        assertTrue(prompt.contains("技术面"))
-        assertTrue(prompt.contains("基本面"))
-        assertTrue(prompt.contains("持仓报告"))
-        assertTrue(prompt.contains("盘面总结"))
-        assertTrue(prompt.contains("最近几天"))
-        assertTrue(prompt.contains("大盘和板块"))
-        assertTrue(prompt.contains("市场风险上下文"))
-        assertTrue(prompt.contains("北向资金"))
-        assertTrue(prompt.contains("operation_advice"))
-        assertTrue(prompt.contains("操作建议"))
-        assertTrue(prompt.contains("滚动做T"))
-        assertTrue(prompt.contains("深套"))
+        assertTrue(prompt.contains("先判断问题范围"))
+        assertTrue(prompt.contains("只调用回答所必需"))
+        assertTrue(prompt.contains("个股问题"))
+        assertTrue(prompt.contains("板块问题"))
+        assertTrue(prompt.contains("不要调用个股"))
+        assertTrue(prompt.contains("财务问题"))
+        assertTrue(prompt.contains("analysis_scope"))
+        assertFalse(prompt.contains("综合分析必须同时覆盖技术面、基本面、持仓报告和盘面总结四类报告"))
+        assertTrue(prompt.contains("事实、推断和不确定性"))
     }
 
     @Test
@@ -60,6 +58,15 @@ class AiAnalysisTest {
         assertTrue(catalog.contains("get_market_summary_report"))
         assertTrue(catalog.contains("get_recent_market_context"))
         assertTrue(catalog.contains("get_market_risk_context"))
+    }
+
+    @Test
+    fun toolCatalogOffersSectorDataWithoutRequiringAStock() {
+        val catalog = AiToolCatalog.definitions().toString()
+
+        assertTrue(catalog.contains("get_sector_snapshot"))
+        assertTrue(catalog.contains("行业或概念板块"))
+        assertTrue(catalog.contains("不需要也不接受个股代码"))
     }
 
     @Test
@@ -267,6 +274,55 @@ class AiAnalysisTest {
     }
 
     @Test
+    fun sectorReportOmitsIrrelevantStockSectionsAndEmptyCode() {
+        val result = AiAnalysisResult(
+            answer = "半导体板块相对占优，但内部扩散仍有限。",
+            headline = "半导体板块偏强",
+            trend = "不应展示个股技术面",
+            fundamentals = "不应展示个股基本面",
+            moat = "不应展示个股护城河",
+            valuation = "不应展示个股估值",
+            catalysts = emptyList(),
+            risks = listOf("高位板块波动放大"),
+            scenarios = emptyList(),
+            watchItems = listOf("观察成交额能否持续"),
+            confidence = "中等",
+            sources = emptyList(),
+            sectorContext = "半导体行业涨幅居前，概念扩散不足。",
+            operationAdvice = "",
+            analysisScope = "sector",
+        )
+
+        val report = AiAnalysisReport.format(result, "半导体板块", "", "2026-10-21 10:00")
+
+        assertTrue(report.contains("🤖 板块研究 AI 分析"))
+        assertFalse(report.contains("（）"))
+        assertTrue(report.contains("板块环境：半导体行业涨幅居前"))
+        assertFalse(report.contains("技术面："))
+        assertFalse(report.contains("基本面："))
+        assertFalse(report.contains("持仓影响："))
+        assertFalse(report.contains("操作建议："))
+        assertFalse(report.contains("估值："))
+        assertTrue(report.contains("未提供可追溯外部来源"))
+        assertFalse(report.contains("程序缓存 + 网络资料（如已取得）"))
+    }
+
+    @Test
+    fun analysisResultKeepsScopeAndSectorContextInJsonRoundTrip() {
+        val json = org.json.JSONObject()
+            .put("answer", "板块偏强")
+            .put("analysis_scope", "sector")
+            .put("sector_context", "行业涨幅居前")
+
+        val result = AiAnalysisResult.fromJson(json)
+
+        assertEquals("sector", result.analysisScope)
+        assertEquals("行业涨幅居前", result.sectorContext)
+        assertEquals("sector", result.toJson().optString("analysis_scope"))
+        assertEquals("sector", AiAnalysisResult.fromJson(org.json.JSONObject().put("analysis_scope", "板块")).analysisScope)
+    }
+
+    @Test
     fun aiPromptDelegatesKnowledgeLookupToGenericTools() {
         val prompt = AiAnalysisPrompt.user(
             AiAnalysisInput(
@@ -295,7 +351,7 @@ class AiAnalysisTest {
         assertTrue(system.contains("权威来源"))
         assertTrue(system.contains("交叉验证"))
         assertTrue(system.contains("事实、推断和不确定性"))
-        assertTrue(system.contains("3～5句"))
+        assertTrue(system.contains("2～4句"))
         assertTrue(tools.contains("公司公告、交易所/监管机构、公司官网"))
         assertTrue(tools.contains("来源链接"))
     }

@@ -74,9 +74,11 @@ object TradeNotification {
         signal: IntradaySignal,
         timeframeReason: String? = null,
     ): String {
+        val context = trendContext(input)
+        val prefix = if (context.isEmpty()) "" else "$context；"
         if (signal.type == IntradaySignalType.TIMEFRAME_WATCH) {
             val reason = timeframeReason?.trim()?.takeIf { it.isNotBlank() } ?: "15/30分钟条件待确认"
-            return "$reason。当前仅观察，不执行买入、做T或普通止盈/减仓。现价${price(input.price)}。"
+            return "$prefix$reason。当前仅观察，不执行买入、做T或普通止盈/减仓。现价${price(input.price)}。"
         }
         val stage = when (signal.type) {
             IntradaySignalType.REDUCE_POSITION -> HoldingExitStage.REDUCE
@@ -88,7 +90,7 @@ object TradeNotification {
         }
         val support = input.breakObservation?.support ?: input.support
         if (stage != null) {
-            return exit(
+            return prefix + exit(
                 stage = stage,
                 totalQuantity = input.quantity,
                 price = input.price,
@@ -98,6 +100,20 @@ object TradeNotification {
             )
         }
         val action = when (signal.type) {
+            IntradaySignalType.BREAKOUT_REVERSAL_RISK ->
+                if (input.quantity > 0) {
+                    "突破延续后出现下杀风险，优先减仓或退出，暂停接回和做T。"
+                } else {
+                    "突破延续后出现下杀风险，禁止追买，等待重新站回并确认。"
+                }
+            IntradaySignalType.BOTTOM_REVERSAL ->
+                "底部反转观察，最多按初始仓位25%轻仓试错；禁止正常加仓和做T，跌破${price(support)}则窗口失效。"
+            IntradaySignalType.HIGH_CONSOLIDATION ->
+                "高位整理，只保留底仓或观察；突破并确认前不买入、接回或做T。"
+            IntradaySignalType.SECOND_WAVE_CANDIDATE ->
+                "二波候选只观察；突破${price(input.resistance)}并获量能确认前不买入、接回或做T。"
+            IntradaySignalType.SECOND_WAVE ->
+                "二波突破确认后才可评估试仓；不追高加仓，跌破${price(support)}则结构失效。"
             IntradaySignalType.T_SELL -> {
                 val sizing = IntradayTactics.suggestedTSellQuantity(input)
                 val action = when {
@@ -115,8 +131,12 @@ object TradeNotification {
                 input.lockedQuantity,
             )}暂不接回。"
             IntradaySignalType.T_BUY, IntradaySignalType.RECLAIM_SUPPORT ->
-                "可评估补仓或接回：须有真实卖出记录，不超过未接回股数及可用资金；计入费用，" +
-                    "若重新跌破 ${price(support)}，补仓窗口失效并停止执行。"
+                if (input.trendAssessment?.allowsTBuy == false || input.trendAssessment?.major == MajorTrend.DOWN) {
+                    "大趋势不支持普通买入、加仓、接回或做T，当前只保留风险处置。"
+                } else {
+                    "可评估补仓或接回：须有真实卖出记录，不超过未接回股数及可用资金；计入费用，" +
+                        "若重新跌破 ${price(support)}，补仓窗口失效并停止执行。"
+                }
             IntradaySignalType.RECLAIM_WATCH -> "先观察，不加仓、不接回；站回${price(support)}后仍待企稳确认。"
             IntradaySignalType.T_TREND_HOLD, IntradaySignalType.T_HOLD -> "先持有，暂缓做T；尚未确认连续回落，不追高。"
             IntradaySignalType.T_HOLD_CAUTION -> "先持有，不追高；上涨持续性待确认，回落后再评估做T。"
@@ -124,7 +144,16 @@ object TradeNotification {
             IntradaySignalType.PULLBACK -> "回踩${price(support)}，先等止跌确认，不直接追买。"
             else -> "先观察，不追加仓位。"
         }
-        return "$action 现价${price(input.price)}。"
+        return "$prefix$action 现价${price(input.price)}。"
+    }
+
+    private fun trendContext(input: IntradayTactics.Input): String {
+        val trend = input.trendAssessment?.let { "${it.major.label}/${it.shortTerm.label}" }
+        val box = input.boxRange?.takeIf { it.state != BoxRangeState.NOT_BOX }?.let { "箱体:${it.state.label}" }
+        val high = input.highPosition
+            ?.takeIf { it.phase != HighPositionPhase.NONE }
+            ?.let { "高位:${it.phase.label}" }
+        return listOfNotNull(trend, box, high).joinToString("｜")
     }
 
     private fun price(value: Double): String = if (value.isFinite() && value > 0) {

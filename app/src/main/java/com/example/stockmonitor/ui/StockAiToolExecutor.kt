@@ -66,6 +66,7 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
                 "get_portfolio_report" -> getPortfolioReport()
                 "get_market_summary_report" -> getMarketSummaryReport()
                 "get_recent_market_context" -> getRecentMarketContext(arguments)
+                "get_sector_snapshot" -> getSectorSnapshot(arguments)
                 "get_market_risk_context" -> getMarketRiskContext()
                 "search_web" -> searchWeb(arguments)
                 "list_knowledge_bases" -> listKnowledgeBases()
@@ -78,6 +79,23 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
                 .put("tool", name)
                 .toString()
         }
+
+    private fun getSectorSnapshot(arguments: JSONObject): JSONObject {
+        val query = arguments.optString("query").trim()
+        require(query.isNotBlank()) { "get_sector_snapshot 缺少 query" }
+        return SectorSnapshotPayload.build(
+            query = query,
+            industries = Repo.sectors?.all.orEmpty(),
+            concepts = Repo.conceptSummary?.sectors.orEmpty(),
+            industryUpdatedAtMs = Repo.sectorsUpdatedAtMs,
+            conceptUpdatedAtMs = Repo.conceptSummaryUpdatedAtMs,
+            nowMs = System.currentTimeMillis(),
+            conceptRisingCount = Repo.conceptSummary?.rising,
+            conceptFallingCount = Repo.conceptSummary?.falling,
+            limit = arguments.optInt("limit", 5),
+            includeRankings = arguments.optBoolean("include_rankings", true),
+        )
+    }
 
     private fun searchSecurity(arguments: JSONObject): JSONObject {
         val query = arguments.optString("query").trim()

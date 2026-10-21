@@ -5,10 +5,36 @@ import com.example.stockmonitor.core.ObservationStage
 import com.example.stockmonitor.core.ObservationSignal
 import com.example.stockmonitor.core.Quote
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ObservationPoolTest {
+    private val majorDown = TrendAssessment(
+        shortTerm = ShortTermTrend.DOWN,
+        major = MajorTrend.DOWN,
+        reason = "测试大趋势向下",
+        allowsOrdinaryBuy = false,
+        allowsAddPosition = false,
+        allowsTBuy = false,
+        allowsTSell = false,
+        allowsBottomReversal = false,
+        riskOnly = true,
+    )
+
+    private val majorBottoming = TrendAssessment(
+        shortTerm = ShortTermTrend.REBOUND,
+        major = MajorTrend.BOTTOMING,
+        reason = "测试连续5日不创新低",
+        allowsOrdinaryBuy = false,
+        allowsAddPosition = false,
+        allowsTBuy = false,
+        allowsTSell = false,
+        allowsBottomReversal = true,
+        riskOnly = false,
+    )
+
     private fun candidate() = ObservationCandidate(
         code = "sh600000",
         name = "浦发银行",
@@ -40,6 +66,49 @@ class ObservationPoolTest {
         assertEquals(ObservationStage.BUY_CANDIDATE, result.stage)
         assertEquals(3, result.score)
         assertEquals(0, result.weakDays)
+    }
+
+    @Test
+    fun majorDownCannotPromoteObservationCandidate() {
+        val result = ObservationPool.evaluate(
+            candidate(),
+            ObservationSignal(
+                date = "2026-10-13",
+                price = 10.3,
+                hasScreenSignal = true,
+                confirmedEntry = true,
+                canBuy = true,
+                trendWeak = false,
+                stopPrice = 9.6,
+                changePct = 2.0,
+                trendAssessment = majorDown,
+            ),
+        )
+
+        assertNotEquals(ObservationStage.BUY_CANDIDATE, result.stage)
+        assertTrue(result.reason.contains("大趋势向下"))
+    }
+
+    @Test
+    fun bottomingUsesBottomReversalReasonInsteadOfNormalBuy() {
+        val result = ObservationPool.evaluate(
+            candidate(),
+            ObservationSignal(
+                date = "2026-10-13",
+                price = 10.3,
+                hasScreenSignal = true,
+                confirmedEntry = true,
+                canBuy = true,
+                trendWeak = false,
+                stopPrice = 9.6,
+                changePct = 2.0,
+                trendAssessment = majorBottoming,
+            ),
+        )
+
+        assertEquals(ObservationStage.NEAR_ENTRY, result.stage)
+        assertTrue(result.reason.contains("底部反转"))
+        assertTrue(result.reason.contains("25%"))
     }
 
     @Test
@@ -178,6 +247,30 @@ class ObservationPoolTest {
                 limitUpBlocked = true),
         )
         assertEquals(ObservationStage.NEAR_ENTRY, result.stage)
+    }
+
+    @Test
+    fun breakoutReversalRiskDowngradesCandidateAndAlertsOnce() {
+        val original = candidate().copy(stage = ObservationStage.BUY_CANDIDATE)
+        val risk = ObservationPool.evaluate(
+            original,
+            ObservationSignal(
+                date = "2026-10-14",
+                price = 10.2,
+                hasScreenSignal = true,
+                confirmedEntry = true,
+                canBuy = true,
+                trendWeak = false,
+                stopPrice = 9.6,
+                changePct = -2.5,
+                breakoutRisk = BreakoutRiskDecision(true, "跌破5日线，突破延续转为下杀风险"),
+            ),
+        )
+
+        assertEquals(ObservationStage.OBSERVING, risk.stage)
+        assertTrue(risk.reason.contains("下杀风险"))
+        assertTrue(ObservationBreakoutRiskAlert.shouldNotify(original, risk))
+        assertFalse(ObservationBreakoutRiskAlert.shouldNotify(risk, risk))
     }
 
     @Test

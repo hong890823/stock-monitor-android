@@ -10,11 +10,15 @@ import android.util.Log
 import com.example.stockmonitor.analysis.DailyReview
 import com.example.stockmonitor.analysis.DayPnl
 import com.example.stockmonitor.analysis.DeepLossPolicy
+import com.example.stockmonitor.analysis.BoxRangePolicy
+import com.example.stockmonitor.analysis.BreakoutRiskEvidence
+import com.example.stockmonitor.analysis.BreakoutRiskPolicy
 import com.example.stockmonitor.analysis.DipReboundEngine
 import com.example.stockmonitor.analysis.EntrySetupType
 import com.example.stockmonitor.analysis.EnvContext
 import com.example.stockmonitor.analysis.FundamentalHealthPolicy
 import com.example.stockmonitor.analysis.Fundamentals
+import com.example.stockmonitor.analysis.HighPositionPolicy
 import com.example.stockmonitor.analysis.HoldingBreakTracker
 import com.example.stockmonitor.analysis.HoldingTContext
 import com.example.stockmonitor.analysis.HoldingTTracker
@@ -25,6 +29,8 @@ import com.example.stockmonitor.analysis.IntradaySignal
 import com.example.stockmonitor.analysis.IntradaySignalType
 import com.example.stockmonitor.analysis.IntradayTactics
 import com.example.stockmonitor.analysis.MarketAlertEngine
+import com.example.stockmonitor.analysis.MarketBreadthFreshnessPolicy
+import com.example.stockmonitor.analysis.MarketBreadthSnapshot
 import com.example.stockmonitor.analysis.MarketEnvironmentQuality
 import com.example.stockmonitor.analysis.MarketRegime
 import com.example.stockmonitor.analysis.MarketRiskContext
@@ -33,6 +39,7 @@ import com.example.stockmonitor.analysis.MarketSummary
 import com.example.stockmonitor.analysis.MarketTimingContext
 import com.example.stockmonitor.analysis.MultiTimeframeTrend
 import com.example.stockmonitor.analysis.ObservationBuyAlert
+import com.example.stockmonitor.analysis.ObservationBreakoutRiskAlert
 import com.example.stockmonitor.analysis.ObservationEligibility
 import com.example.stockmonitor.analysis.ObservationEntryPolicy
 import com.example.stockmonitor.analysis.ObservationEvidenceFactory
@@ -58,6 +65,7 @@ import com.example.stockmonitor.analysis.TimeUtils
 import com.example.stockmonitor.analysis.TradeNotification
 import com.example.stockmonitor.analysis.TradingCalendar
 import com.example.stockmonitor.analysis.TrendEntryStrategy
+import com.example.stockmonitor.analysis.TrendAssessmentPolicy
 import com.example.stockmonitor.analysis.TrendScreenSelection
 import com.example.stockmonitor.analysis.TurnoverContext
 import com.example.stockmonitor.analysis.TurnoverTracker
@@ -1087,6 +1095,7 @@ class MonitorService : Service() {
         val levels = Repo.portfolioResults.associateBy { it.code }
         val boardGroups = store.boardGroups
         val now = System.currentTimeMillis()
+        val adaptiveMarketTurnoverRatio = marketTurnoverRatio(currentQuotes, calendar)
         for (position in portfolio.positions) {
             if (position.code !in heldCodes || !position.quantity.isFinite() || position.quantity <= 0) continue
             val quote = currentQuotes[position.code] ?: continue
@@ -1156,6 +1165,21 @@ class MonitorService : Service() {
             } else if (breakFlags.broken && level != null && level.support > 0 && quote.price >= level.support) {
                 breakFlags.reclaimed = true
             }
+            val marketHealthy = Repo.marketState?.regime?.let {
+                it != MarketRegime.WEAK && it != MarketRegime.COLLAPSE
+            } == true
+            val sectorHealthy = sectorContext?.state?.regime?.let {
+                it != MarketRegime.WEAK && it != MarketRegime.COLLAPSE
+            } == true
+            val highPositionDecision = level?.highPositionEvidence?.let {
+                HighPositionPolicy.evaluate(
+                    it.copy(
+                        marketHealthy = marketHealthy,
+                        sectorHealthy = sectorHealthy,
+                        dualTimeframeAllowed = true,
+                    ),
+                )
+            } ?: level?.highPosition
             val tacticsInput =
                 IntradayTactics.Input(
                     code = position.code,
@@ -1177,6 +1201,7 @@ class MonitorService : Service() {
                     lockedQuantity = availabilityByCode[position.code]?.lockedToday ?: 0.0,
                     entrySetup = level?.entrySetup,
                     ma20 = level?.ma20 ?: 0.0,
+                    ma5 = level?.ma5 ?: 0.0,
                     fundamentalHealth =
                         Repo.fundamentalHealth[position.code]
                             ?.takeIf { now - it.fetchedAtMs in 0..FundamentalHealthPolicy.CACHE_TTL_MS }
@@ -1199,6 +1224,8 @@ class MonitorService : Service() {
                     industryBreadth = industryBreadth,
                     conceptBreadth = conceptBreadth,
                     recentMarketTurnoversYi = recentTurnovers,
+                    marketTurnoverRatio = adaptiveMarketTurnoverRatio,
+                    impulse = level?.impulse,
                     marketRegime = Repo.marketState?.regime ?: MarketRegime.NEUTRAL,
                     sectorRegime = sectorContext?.state?.regime,
                     holdingTContext = holdingTContexts[position.code]?.takeIf { it.isFresh(today, now) },
@@ -1207,6 +1234,9 @@ class MonitorService : Service() {
                     openPrice = quote.open,
                     previousClose = quote.prevClose,
                     priceContext = priceWindows[position.code]?.takeIf { volumeBaselineDay == today }?.contextOf(quote.price),
+                    trendAssessment = level?.trendAssessment,
+                    boxRange = level?.boxRange,
+                    highPosition = highPositionDecision,
                 )
             val evaluatedSignal = IntradayTactics.evaluate(tacticsInput)
             maybeRefreshFundamentalHealth(
@@ -1794,6 +1824,11 @@ class MonitorService : Service() {
                 val previous = currentByKey[candidate.code to candidate.strategy] ?: return@filter false
                 ObservationBuyAlert.shouldNotify(previous, candidate)
             }
+        val breakoutRiskAlerts =
+            accepted.values.filter { candidate ->
+                val previous = currentByKey[candidate.code to candidate.strategy] ?: return@filter false
+                ObservationBreakoutRiskAlert.shouldNotify(previous, candidate)
+            }
         store.observationPool = updated.toMutableList()
         Repo.observationPool = updated
         val evaluatedSnapshots =
@@ -1837,6 +1872,16 @@ class MonitorService : Service() {
                 ObservationBuyAlert.body(candidate),
             )
         }
+        breakoutRiskAlerts.forEach { candidate ->
+            if (!store.alertsEnabled || !store.intradaySignalEnabled) return@forEach
+            if (!TradingCalendar.inMarketHoursForAlert()) return@forEach
+            Notifier.signal(
+                this,
+                ALERT_ID_OBSERVATION_RISK + observationKey(candidate).hashCode(),
+                ObservationBreakoutRiskAlert.title(candidate),
+                ObservationBreakoutRiskAlert.body(candidate),
+            )
+        }
         Repo.notifyChanged()
     }
 
@@ -1848,6 +1893,7 @@ class MonitorService : Service() {
         screened: Set<String>,
     ): ObservationSignal {
         val elapsed = TradingCalendar.tradingMinutesElapsed()
+        val asOf = quote.quoteDate ?: TimeUtils.todayText()
         val averageVolume = VolumeRatio.averageVolumeExcludingToday(history, quote.quoteDate ?: TimeUtils.todayText()) ?: 0.0
         val volumeRatio = VolumeRatio.of(quote.volume, averageVolume, elapsed)
         val atr =
@@ -1865,8 +1911,62 @@ class MonitorService : Service() {
                     atrOverride = atr,
                     benchmark = benchmark,
                     elapsedTradingMinutes = elapsed,
+                    ignoreMarketFilter = candidate.strategy == ObservationStrategy.LEADER,
                 )
             }.getOrNull()
+        val trendAssessment = TrendAssessmentPolicy.evaluateBars(
+            history = ObservationEntryPolicy.withLiveBar(history, quote),
+            asOf = asOf,
+        )
+        val analysisBars = ObservationEntryPolicy.withLiveBar(history, quote)
+        val analysisCloses = analysisBars.map { it.close }
+        val ma5 = analysisCloses.takeLast(5).takeIf { it.size == 5 }?.average()
+        val ma20 = analysisCloses.takeLast(20).takeIf { it.size == 20 }?.average()
+        val priceLocation = PricePosition.of(analysisBars, asOf)?.contextOf(quote.price)?.location
+        val biasFromMa5Pct = ma5?.takeIf { it > 0 }?.let { (quote.price / it - 1.0) * 100.0 }
+        val highPositionEvidence = com.example.stockmonitor.analysis.HighPositionEvidence(
+            price = quote.price,
+            rangeHigh = analysisBars.takeLast(60).maxOfOrNull { it.high } ?: quote.high,
+            rangeLow = analysisBars.takeLast(60).minOfOrNull { it.low } ?: quote.low,
+            atrPct = if (quote.price > 0) atr / quote.price * 100 else 0.0,
+            gain5Pct = if (history.size >= 5) (quote.price / history[history.lastIndex - 4].close - 1.0) * 100 else 0.0,
+            volumeRatio = volumeRatio,
+            pullbackVolumeRatio = volumeRatio?.takeIf { quote.changePct < 0 },
+            recentLows = analysisBars.takeLast(4).map { it.low },
+            recentHighs = analysisBars.takeLast(4).map { it.high },
+            recentCloses = analysisBars.takeLast(4).map { it.close },
+            support = analysisBars.takeLast(20).minOfOrNull { it.low } ?: quote.low,
+            marketHealthy = Repo.marketState?.regime?.let {
+                it != MarketRegime.WEAK && it != MarketRegime.COLLAPSE
+            } == true,
+            sectorHealthy = Repo.sectorContexts[candidate.code]?.state?.regime?.let {
+                it != MarketRegime.WEAK && it != MarketRegime.COLLAPSE
+            } == true,
+            dualTimeframeAllowed = false,
+            trend = trendAssessment,
+        )
+        val highPosition = HighPositionPolicy.evaluate(highPositionEvidence)
+        val boxRange = BoxRangePolicy.evaluate(
+            history = ObservationEntryPolicy.withLiveBar(history, quote),
+            asOf = asOf,
+            currentPrice = quote.price,
+            currentVolumeRatio = volumeRatio,
+        )
+        val breakoutRisk = BreakoutRiskPolicy.evaluate(
+            BreakoutRiskEvidence(
+                price = quote.price,
+                dailyHighPrice = quote.high,
+                breakoutReference = trend?.priorHigh ?: highPositionEvidence.rangeHigh,
+                changePct = quote.changePct,
+                volumeRatio = volumeRatio,
+                atrPct = highPositionEvidence.atrPct,
+                continuation = BreakoutRiskPolicy.continuation(trend?.type, highPosition.phase),
+                priceLocation = priceLocation,
+                ma5 = ma5,
+                ma20 = ma20,
+                biasFromMa5Pct = biasFromMa5Pct,
+            ),
+        )
         val stopPrice = trend?.stopPrice ?: atr.takeIf { it > 0 }?.let { quote.price - it * 1.5 }
         val relativeStrength = relativeStrength(history, quote.price, benchmark)
         val recentLimitUpDays = recentLimitUpDays(candidate.code, candidate.name, history, quote)
@@ -1911,7 +2011,15 @@ class MonitorService : Service() {
                             limitUpBlocked -> ObservationEligibility.LIMIT_WAIT_REASON
                             else -> trend?.conciseText().orEmpty()
                         },
-                ).let { it.copy(evidence = ObservationEvidenceFactory.from(it)) }
+                ).let {
+                    it.copy(
+                        evidence = ObservationEvidenceFactory.from(it),
+                        trendAssessment = trendAssessment,
+                        boxRange = boxRange,
+                        highPosition = highPosition,
+                        breakoutRisk = breakoutRisk,
+                    )
+                }
             }
 
             ObservationStrategy.LEADER -> {
@@ -1922,6 +2030,12 @@ class MonitorService : Service() {
                         volumeRatio,
                         quote.price,
                         trend,
+                        trendAssessment = trendAssessment,
+                        stopPrice = stopPrice,
+                        priceLocation = priceLocation,
+                        ma5 = ma5,
+                        ma20 = ma20,
+                        biasFromMa5Pct = biasFromMa5Pct,
                     )
                 val strongScore =
                     listOf(
@@ -1969,7 +2083,15 @@ class MonitorService : Service() {
                             relativeStrength ?: 0.0,
                             ratio,
                         ) + "｜" + confirmationText,
-                ).let { it.copy(evidence = ObservationEvidenceFactory.from(it)) }
+                ).let {
+                    it.copy(
+                        evidence = ObservationEvidenceFactory.from(it),
+                        trendAssessment = trendAssessment,
+                        boxRange = boxRange,
+                        highPosition = highPosition,
+                        breakoutRisk = breakoutRisk,
+                    )
+                }
             }
         }
     }
@@ -2251,6 +2373,9 @@ class MonitorService : Service() {
                                     }
                                 },
                             exitStage = results.firstOrNull { it.code == position.code }?.exitDecision?.stage,
+                            trendAssessment = results.firstOrNull { it.code == position.code }?.trendAssessment,
+                            boxRange = results.firstOrNull { it.code == position.code }?.boxRange,
+                            highPosition = results.firstOrNull { it.code == position.code }?.highPosition,
                         )
                 }.toMap()
         holdingTContexts = tContexts.toMap()
@@ -2359,16 +2484,53 @@ class MonitorService : Service() {
             // 环境是「同一根 K 线该怎么读」的依据：大盘/板块塌陷时建议会整个改写，
             // 昨日快照用来写「较昨日」。
             envContext =
-                EnvContext(
-                    market = market,
-                    sector = Repo.sectorContexts[position.code],
-                    prev = Repo.portfolioSnapshot?.prevRows?.get(position.code),
-                    marketRisk = marketRisk,
-                ),
+                marketBreadth().let { breadth ->
+                    EnvContext(
+                        market = market,
+                        sector = Repo.sectorContexts[position.code],
+                        prev = Repo.portfolioSnapshot?.prevRows?.get(position.code),
+                        marketRisk = marketRisk,
+                        industryBreadth = breadth.first,
+                        conceptBreadth = breadth.second,
+                    )
+                },
             breakObservation = holdingBreakTracker.snapshot(position.code, live, TimeUtils.todayText(), System.currentTimeMillis()),
             holdingTContext = tContext,
             holdingTObservation = tObservation,
         )
+    }
+
+    private fun marketBreadth(): Pair<Double?, Double?> {
+        val sectors = Repo.sectors?.all.orEmpty()
+        val industryBreadth = MarketBreadthFreshnessPolicy.freshRatio(
+            sectors.takeIf { it.isNotEmpty() }?.let {
+                MarketBreadthSnapshot(
+                    rising = it.count { sector -> sector.change > 0 },
+                    total = it.size,
+                    updatedAtMs = Repo.sectorsUpdatedAtMs,
+                )
+            },
+            nowMs = System.currentTimeMillis(),
+        )
+        val concept = Repo.conceptSummary
+        val conceptTotal = concept?.let {
+            if (it.sectors.isNotEmpty()) it.sectors.size else it.rising + it.falling
+        } ?: 0
+        val conceptBreadth = MarketBreadthFreshnessPolicy.freshRatio(
+            concept?.takeIf { conceptTotal > 0 }?.let {
+                MarketBreadthSnapshot(
+                    rising = if (it.sectors.isNotEmpty()) {
+                        it.sectors.count { item -> item.change > 0 }
+                    } else {
+                        it.rising
+                    },
+                    total = conceptTotal,
+                    updatedAtMs = Repo.conceptSummaryUpdatedAtMs,
+                )
+            },
+            nowMs = System.currentTimeMillis(),
+        )
+        return industryBreadth to conceptBreadth
     }
 
     private fun refreshMarketRiskContext(
@@ -2841,6 +3003,7 @@ class MonitorService : Service() {
         /** 下探回升提醒（大盘 + 持仓个股共用，按 code 取模错开）。 */
         private const val ALERT_ID_REBOUND = 7000
         private const val ALERT_ID_OBSERVATION_BUY = 8000
+        private const val ALERT_ID_OBSERVATION_RISK = 8001
         private val MARKET_INDEX_CODES = listOf("sh000001", "sz399001", "sz399006")
         private const val STOCK_DROP_ALERT_COOLDOWN_MS = 10 * 60 * 1000L
 

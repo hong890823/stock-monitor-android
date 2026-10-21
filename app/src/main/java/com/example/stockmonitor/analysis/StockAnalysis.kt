@@ -67,6 +67,11 @@ data class TechnicalResult(
     /** 量价那条结论（如「低位放量滞涨，量能主要在换手，尚需价格确认」）。signals 末尾只留三条，报告第二节单独用它。 */
     val volumeNote: String? = null,
     val action: String,
+    val trendAssessment: TrendAssessment? = null,
+    val boxRange: BoxRangeAssessment? = null,
+    val highPositionEvidence: HighPositionEvidence? = null,
+    val highPosition: HighPositionDecision? = null,
+    val impulse: ImpulseContext? = null,
 )
 
 /**
@@ -184,6 +189,35 @@ object StockAnalysis {
             currentHigh = live?.high,
             currentLow = live?.low,
             elapsedTradingMinutes = elapsedTradingMinutes,
+        )
+        val trendAssessment = TrendAssessmentPolicy.evaluateBars(
+            history = bars,
+            asOf = TimeUtils.todayText(),
+        )
+        val highPositionEvidence = HighPositionEvidence(
+            price = price,
+            rangeHigh = high.takeLast(60).maxOrNull() ?: resistance,
+            rangeLow = low.takeLast(60).minOrNull() ?: support,
+            atrPct = if (price > 0) atrValue / price * 100 else 0.0,
+            gain5Pct = if (close.size >= 6) (price / close[close.lastIndex - 5] - 1.0) * 100 else 0.0,
+            volumeRatio = volumeRatio,
+            pullbackVolumeRatio = volumeRatio?.takeIf { priceChange < 0 },
+            recentLows = low.takeLast(4),
+            recentHighs = high.takeLast(4),
+            recentCloses = close.takeLast(4),
+            support = support,
+            marketHealthy = false,
+            sectorHealthy = false,
+            dualTimeframeAllowed = false,
+            trend = trendAssessment,
+        )
+        val highPosition = HighPositionPolicy.evaluate(highPositionEvidence)
+        val impulse = ImpulseContext.from(close)
+        val boxRange = BoxRangePolicy.evaluate(
+            history = bars,
+            asOf = TimeUtils.todayText(),
+            currentPrice = price,
+            currentVolumeRatio = volumeRatio,
         )
 
         // ── 筹码位置判断 ──
@@ -402,6 +436,11 @@ object StockAnalysis {
             signals = signals,
             volumeNote = volumeNote,
             action = action,
+            trendAssessment = trendAssessment,
+            boxRange = boxRange,
+            highPositionEvidence = highPositionEvidence,
+            highPosition = highPosition,
+            impulse = impulse,
         )
     }
 
@@ -631,6 +670,18 @@ object StockAnalysis {
             appendLine()
             appendLine("九、综合行动计划")
             appendLine("结论：${planConclusion(result, env)}")
+            result.trendAssessment?.let {
+                appendLine("趋势状态：${it.summary}")
+            }
+            result.boxRange?.let {
+                appendLine("箱体结构：${it.summary}")
+            }
+            result.highPosition?.let {
+                appendLine("高位结构：${it.phase.label}｜${it.reason}")
+            }
+            result.impulse?.let {
+                appendLine("个股延伸：连续上涨${it.upDays}天、连续下跌${it.downDays}天，近5日${pct(it.gain5Pct)}；天数只作风险权重，不按固定周期预测分歧。")
+            }
             appendLine("入场结构：${result.entrySetup.conciseText()}")
             result.entrySetup.stopPrice?.let {
                 appendLine("预设止损：${price(it)}（按 ATR 与关键位留出缓冲，不是保证成交价）")

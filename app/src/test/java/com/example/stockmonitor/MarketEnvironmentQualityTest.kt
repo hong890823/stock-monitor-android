@@ -2,6 +2,7 @@ package com.example.stockmonitor
 
 import com.example.stockmonitor.analysis.MarketEnvironmentQuality
 import com.example.stockmonitor.analysis.MarketEnvironmentStatus
+import com.example.stockmonitor.analysis.MarketTurnoverSource
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -45,5 +46,49 @@ class MarketEnvironmentQualityTest {
         assertEquals(3, lowAverage.persistenceDays)
         assertEquals(17000.0, lowAverage.persistenceAverageYi!!, 0.001)
         assertEquals(MarketEnvironmentStatus.STRONG_SINGLE_DAY, lowAverage.status)
+    }
+
+    @Test
+    fun adaptiveEnvironmentUsesSameTimeTurnoverRatioInsteadOfFixedYiAmounts() {
+        val strong = MarketEnvironmentQuality.evaluateAdaptive(
+            marketTurnoverRatio = 1.4,
+            marketTurnoverSource = MarketTurnoverSource.SAME_TIME,
+            marketChangePct = 1.2,
+            marketPrice = 3200.0,
+            marketHighPrice = 3210.0,
+            industryBreadth = 0.72,
+            conceptBreadth = 0.68,
+        )
+        val neutral = MarketEnvironmentQuality.evaluateAdaptive(
+            marketTurnoverRatio = 0.9,
+            marketTurnoverSource = MarketTurnoverSource.SAME_TIME,
+            marketChangePct = 1.2,
+            marketPrice = 3200.0,
+            marketHighPrice = 3210.0,
+            industryBreadth = 0.72,
+            conceptBreadth = 0.68,
+        )
+
+        assertTrue(strong.strong)
+        assertFalse(neutral.strong)
+        assertFalse(neutral.cautious)
+        assertTrue(strong.summary.contains("同期相对成交额"))
+    }
+
+    @Test
+    fun fullDayFallbackStaysNeutralEvenAtLargeRatio() {
+        val result = MarketEnvironmentQuality.evaluateAdaptive(
+            marketTurnoverRatio = 4.0,
+            marketTurnoverSource = MarketTurnoverSource.FULL_DAY_FALLBACK,
+            marketChangePct = 1.2,
+            marketPrice = 3200.0,
+            marketHighPrice = 3210.0,
+            industryBreadth = 0.72,
+            conceptBreadth = 0.68,
+        )
+
+        assertEquals(MarketEnvironmentStatus.NORMAL, result.status)
+        assertFalse(result.strong)
+        assertFalse(result.cautious)
     }
 }

@@ -13,7 +13,13 @@ import com.example.stockmonitor.analysis.MarketRegime
 import com.example.stockmonitor.analysis.HoldingTContext
 import com.example.stockmonitor.analysis.HoldingTObservation
 import com.example.stockmonitor.analysis.HoldingTTrend
+import com.example.stockmonitor.analysis.HighPositionDecision
+import com.example.stockmonitor.analysis.HighPositionPhase
+import com.example.stockmonitor.analysis.ImpulseContext
+import com.example.stockmonitor.analysis.MajorTrend
+import com.example.stockmonitor.analysis.ShortTermTrend
 import com.example.stockmonitor.analysis.SwingTrend
+import com.example.stockmonitor.analysis.TrendAssessment
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -29,6 +35,143 @@ import org.junit.Test
  * 阈值随板块涨跌停幅度缩放，3% 对创业板不该触发做 T。
  */
 class IntradayTacticsTest {
+    private val majorDown = TrendAssessment(
+        shortTerm = ShortTermTrend.DOWN,
+        major = MajorTrend.DOWN,
+        reason = "测试大趋势向下",
+        allowsOrdinaryBuy = false,
+        allowsAddPosition = false,
+        allowsTBuy = false,
+        allowsTSell = false,
+        allowsBottomReversal = false,
+        riskOnly = true,
+    )
+
+    private val majorBottoming = TrendAssessment(
+        shortTerm = ShortTermTrend.REBOUND,
+        major = MajorTrend.BOTTOMING,
+        reason = "测试大趋势筑底",
+        allowsOrdinaryBuy = false,
+        allowsAddPosition = false,
+        allowsTBuy = false,
+        allowsTSell = false,
+        allowsBottomReversal = true,
+        riskOnly = false,
+    )
+
+    private fun highPosition(
+        phase: HighPositionPhase,
+        allowSecondWaveEntry: Boolean = false,
+    ) = HighPositionDecision(
+        phase = phase,
+        reason = phase.label,
+        allowBuy = allowSecondWaveEntry,
+        allowSecondWaveEntry = allowSecondWaveEntry,
+        allowHoldBase = phase in setOf(
+            HighPositionPhase.CONSOLIDATION,
+            HighPositionPhase.SECOND_WAVE_CANDIDATE,
+            HighPositionPhase.SECOND_WAVE_CONFIRMED,
+        ),
+        riskPriority = phase == HighPositionPhase.DISTRIBUTION_RISK,
+    )
+
+    @Test
+    fun majorDownDoesNotAllowThirtyMinuteDivergenceBuy() {
+        val signal = IntradayTactics.evaluate(
+            input(
+                price = 19.10,
+                changePct = -0.5,
+                volumeRatio = 0.8,
+                support = 19.0,
+                score = 2,
+            ).copy(trendAssessment = majorDown),
+        )
+
+        assertNull(signal)
+    }
+
+    @Test
+    fun bottomingAllowsOnlyLightBottomReversal() {
+        val signal = IntradayTactics.evaluate(
+            input(
+                price = 19.10,
+                changePct = 0.4,
+                volumeRatio = 0.8,
+                support = 19.0,
+                score = 2,
+            ).copy(trendAssessment = majorBottoming),
+        )!!
+
+        assertEquals(IntradaySignalType.BOTTOM_REVERSAL, signal.type)
+        assertTrue(signal.body.contains("最多"))
+        assertTrue(signal.body.contains("25%"))
+        assertFalse(signal.body.contains("正常仓位"))
+    }
+
+    @Test
+    fun riskSignalsStillFireWhenTrendAndHighPositionBlockOpportunities() {
+        val signal = IntradayTactics.evaluate(
+            input(price = 18.80, changePct = -3.2, quantity = 2_000.0)
+                .copy(
+                    trendAssessment = majorDown,
+                    highPosition = highPosition(HighPositionPhase.DISTRIBUTION_RISK),
+                ),
+        )!!
+
+        assertEquals(IntradaySignalType.BREAK_SUPPORT, signal.type)
+        assertTrue(signal.type.isRisk)
+    }
+
+    @Test
+    fun secondWaveCandidateWaitsInsteadOfBuying() {
+        val signal = IntradayTactics.evaluate(
+            input(
+                price = 19.10,
+                changePct = 0.4,
+                volumeRatio = 1.2,
+                support = 19.0,
+                score = 2,
+            ).copy(
+                trendAssessment = majorBottoming,
+                highPosition = highPosition(HighPositionPhase.SECOND_WAVE_CANDIDATE),
+            ),
+        )!!
+
+        assertEquals(IntradaySignalType.SECOND_WAVE_CANDIDATE, signal.type)
+        assertTrue(signal.body.contains("等待突破确认"))
+        assertFalse(signal.body.contains("可考虑"))
+    }
+
+    @Test
+    fun confirmedSecondWaveIssuesActionableButConservativeSignal() {
+        val signal = IntradayTactics.evaluate(
+            input(
+                price = 21.20,
+                changePct = 2.2,
+                volumeRatio = 1.5,
+                resistance = 21.0,
+                score = 3,
+                totalCapital = 100_000.0,
+                availableCapital = 50_000.0,
+            ).copy(
+                trendAssessment = majorBottoming.copy(
+                    allowsOrdinaryBuy = true,
+                    allowsAddPosition = true,
+                    allowsTBuy = true,
+                    allowsTSell = true,
+                ),
+                highPosition = highPosition(
+                    HighPositionPhase.SECOND_WAVE_CONFIRMED,
+                    allowSecondWaveEntry = true,
+                ),
+            ),
+        )!!
+
+        assertEquals(IntradaySignalType.SECOND_WAVE, signal.type)
+        assertTrue(signal.body.contains("二波突破"))
+        assertTrue(signal.body.contains("止损"))
+    }
+
     @Test
     fun extendedHighPositionRolloverReducesBeforeSupportBreakButNotOnHighPositionAlone() {
         val base = input(price = 21.5, changePct = 0.5, volumeRatio = 1.5,
@@ -161,6 +304,24 @@ class IntradayTacticsTest {
         assertEquals(com.example.stockmonitor.analysis.MarketEnvironmentStatus.STRONG_SINGLE_DAY, interrupted.status)
     }
 
+    @Test
+    fun continuationEnvironmentIgnoresFixedFullDayAmountWhenSameTimeRatioIsStrong() {
+        val environment = IntradayTactics.marketEnvironment(
+            input(
+                predictedMarketTurnoverYi = 8_000.0,
+                marketTurnoverRatio = 1.4,
+                marketChangePct = 1.0,
+                marketIndexPrice = 3200.0,
+                marketIndexHighPrice = 3210.0,
+                industryBreadth = 0.72,
+                conceptBreadth = 0.68,
+            ),
+        )
+
+        assertTrue(environment.strong)
+        assertTrue(environment.summary.contains("同期相对成交额"))
+    }
+
     private fun input(
         price: Double = 20.0,
         changePct: Double = 0.0,
@@ -196,6 +357,8 @@ class IntradayTacticsTest {
         industryBreadth: Double? = null,
         conceptBreadth: Double? = null,
         recentMarketTurnoversYi: List<Double> = emptyList(),
+        marketTurnoverRatio: Double? = null,
+        impulse: ImpulseContext? = null,
     ) = IntradayTactics.Input(
         code = "sz002185",
         name = "华天科技",
@@ -233,6 +396,8 @@ class IntradayTacticsTest {
         industryBreadth = industryBreadth,
         conceptBreadth = conceptBreadth,
         recentMarketTurnoversYi = recentMarketTurnoversYi,
+        marketTurnoverRatio = marketTurnoverRatio,
+        impulse = impulse,
         holdingTContext = HoldingTContext("2026-10-15", 1000L, HoldingTTrend.RANGE, 1.0, 2.0,
             SwingTrend.UP, SwingTrend.UP),
         holdingTObservation = HoldingTObservation(
@@ -259,6 +424,7 @@ class IntradayTacticsTest {
                 resistance = 23.0,
                 quantity = 2_000.0,
                 predictedMarketTurnoverYi = 22_000.0,
+                marketTurnoverRatio = 1.4,
                 marketChangePct = 0.8,
                 sectorChangePct = 1.2,
                 dailyHighPrice = 21.90,
@@ -273,6 +439,51 @@ class IntradayTacticsTest {
         assertEquals(IntradaySignalType.T_HOLD, signal.type)
         assertTrue(signal.title.contains("强势环境"))
         assertTrue(signal.body.contains("暂缓做T"))
+    }
+
+    @Test
+    fun risingMa20TrendHoldKeepsObservationPositionInsteadOfSellingForProfit() {
+        val entry = EntrySetup(
+            type = EntrySetupType.NONE,
+            confirmed = false,
+            trendWeak = false,
+            priorHigh = null,
+            ma20SlopePct = 1.2,
+            volumeConfirmed = false,
+            marketFilter = MarketFilter.NEUTRAL,
+            stopPrice = 20.5,
+            reason = "MA20上行且回踩未破坏结构",
+        )
+        val signal = IntradayTactics.evaluate(
+            input(
+                price = 21.80,
+                changePct = 4.0,
+                volumeRatio = 1.5,
+                resistance = 23.0,
+                quantity = 2_000.0,
+                entrySetup = entry,
+                predictedMarketTurnoverYi = 22_000.0,
+                marketChangePct = 0.8,
+                sectorChangePct = 1.2,
+                dailyHighPrice = 21.90,
+                marketIndexPrice = 3200.0,
+                marketIndexHighPrice = 3210.0,
+                industryBreadth = 0.72,
+                conceptBreadth = 0.68,
+                recentMarketTurnoversYi = listOf(17_000.0, 18_000.0, 19_000.0),
+            ).copy(
+                holdingTContext = HoldingTContext(
+                    "2026-10-15", 1000L, HoldingTTrend.UP, 2.0, 2.0,
+                    SwingTrend.UP, SwingTrend.UP,
+                ),
+                holdingTObservation = HoldingTObservation(21.5, 21.8, 1.3, 0.0, true, false),
+            ),
+        )!!
+
+        assertEquals(IntradaySignalType.T_TREND_HOLD, signal.type)
+        assertTrue(signal.body.contains("MA20仍上行"))
+        assertTrue(signal.body.contains("保留观察仓等待二波"))
+        assertTrue(signal.body.contains("已有浮盈不是卖出理由"))
     }
 
     @Test
@@ -294,6 +505,7 @@ class IntradayTacticsTest {
                 resistance = 23.0,
                 quantity = 2_000.0,
                 predictedMarketTurnoverYi = 22_000.0,
+                marketTurnoverRatio = 1.1,
                 marketChangePct = 0.8,
                 sectorChangePct = 1.2,
                 dailyHighPrice = 19.00,
@@ -313,6 +525,7 @@ class IntradayTacticsTest {
                 resistance = 23.0,
                 quantity = 2_000.0,
                 predictedMarketTurnoverYi = 22_000.0,
+                marketTurnoverRatio = 1.1,
                 marketChangePct = 0.8,
                 sectorChangePct = 1.2,
                 dailyHighPrice = 21.90,
@@ -338,6 +551,7 @@ class IntradayTacticsTest {
                 resistance = 23.0,
                 quantity = 2_000.0,
                 predictedMarketTurnoverYi = 22_000.0,
+                marketTurnoverRatio = 1.4,
                 marketChangePct = 0.1,
                 sectorChangePct = 0.2,
                 dailyHighPrice = 21.90,
@@ -691,6 +905,7 @@ class IntradayTacticsTest {
                 resistance = 22.0,
                 quantity = 2_000.0,
                 predictedMarketTurnoverYi = 22_000.0,
+                marketTurnoverRatio = 1.4,
                 marketChangePct = 1.2,
                 marketIndexPrice = 3200.0,
                 marketIndexHighPrice = 3210.0,
@@ -1190,5 +1405,54 @@ class IntradayTacticsTest {
             IntradaySignalType.T_SELL,
             IntradayTactics.evaluate(base.copy(holdingTObservation = shallow, strongLeaderCount = 0))!!.type,
         )
+    }
+
+    @Test
+    fun adaptiveRhythmMakesStrongMarketWaitForDeeperRolloverThanWeakMarket() {
+        val strong = IntradayTactics.evaluate(
+            input(
+                price = 20.70,
+                changePct = 3.5,
+                volumeRatio = 1.5,
+                resistance = 22.0,
+                quantity = 2_000.0,
+                marketTurnoverRatio = 1.4,
+                marketChangePct = 0.8,
+                industryBreadth = 0.72,
+                conceptBreadth = 0.68,
+                impulse = com.example.stockmonitor.analysis.ImpulseContext(3, 0, 7.0),
+            ).copy(
+                holdingTContext = HoldingTContext(
+                    "2026-10-15", 1000L, HoldingTTrend.EXTENDED, 7.0, 1.0,
+                    SwingTrend.UP, SwingTrend.UP,
+                ),
+                holdingTObservation = HoldingTObservation(20.0, 21.5, 1.0, 0.7, rising = false, falling = true),
+            ),
+        )!!
+        val weak = IntradayTactics.evaluate(
+            input(
+                price = 20.70,
+                changePct = 3.5,
+                volumeRatio = 1.5,
+                resistance = 22.0,
+                quantity = 2_000.0,
+                marketTurnoverRatio = 0.7,
+                marketChangePct = -1.2,
+                industryBreadth = 0.35,
+                conceptBreadth = 0.30,
+                marketRegime = MarketRegime.WEAK,
+                impulse = com.example.stockmonitor.analysis.ImpulseContext(3, 0, 7.0),
+            ).copy(
+                holdingTContext = HoldingTContext(
+                    "2026-10-15", 1000L, HoldingTTrend.EXTENDED, 7.0, 1.0,
+                    SwingTrend.UP, SwingTrend.UP,
+                ),
+                holdingTObservation = HoldingTObservation(20.0, 21.5, 1.0, 1.1, rising = false, falling = true),
+            ),
+        )!!
+
+        assertEquals(IntradaySignalType.T_SELL_DEFERRED, strong.type)
+        assertTrue(strong.body.contains("自适应市场节奏"))
+        assertEquals(IntradaySignalType.T_SELL, weak.type)
     }
 }

@@ -112,6 +112,7 @@ class ToolsFragment : BaseFragment(R.layout.fragment_scroll) {
         val market: String,
         val result: AiAnalysisResult,
         val report: String,
+        val title: String,
     )
 
     /** 「试一次买卖点提醒」用的固定通知 id，和盘中自动提醒的 id 区间分开。 */
@@ -792,23 +793,30 @@ class ToolsFragment : BaseFragment(R.layout.fragment_scroll) {
                         )
                         val result = DeepSeekClient().analyze(input, tools)
                         val security = tools.resolvedSecurity
-                        val name = security?.name ?: "综合分析"
+                        val name = security?.name ?: keyword.take(24)
                         val code = security?.code.orEmpty()
-                        val market = security?.market ?: "未指定标的"
+                        val market = security?.market ?: when (result.analysisScope.lowercase()) {
+                            "sector" -> "行业/概念"
+                            "market" -> "市场"
+                            "strategy" -> "策略方法"
+                            else -> "一般研究"
+                        }
                         val asOf = TimeUtils.nowText()
+                        val title = AiAnalysisReport.title(result, name, code)
                         AiCard(
                             name = name,
                             code = code,
                             market = market,
                             result = result,
                             report = AiAnalysisReport.format(result, name, code, asOf),
+                            title = title,
                         )
                     }
                 }
                 payload.fold(
                     onSuccess = { card ->
                         ai = card
-                        ReportActivity.open(context, "🤖 ${card.name} AI 综合分析", card.report)
+                        ReportActivity.open(context, card.title, card.report)
                     },
                     onFailure = { error ->
                         Log.e(TAG, "AI 综合分析失败: $keyword", error)
@@ -824,19 +832,23 @@ class ToolsFragment : BaseFragment(R.layout.fragment_scroll) {
 
     private fun UiKit.Card.showAi(context: Context, card: AiCard) {
         addDivider()
-        addText("${card.name}｜${card.code}｜${card.market}", 12f, UiKit.color(context, R.color.text_secondary))
+        addText(
+            listOf(card.name, card.code, card.market).filter { it.isNotBlank() }.joinToString("｜"),
+            12f,
+            UiKit.color(context, R.color.text_secondary),
+        )
         addText("精要摘要", 12f, UiKit.color(context, R.color.brand_primary))
         addText("核心结论", 12f, UiKit.color(context, R.color.text_secondary))
         addText(card.result.answer, 15f)
-        addText("操作建议：${card.result.operationAdvice}", 14f, UiKit.color(context, R.color.brand_primary))
-        addText(
-            "主要风险：${card.result.risks.firstOrNull() ?: "暂未识别，仍需结合原始数据核对"}",
-            12f,
-            UiKit.color(context, R.color.risk_watch),
-        )
-        addText("可信度：${card.result.confidence}", 12f)
+        if (card.result.operationAdvice.isNotBlank()) {
+            addText("操作建议：${card.result.operationAdvice}", 14f, UiKit.color(context, R.color.brand_primary))
+        }
+        card.result.risks.firstOrNull()?.let {
+            addText("主要风险：$it", 12f, UiKit.color(context, R.color.risk_watch))
+        }
+        if (card.result.confidence.isNotBlank()) addText("可信度：${card.result.confidence}", 12f)
         add(button(context, "查看完整分析（可复制、分享）") {
-            ReportActivity.open(context, "🤖 ${card.name} AI 综合分析", card.report)
+            ReportActivity.open(context, card.title, card.report)
         })
     }
 

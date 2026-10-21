@@ -20,6 +20,8 @@ data class MarketEnvironmentQuality(
     val marketChangePct: Double?,
     val indexNearHigh: Boolean?,
     val reasons: List<String>,
+    val marketTurnoverRatio: Double? = null,
+    val marketTurnoverSource: MarketTurnoverSource? = null,
 ) {
     val strong: Boolean get() = status == MarketEnvironmentStatus.STRONG_SUSTAINED
     val cautious: Boolean get() = status == MarketEnvironmentStatus.STRONG_SINGLE_DAY
@@ -32,7 +34,85 @@ data class MarketEnvironmentQuality(
         const val MIN_SUSTAINED_DAYS = 3
         const val MIN_BREADTH = 0.60
         const val NEAR_INDEX_HIGH_PCT = 1.0
+        val STRONG_RELATIVE_TURNOVER: Double
+            get() = AdaptiveRhythmThresholds.COLD_START.strongTurnoverRatio
+        val CAUTIOUS_RELATIVE_TURNOVER: Double
+            get() = AdaptiveRhythmThresholds.COLD_START.neutralTurnoverRatio
 
+        /** 自适应决策口径：只接受同期相对量能；全天预估降级值保持中性。 */
+        fun evaluateAdaptive(
+            marketTurnoverRatio: Double?,
+            marketTurnoverSource: MarketTurnoverSource?,
+            marketChangePct: Double?,
+            marketPrice: Double? = null,
+            marketHighPrice: Double? = null,
+            industryBreadth: Double? = null,
+            conceptBreadth: Double? = null,
+            thresholds: AdaptiveRhythmThresholds = AdaptiveRhythmThresholds.COLD_START,
+        ): MarketEnvironmentQuality {
+            val ratio = marketTurnoverRatio?.takeIf { it.isFinite() && it > 0.0 }
+            val change = marketChangePct?.takeIf { it.isFinite() }
+            val industry = industryBreadth?.takeIf { it.isFinite() && it in 0.0..1.0 }
+            val concept = conceptBreadth?.takeIf { it.isFinite() && it in 0.0..1.0 }
+            val nearHigh = nearIndexHigh(marketPrice, marketHighPrice)
+            val reasons = listOfNotNull(
+                ratio?.let { "同期相对成交额${String.format(Locale.CHINA, "%.2f", it)}倍" },
+                if (ratio == null) "同期相对成交额暂缺" else null,
+                if (marketTurnoverSource == MarketTurnoverSource.FULL_DAY_FALLBACK) {
+                    "全天预估/历史全天量能仅为降级参考，只作中性判断"
+                } else {
+                    null
+                },
+                change?.let { "沪指${String.format(Locale.CHINA, "%+.2f%%", it)}" } ?: "沪指涨跌暂缺",
+                when (nearHigh) {
+                    true -> "指数接近日内高位"
+                    false -> "指数未能接近日内高位，存在滞涨或分歧"
+                    null -> "指数日内位置数据暂缺或异常"
+                },
+                industry?.let { "行业板块上涨占比${String.format(Locale.CHINA, "%.0f%%", it * 100)}" }
+                    ?: "行业板块宽度暂缺",
+                concept?.let { "概念板块上涨占比${String.format(Locale.CHINA, "%.0f%%", it * 100)}" }
+                    ?: "概念板块宽度暂缺",
+            )
+            val complete = ratio != null && change != null && industry != null && concept != null && nearHigh != null
+            val breadthStrong = industry != null && concept != null && minOf(industry, concept) >= MIN_BREADTH
+            val indexStrong = change != null && change >= 0.0 && nearHigh == true
+            val status = when {
+                !complete -> MarketEnvironmentStatus.UNKNOWN
+                marketTurnoverSource == MarketTurnoverSource.FULL_DAY_FALLBACK -> MarketEnvironmentStatus.NORMAL
+                ratio >= thresholds.strongTurnoverRatio && breadthStrong && indexStrong ->
+                    MarketEnvironmentStatus.STRONG_SUSTAINED
+                ratio >= thresholds.neutralTurnoverRatio && breadthStrong && indexStrong ->
+                    MarketEnvironmentStatus.STRONG_SINGLE_DAY
+                ratio >= thresholds.strongTurnoverRatio -> MarketEnvironmentStatus.DIVERGENCE
+                else -> MarketEnvironmentStatus.NORMAL
+            }
+            return MarketEnvironmentQuality(
+                status = status,
+                predictedTurnoverYi = null,
+                persistenceDays = null,
+                persistenceAverageYi = null,
+                industryBreadth = industry,
+                conceptBreadth = concept,
+                marketChangePct = change,
+                indexNearHigh = nearHigh,
+                reasons = reasons,
+                marketTurnoverRatio = ratio,
+                marketTurnoverSource = marketTurnoverSource,
+            )
+        }
+
+        private fun nearIndexHigh(marketPrice: Double?, marketHighPrice: Double?): Boolean? {
+            val price = marketPrice?.takeIf { it.isFinite() && it > 0 }
+            val high = marketHighPrice?.takeIf { it.isFinite() && it > 0 }
+            return if (price != null && high != null && price <= high) {
+                (high - price) / high < NEAR_INDEX_HIGH_PCT / 100.0
+            } else {
+                null
+            }
+        }
+
+        /** 历史完整日/全天预估展示口径，不用于强势延续门控。 */
         fun evaluate(
             predictedTurnoverYi: Double?,
             marketChangePct: Double?,
@@ -46,11 +126,7 @@ data class MarketEnvironmentQuality(
             val change = marketChangePct?.takeIf { it.isFinite() }
             val industry = industryBreadth?.takeIf { it.isFinite() && it in 0.0..1.0 }
             val concept = conceptBreadth?.takeIf { it.isFinite() && it in 0.0..1.0 }
-            val price = marketPrice?.takeIf { it.isFinite() && it > 0 }
-            val high = marketHighPrice?.takeIf { it.isFinite() && it > 0 }
-            val nearHigh = if (price != null && high != null && price <= high) {
-                (high - price) / high < NEAR_INDEX_HIGH_PCT / 100.0
-            } else null
+            val nearHigh = nearIndexHigh(marketPrice, marketHighPrice)
             val history = recentTurnoversYi.takeLast(5)
             val persistence = if (turnover == null) null else {
                 var consecutive = 0

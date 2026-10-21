@@ -73,6 +73,7 @@ object TrendEntryStrategy {
         currentHigh: Double? = null,
         currentLow: Double? = null,
         elapsedTradingMinutes: Int? = null,
+        ignoreMarketFilter: Boolean = false,
     ): EntrySetup {
         val bars = history.filter { it.close > 0 && it.high > 0 && it.low > 0 }
         if (bars.size < 30 || price <= 0) {
@@ -117,6 +118,7 @@ object TrendEntryStrategy {
             benchmark,
             atrOverride = atr,
             elapsedTradingMinutes = elapsedTradingMinutes,
+            ignoreMarketFilter = ignoreMarketFilter,
         )
     }
 
@@ -126,6 +128,7 @@ object TrendEntryStrategy {
         benchmark: List<DayBar>? = null,
         atrOverride: Double? = null,
         elapsedTradingMinutes: Int? = null,
+        ignoreMarketFilter: Boolean = false,
     ): EntrySetup {
         val bars = history.filter { it.close > 0 && it.high > 0 && it.low > 0 && it.volume >= 0 }
         if (bars.size < 30) {
@@ -174,9 +177,10 @@ object TrendEntryStrategy {
             pullback -> EntrySetupType.M20_PULLBACK
             else -> EntrySetupType.NONE
         }
+        val marketAllows = ignoreMarketFilter || marketFilter != MarketFilter.HEADWIND
         val confirmed = when (type) {
-            EntrySetupType.BREAKOUT -> marketFilter != MarketFilter.HEADWIND
-            EntrySetupType.M20_PULLBACK -> pullbackConfirmed && marketFilter != MarketFilter.HEADWIND
+            EntrySetupType.BREAKOUT -> marketAllows
+            EntrySetupType.M20_PULLBACK -> pullbackConfirmed && marketAllows
             else -> false
         }
         val canBuy = when (type) {

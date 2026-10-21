@@ -40,11 +40,29 @@ object Repo {
      */
     @Volatile
     var quotes: Map<String, Quote> = emptyMap()
+    @Volatile
+    var sectorsUpdatedAtMs: Long = 0L
+        private set
+
+    @Volatile
     var sectors: SectorData? = null
+        set(value) {
+            field = value
+            sectorsUpdatedAtMs = if (value == null) 0L else System.currentTimeMillis()
+        }
     var concepts: ConceptBoards? = null
 
     /** 概念板块汇总缓存，等价于 macOS 版的 _concept_summary_cache。 */
+    @Volatile
+    var conceptSummaryUpdatedAtMs: Long = 0L
+        private set
+
+    @Volatile
     var conceptSummary: ConceptSummary? = null
+        set(value) {
+            field = value
+            conceptSummaryUpdatedAtMs = if (value == null) 0L else System.currentTimeMillis()
+        }
     var limits: LimitData? = null
     var screenResult: ScreenResult = ScreenResult(emptyList(), emptyList())
 

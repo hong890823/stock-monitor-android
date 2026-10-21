@@ -7,6 +7,7 @@ import com.example.stockmonitor.core.DayBar
 import com.example.stockmonitor.core.Quote
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -51,6 +52,21 @@ class StockAnalysisReferenceTest {
         volume = 39_869_351.0,
         turnover = 728_209_800.0,
     )
+
+    @Test
+    fun reportIncludesSharedTrendAndHighPositionState() {
+        val result = StockAnalysis.analyze(bars(), "sh600089", "特变电工", liveQuote())
+
+        assertNotNull(result.trendAssessment)
+        assertNotNull(result.highPosition)
+        assertNotNull(result.impulse)
+        assertEquals(0, result.impulse!!.upDays)
+        assertEquals(1, result.impulse!!.downDays)
+        assertEquals(0.55229155, result.impulse!!.gain5Pct, 0.001)
+        val report = StockAnalysis.formatReport(result)
+        assertTrue(report.contains("趋势状态"))
+        assertTrue(report.contains("高位结构"))
+    }
 
     @Test
     fun `指标与评分与 Python 版一致（实时行情）`() {

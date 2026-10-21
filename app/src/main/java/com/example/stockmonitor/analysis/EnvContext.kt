@@ -19,6 +19,10 @@ data class EnvContext(
     val prev: RowSnapshot? = null,
     /** 北向、成交额和时点因素；只作证据补充，不单独改写信号。 */
     val marketRisk: MarketRiskContext? = null,
+    /** 当前上涨行业占比，0～1；缺失时自适应节奏保持未知，不猜市场宽度。 */
+    val industryBreadth: Double? = null,
+    /** 当前上涨概念占比，0～1；缺失时自适应节奏保持未知，不猜市场宽度。 */
+    val conceptBreadth: Double? = null,
 ) {
     /** 环境是否处于需要改写建议的收缩状态（大盘或板块任一塌陷）。 */
     val isCollapse: Boolean

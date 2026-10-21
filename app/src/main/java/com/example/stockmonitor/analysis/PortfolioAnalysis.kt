@@ -24,6 +24,7 @@ data class PositionResult(
     val support: Double,
     val resistance: Double,
     val ma20: Double,
+    val ma5: Double = 0.0,
     val entrySetup: EntrySetup,
     val suggestedQuantity: Double,
     val score: Int,
@@ -49,6 +50,12 @@ data class PositionResult(
     val sectorNote: String? = null,
     val exitDecision: HoldingExitDecision? = null,
     val notificationExitDecision: HoldingExitDecision? = null,
+    val trendAssessment: TrendAssessment? = null,
+    val boxRange: BoxRangeAssessment? = null,
+    val highPositionEvidence: HighPositionEvidence? = null,
+    val highPosition: HighPositionDecision? = null,
+    val rhythm: AdaptiveRhythmDecision? = null,
+    val impulse: ImpulseContext? = null,
 )
 
 object PortfolioAnalysis {
@@ -92,6 +99,58 @@ object PortfolioAnalysis {
         val breakout = technical.entrySetup.type == EntrySetupType.BREAKOUT && technical.entrySetup.confirmed
         val pullback = technical.entrySetup.type == EntrySetupType.M20_PULLBACK && technical.entrySetup.confirmed
         val trendWeak = technical.entrySetup.trendWeak
+        val structureEvidence = BreakoutRiskEvidence(
+            price = price,
+            dailyHighPrice = null,
+            breakoutReference = null,
+            changePct = changePct,
+            volumeRatio = technical.volumeRatio,
+            atrPct = technical.volatility.atrPct,
+            continuation = true,
+            priceLocation = technical.priceContext?.location,
+            ma5 = technical.ma5.takeIf { it.isFinite() && it > 0.0 },
+            ma20 = technical.ma20.takeIf { it.isFinite() && it > 0.0 },
+            biasFromMa5Pct = technical.ma5.takeIf { it.isFinite() && it > 0.0 }
+                ?.let { (price / it - 1.0) * 100.0 },
+        )
+        val structureRetained = technical.entrySetup.ma20SlopePct?.let { it.isFinite() && it > 0.0 } == true &&
+            !trendWeak &&
+            technical.trendAssessment?.riskOnly == false &&
+            technical.trendAssessment?.major != MajorTrend.DOWN &&
+            technical.highPosition?.riskPriority != true &&
+            !BreakoutRiskPolicy.riskLineBroken(structureEvidence)
+        val structureRiskLine = if (BreakoutRiskPolicy.useMa5Stop(structureEvidence)) "MA5" else "M20"
+        val structureRiskPrice = (if (structureRiskLine == "MA5") technical.ma5 else technical.ma20)
+            .takeIf { it.isFinite() && it > 0.0 }
+            ?.let { it * (1 - BreakoutRiskPolicy.LINE_BREAK_TOLERANCE_PCT / 100.0) }
+        val structureRiskText = structureRiskPrice?.let { "$structureRiskLine ${priceText(it)}" } ?: structureRiskLine
+        val recentHighs = technical.highPositionEvidence?.recentHighs.orEmpty()
+        val lowerHighs = recentHighs.size >= 3 &&
+            recentHighs.zipWithNext().all { (previous, current) -> current <= previous } &&
+            recentHighs.last() < recentHighs.first()
+        val volumeWithoutProgress = technical.volumeRatio?.let {
+            it >= VolumeRatio.EXPAND_THRESHOLD && abs(changePct) <= 1.0 &&
+                (technical.highPositionEvidence?.gain5Pct ?: 0.0) <= maxOf(1.0, (technical.volatility.atrPct ?: 0.0) * 0.5)
+        } == true
+        val rhythm = AdaptiveRhythmPolicy.evaluate(
+            AdaptiveRhythmEvidence(
+                marketTurnoverRatio = envContext.marketRisk?.turnover?.sameTimeRatio,
+                marketChangePct = envContext.market.changePct,
+                industryBreadth = envContext.industryBreadth,
+                conceptBreadth = envContext.conceptBreadth,
+                marketRegime = envContext.market.regime,
+                shortTermTrend = technical.trendAssessment?.shortTerm,
+                majorTrend = technical.trendAssessment?.major,
+                impulse = technical.impulse,
+                atrPct = technical.volatility.atrPct,
+                volumeRatio = technical.volumeRatio,
+                changePct = changePct,
+                biasFromMa5Pct = technical.ma5.takeIf { it.isFinite() && it > 0.0 }
+                    ?.let { (price / it - 1.0) * 100.0 },
+                lowerHighs = lowerHighs,
+                volumeWithoutProgress = volumeWithoutProgress,
+            ),
+        )
         val suggestedQuantity = TrendEntryStrategy.suggestedQuantity(
             price = price,
             stopPrice = technical.entrySetup.stopPrice,
@@ -145,10 +204,11 @@ object PortfolioAnalysis {
                 }
                 breakout && score >= 2 -> {
                     signal = "持有/止盈观察"
-                    val take = if (changePct >= 5.0) {
-                        "今天已经涨了 ${signedPct(changePct)}，冲高可以先减一部分落袋"
+                    val take = if (structureRetained) {
+                        "MA20仍上行，回踩未破坏结构，保留观察仓等待二波；已有浮盈不是卖出理由。" +
+                            "只有跌破 $structureRiskText 或出现高位派发、突破下杀等结构风险，才按风险减仓或退出"
                     } else {
-                        "若接下来冲到 $resistanceLabel 附近滞涨，再考虑分批止盈"
+                        "结构支撑不足，按破位和高位风险规则处理，不因已有浮盈直接卖出"
                     }
                     action = "$facts。突破确认，继续持有；$take。" + envNote(envContext, changePct)
                 }
@@ -160,18 +220,23 @@ object PortfolioAnalysis {
                         else -> "在区间中段"
                     }
                     val verdict = when {
+                        structureRetained ->
+                            "MA20仍上行，回踩未破坏结构，保留观察仓等待二波"
                         volumeSignal.tone == Tone.CAUTION && place == "贴着支撑" ->
                             "量价偏警示（${volumeSignal.label}），先别急着加，看能不能守住"
                         volumeSignal.tone == Tone.CAUTION ->
                             "量价偏警示（${volumeSignal.label}），不加仓"
-                        place == "贴着压力" && changePct >= 3.0 ->
-                            "贴着压力又涨得快，冲高可以先减一部分落袋"
                         place == "贴着支撑" -> "贴着支撑，不动——别在支撑位慌着卖"
                         else -> "不动"
                     }
                     val triggers = buildList {
-                        if (support > 0) add("跌破 ${priceText(support)} 再谈减")
-                        if (resistance > 0) add("站稳 ${priceText(resistance)} 再谈加")
+                        if (structureRetained) {
+                            add("已有浮盈不是卖出理由")
+                            add("跌破 $structureRiskText 或结构失效再谈减仓退出")
+                        } else {
+                            if (support > 0) add("跌破 ${priceText(support)} 再谈减")
+                            if (resistance > 0) add("站稳 ${priceText(resistance)} 再谈加")
+                        }
                     }
                     action = "$facts——位置$place，$verdict。" +
                         triggers.joinToString("；") + "。" + envNote(envContext, changePct)
@@ -231,6 +296,7 @@ object PortfolioAnalysis {
             support = support,
             resistance = resistance,
             ma20 = technical.ma20,
+            ma5 = technical.ma5,
             entrySetup = technical.entrySetup,
             suggestedQuantity = suggestedQuantity,
             score = score,
@@ -253,6 +319,12 @@ object PortfolioAnalysis {
                 volumeSignal = volumeSignal,
             ),
             sectorNote = sectorNoteOf(envContext.sector),
+            trendAssessment = technical.trendAssessment,
+            boxRange = technical.boxRange,
+            highPositionEvidence = technical.highPositionEvidence,
+            highPosition = technical.highPosition,
+            rhythm = rhythm,
+            impulse = technical.impulse,
         )
     }
 
@@ -559,7 +631,7 @@ object PortfolioAnalysis {
                         "$reason；先别加仓，查看最新财报或公告，不是让你马上卖出"
                     }
                     candidate.signal == "趋势转弱观察" -> "走势变弱，先别继续买，等价格稳住"
-                    candidate.signal == "持有/止盈观察" -> "如果上涨到压力位附近却涨不动，再考虑卖出一部分"
+                    candidate.signal == "持有/止盈观察" -> "结构未失效时保留观察仓等待二波，不因已有浮盈卖出"
                     else -> "先保持不动"
                 }
             }
@@ -627,6 +699,7 @@ object PortfolioAnalysis {
                 result.signal == "减仓风险" -> "broken"
                 result.signal == "趋势转弱观察" -> "weak"
                 result.signal == "持有/止盈观察" -> "profit"
+                result.action.contains("保留观察仓等待二波") -> "secondWaveHold"
                 result.code == swingPlan?.preferredCode -> "preferred"
                 else -> "hold"
             }
@@ -647,7 +720,8 @@ object PortfolioAnalysis {
             add("深套处理：${names(it)}深套不盲目补仓；机动仓做T需等反弹减出、回踩企稳后再评估接回，不保证降本或解套")
         }
         val positionParts = buildList {
-            groups["profit"]?.let { add("${names(it)}冲高到压力附近滞涨再考虑分批止盈，未触发不急卖") }
+            groups["secondWaveHold"]?.let { add("${names(it)}MA20仍上行且回踩未破坏结构，保留观察仓等待二波，不因已有浮盈卖出") }
+            groups["profit"]?.let { add("${names(it)}按逐股结构和风险线处理，不因已有浮盈直接卖出") }
             groups["hold"]?.let { add("${names(it)}以持有观察为主，暂不主动调仓") }
         }
         if (positionParts.isNotEmpty()) add("现有仓位：${positionParts.joinToString("；")}")
@@ -789,6 +863,9 @@ object PortfolioAnalysis {
             lines.add(
                 "${result.sectorNote ?: "板块归属暂缺"}｜入场：${swing?.status?.label ?: result.entrySetup.conciseText()}"
             )
+            result.rhythm?.let {
+                lines.add("市场节奏：${it.phase.label}｜${it.reason}")
+            }
             if (swing != null) {
                 lines.add("波段追加：${swing.action()}")
                 lines.add("依据：${swing.reason}")

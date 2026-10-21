@@ -1,8 +1,12 @@
 package com.example.stockmonitor.core
 
 import com.example.stockmonitor.analysis.FiveOneThreeHit
+import com.example.stockmonitor.analysis.BoxRangeAssessment
+import com.example.stockmonitor.analysis.BreakoutRiskDecision
 import com.example.stockmonitor.analysis.EntrySetup
+import com.example.stockmonitor.analysis.HighPositionDecision
 import com.example.stockmonitor.analysis.PriceContext
+import com.example.stockmonitor.analysis.TrendAssessment
 
 /** 实时行情，字段与 stock_menubar.get_stock_data 一致。 */
 data class Quote(
@@ -430,6 +434,7 @@ data class ObservationCandidate(
     val entryConfirmationRounds: Int = 0,
     val entryConfirmedAtMs: Long = 0L,
     val entryConfirmationVolume: Double = 0.0,
+    val breakoutRisk: BreakoutRiskDecision? = null,
 )
 
 data class ObservationSignal(
@@ -455,6 +460,10 @@ data class ObservationSignal(
     val evidence: ObservationEvidence = ObservationEvidence(),
     val evaluatedAtMs: Long = 0L,
     val quoteVolume: Double = 0.0,
+    val trendAssessment: TrendAssessment? = null,
+    val boxRange: BoxRangeAssessment? = null,
+    val highPosition: HighPositionDecision? = null,
+    val breakoutRisk: BreakoutRiskDecision? = null,
 )
 
 /**

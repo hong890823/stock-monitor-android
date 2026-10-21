@@ -19,10 +19,14 @@ data class SwingEvidence(
     val sectorRegime: MarketRegime?,
     val positionRisk: String? = null,
     val exitStage: HoldingExitStage? = null,
+    val trendAssessment: TrendAssessment? = null,
+    val boxRange: BoxRangeAssessment? = null,
+    val highPosition: HighPositionDecision? = null,
 )
 
 enum class SwingStatus(val label: String) {
-    READY("买点已确认"), WAIT("买点待确认"), T_ONLY("仅机动仓波段观察"), BLOCKED("暂不加仓"),
+    READY("买点已确认"), BOTTOM_TRIAL("筑底轻仓试错"), WAIT("买点待确认"),
+    T_ONLY("仅机动仓波段观察"), BLOCKED("暂不加仓"),
 }
 
 data class SwingDecision(
@@ -179,6 +183,35 @@ object PortfolioSwing {
         }
         input.positionRisk?.let { return base.copy(reason = it) }
         if (ObservationEligibility.isAtLimitUp(position.code, position.name, quote)) return base.copy(reason = "封板暂不参与，开板后重评")
+        val trendAssessment = input.trendAssessment
+        if (trendAssessment?.major == MajorTrend.DOWN || trendAssessment?.major == MajorTrend.MISSING) {
+            return base.copy(reason = trendAssessment.reason)
+        }
+        val boxRange = input.boxRange
+        if (boxRange != null && boxRange.state in setOf(
+                BoxRangeState.BOX_RANGE,
+                BoxRangeState.BREAKOUT_CANDIDATE,
+                BoxRangeState.BREAKDOWN_RISK,
+                BoxRangeState.BREAKDOWN_CONFIRMED,
+                BoxRangeState.MISSING,
+            )
+        ) {
+            return base.copy(reason = boxRange.summary)
+        }
+        if (input.highPosition?.riskPriority == true) {
+            return base.copy(reason = "高位派发风险，停止新增资金并优先风险处置")
+        }
+        if (input.highPosition?.phase in setOf(
+                HighPositionPhase.CONSOLIDATION,
+                HighPositionPhase.SECOND_WAVE_CANDIDATE,
+            )
+        ) {
+            return base.copy(reason = "高位整理或二波候选，等待突破确认，不新增资金")
+        }
+        val bottoming = trendAssessment?.major == MajorTrend.BOTTOMING
+        if (bottoming && trendAssessment.allowsBottomReversal != true) {
+            return base.copy(status = SwingStatus.WAIT, reason = "筑底证据尚未满足，不给试错资金")
+        }
         val cycles = input.cycles
         cycles.issue?.let { return base.copy(reason = it) }
         if (cycles.asOf != asOf || cycles.ma250 == null || !cycles.ma250.isFinite() || cycles.ma250 <= 0) {
@@ -192,8 +225,10 @@ object PortfolioSwing {
         if (market?.ma20Pct == null || !market.ma20Pct.isFinite()) return base.copy(reason = "大盘趋势数据不足")
         if (market.regime in setOf(MarketRegime.WEAK, MarketRegime.COLLAPSE) ||
             input.sectorRegime in setOf(MarketRegime.WEAK, MarketRegime.COLLAPSE)) return base.copy(reason = "大盘或板块偏弱，暂不加仓")
-        if (cycles.weekTrend != SwingTrend.UP || cycles.monthTrend !in setOf(SwingTrend.UP, SwingTrend.REPAIR) ||
-            quote.price < cycles.ma250) return base.copy(status = SwingStatus.WAIT, reason = "${cycles.summary()}，长中期趋势尚未配合")
+        if (!bottoming && (cycles.weekTrend != SwingTrend.UP ||
+                cycles.monthTrend !in setOf(SwingTrend.UP, SwingTrend.REPAIR) ||
+                quote.price < cycles.ma250)
+        ) return base.copy(status = SwingStatus.WAIT, reason = "${cycles.summary()}，长中期趋势尚未配合")
         val entry = input.entry
         if (entry.type != EntrySetupType.M20_PULLBACK || !entry.canBuy || !entry.confirmed ||
             !entry.volumeConfirmed || entry.trendWeak || entry.marketFilter == MarketFilter.HEADWIND) {
@@ -213,8 +248,9 @@ object PortfolioSwing {
             (target + MIN_REWARD_RISK * stop) / (MIN_REWARD_RISK + 1))
         if (quote.price !in low..high) return base.copy(status = SwingStatus.WAIT, reason = "现价已离开回踩参考区间，不追价")
         val score = 60 + (if (cycles.monthTrend == SwingTrend.UP) 20 else 10) + (rewardRisk.coerceAtMost(4.0) * 5).toInt()
-        return base.copy(status = SwingStatus.READY, score = score,
-            reason = "${cycles.summary()}；日线回踩条件通过，潜在盈亏比${money(rewardRisk)}倍" +
+        return base.copy(status = if (bottoming) SwingStatus.BOTTOM_TRIAL else SwingStatus.READY, score = score,
+            reason = (if (bottoming) "大趋势筑底，最多按初始仓位25%轻仓试错；" else "") +
+                "${cycles.summary()}；日线回踩条件通过，潜在盈亏比${money(rewardRisk)}倍" +
                 if (input.sectorRegime == null) "；板块趋势暂缺" else "",
             price = quote.price, entryLow = low, entryHigh = high, riskPrice = stop, target = target, rewardRisk = rewardRisk)
     }
@@ -223,13 +259,17 @@ object PortfolioSwing {
         val price = decision.price!!
         val availableCapital = portfolio.resolvedAvailableCapital()
         val headroom = portfolio.totalCapital * portfolio.maxPositionPct / 100 - position.quantity * price
-        val raw = minOf(
+        val limits = mutableListOf(
             (availableCapital - MIN_FEE).coerceAtLeast(0.0) / (price * (1 + FEE_RATE)),
             headroom / price,
             portfolio.totalCapital * portfolio.initialEntryPct / 100 / price,
             (portfolio.totalCapital * TrendEntryStrategy.RISK_PER_TRADE_PCT / 100 - MIN_FEE).coerceAtLeast(0.0) /
                 (price - decision.riskPrice!! + price * FEE_RATE),
         )
+        if (decision.status == SwingStatus.BOTTOM_TRIAL) {
+            limits += portfolio.totalCapital * portfolio.initialEntryPct * 0.25 / 100 / price
+        }
+        val raw = limits.minOrNull()!!
         val quantity = roundQuantity(position.code, raw)
         if (quantity <= 0) return decision.copy(reason = if (headroom <= 0) "单股仓位已到上限，不再追加" else
             "现金、仓位或风险余额不足最低申报数量，或市场暂不支持数量计算")

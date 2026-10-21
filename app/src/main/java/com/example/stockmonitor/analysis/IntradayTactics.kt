@@ -22,13 +22,35 @@ enum class IntradaySignalType(val label: String) {
     T_TREND_HOLD("趋势延续观察"),
     T_BUY("接回观察"),
     PULLBACK("回踩支撑"),
+    BOTTOM_REVERSAL("底部反转观察"),
+    HIGH_CONSOLIDATION("高位整理蓄势"),
+    SECOND_WAVE_CANDIDATE("二波候选·等待突破"),
+    SECOND_WAVE("二波突破确认"),
+    BREAKOUT_REVERSAL_RISK("突破延续下杀风险"),
+    TREND_WATCH("趋势条件待确认"),
     TIMEFRAME_WATCH("周期条件待确认");
 
-    val isRisk: Boolean get() = this in setOf(BREAK_SUPPORT, REDUCE_POSITION, HIGH_REDUCE_POSITION, EXIT_POSITION)
+    val isRisk: Boolean
+        get() = this in setOf(
+            BREAK_SUPPORT,
+            REDUCE_POSITION,
+            HIGH_REDUCE_POSITION,
+            EXIT_POSITION,
+            BREAKOUT_REVERSAL_RISK,
+        )
 
     /** 只有会直接形成买入、普通止盈/减仓或做T动作的信号需要15/30分钟确认。 */
     val requiresDualTimeframe: Boolean
-        get() = this in setOf(BREAKOUT, RECLAIM_SUPPORT, EXIT_WINDOW, T_SELL, T_BUY, PULLBACK)
+        get() = this in setOf(
+            BREAKOUT,
+            RECLAIM_SUPPORT,
+            EXIT_WINDOW,
+            T_SELL,
+            T_BUY,
+            PULLBACK,
+            BOTTOM_REVERSAL,
+            SECOND_WAVE,
+        )
 }
 
 /** 一条盘中提醒：标题进通知栏，正文带数量建议或大体操作。 */
@@ -53,8 +75,6 @@ object IntradayTactics {
 
     /** 做 T 建议减出的仓位比例。 */
     const val T_PART = 1.0 / 3.0
-
-    const val STRONG_TURNOVER_YI = MarketEnvironmentQuality.STRONG_TURNOVER_YI
 
     /** 建议数量按手取整。 */
     const val LOT = 100.0
@@ -128,6 +148,7 @@ object IntradayTactics {
         val entrySetup: EntrySetup? = null,
         val riskPerTradePct: Double = TrendEntryStrategy.RISK_PER_TRADE_PCT,
         val ma20: Double = 0.0,
+        val ma5: Double = 0.0,
         /** 最近一次基本面健康判断（按需补拉的缓存）；为空时破位文案不带基本面倾向。 */
         val fundamentalHealth: FundamentalHealth? = null,
         /** ATR%（波动率），用于把深套阈值按个股波动缩放；为空退回固定阈值。 */
@@ -174,12 +195,17 @@ object IntradayTactics {
         val industryBreadth: Double? = null,
         val conceptBreadth: Double? = null,
         val recentMarketTurnoversYi: List<Double> = emptyList(),
+        val marketTurnoverRatio: Double? = null,
+        val impulse: ImpulseContext? = null,
         val holdingTContext: HoldingTContext? = null,
         val holdingTObservation: HoldingTObservation? = null,
         val breakObservation: HoldingBreakObservation? = null,
         val openPrice: Double? = null,
         val previousClose: Double? = null,
         val priceContext: PriceContext? = null,
+        val trendAssessment: TrendAssessment? = null,
+        val boxRange: BoxRangeAssessment? = null,
+        val highPosition: HighPositionDecision? = null,
     ) {
         /** 大盘或板块任一塌陷。 */
         val collapse: Boolean
@@ -211,6 +237,67 @@ object IntradayTactics {
                 input.previousClose?.let { it.isFinite() && it >= support } == true,
         ))
         if (exitDecision != null) return breakSupport(input, support, exitDecision)
+        val breakoutRisk = BreakoutRiskPolicy.evaluate(
+            BreakoutRiskEvidence(
+                price = input.price,
+                dailyHighPrice = input.dailyHighPrice,
+                breakoutReference = input.entrySetup?.priorHigh?.takeIf { it.isFinite() && it > 0.0 }
+                    ?: input.resistance.takeIf { it.isFinite() && it > 0.0 },
+                changePct = input.changePct,
+                volumeRatio = input.volumeRatio,
+                atrPct = input.atrPct,
+                continuation = BreakoutRiskPolicy.continuation(
+                    entryType = input.entrySetup?.type,
+                    highPositionPhase = input.highPosition?.phase,
+                ),
+                priceLocation = input.priceContext?.location,
+                ma5 = input.ma5.takeIf { it > 0.0 },
+                ma20 = input.ma20.takeIf { it > 0.0 },
+                biasFromMa5Pct = input.ma5.takeIf { it > 0.0 }?.let { (input.price / it - 1.0) * 100.0 },
+            ),
+        )
+        if (breakoutRisk.risk) return breakoutReversalRisk(input, breakoutRisk)
+        if (input.highPosition?.riskPriority == true && holding) {
+            return highDistributionRisk(input, input.highPosition)
+        }
+        input.trendAssessment?.let { trend ->
+            if (trend.major == MajorTrend.MISSING) return trendWatch(input, trend)
+            if (trend.riskOnly) return null
+        }
+        val highPosition = input.highPosition
+        if (highPosition?.phase == HighPositionPhase.SECOND_WAVE_CONFIRMED &&
+            highPosition.allowSecondWaveEntry
+        ) {
+            return secondWave(input, highPosition)
+        }
+        if (highPosition?.phase == HighPositionPhase.SECOND_WAVE_CANDIDATE) {
+            return secondWaveCandidate(input, highPosition)
+        }
+        if (highPosition?.phase == HighPositionPhase.CONSOLIDATION && input.score >= 2) {
+            return highConsolidation(input, highPosition)
+        }
+        if (input.trendAssessment?.major == MajorTrend.BOTTOMING) {
+            val nearSupport = input.support > 0 &&
+                input.price >= input.support &&
+                input.price <= input.support * (1 + PULLBACK_TOLERANCE)
+            return if (input.trendAssessment.allowsBottomReversal &&
+                input.score >= 2 &&
+                !input.weakEnv &&
+                nearSupport
+            ) {
+                bottomReversal(input, input.trendAssessment)
+            } else {
+                null
+            }
+        }
+        val boxAllowsBuy = input.boxRange == null ||
+            input.boxRange.state in setOf(BoxRangeState.NOT_BOX, BoxRangeState.BREAKOUT_CONFIRMED)
+        val ordinaryAllowed = input.trendAssessment?.allowsOrdinaryBuy != false && boxAllowsBuy
+        val tBuyAllowed = input.trendAssessment?.allowsTBuy != false && boxAllowsBuy
+        val tSellAllowed = input.trendAssessment?.allowsTSell != false
+        val highAllowsNewBuy = highPosition == null ||
+            highPosition.phase == HighPositionPhase.NONE ||
+            highPosition.allowBuy
         if (input.volumeRatio?.isFinite() == false) return null
         val expanded = input.volumeRatio?.let { it >= VolumeRatio.EXPAND_THRESHOLD } == true
         val setup = input.entrySetup
@@ -236,16 +323,20 @@ object IntradayTactics {
         val red = input.fundamentalHealth?.level == HealthLevel.ALERT
         val context = input.holdingTContext
         val observation = input.holdingTObservation
+        val rhythm = adaptiveRhythm(input)
         val tReady = context != null && observation != null &&
             input.changePct.isFinite() && input.limitPct.isFinite() && input.limitPct > 0 &&
             abs(input.changePct) < input.limitPct - 0.2
         // 不用 context!!：tReady 为假时 context 可能是 null，这里在短路外求值。
-        val retreatNeed = context?.atrPct?.let { maxOf(0.5, it * 0.25) } ?: 0.5
-        val rollover = tReady && observation!!.falling && observation.retreatPct >= retreatNeed
+        val baseRetreatNeed = context?.atrPct?.let { maxOf(0.5, it * 0.25) } ?: 0.5
+        // 强节奏下浅回落先进入暂缓观察；弱节奏仍按基础阈值及时给做 T 提醒。
+        val rolloverNeed = baseRetreatNeed * if (rhythm.retreatFactor > 1.0) 0.5 else 1.0
+        val rollover = tReady && observation!!.falling && observation.retreatPct >= rolloverNeed
         val sectorHot = leadersStrong(input)
-        // 板块仍热时要求更深的回落才给减仓股数；不热时与 rollover 相同，行为不变。
+        // 市场节奏动态决定浅回落容忍度；板块龙头仍强时继续保留原来的额外缓冲。
+        val deepRetreatFactor = maxOf(rhythm.retreatFactor, if (sectorHot) DEEP_RETREAT_FACTOR else 1.0)
         val deepRollover = tReady && observation!!.falling &&
-            observation.retreatPct >= retreatNeed * if (sectorHot) DEEP_RETREAT_FACTOR else 1.0
+            observation.retreatPct >= baseRetreatNeed * deepRetreatFactor
         val rally = input.changePct >= tThreshold(input) ||
             (context?.trend == HoldingTTrend.EXTENDED && input.changePct > 0 && atResistance(input))
         return when {
@@ -259,34 +350,114 @@ object IntradayTactics {
                 input.price >= input.resistance * (1 - EXIT_NEAR_PCT) &&
                 input.price <= input.resistance * (1 + EXIT_NEAR_PCT) ->
                 exitWindow(input)
-            breakout && !rollover ->
+            ordinaryAllowed && breakout && !rollover ->
                 breakout(input, holding)
-            holding && tReady && rally && !rollover && !input.weakEnv && !red &&
+            tSellAllowed && holding && tReady && rally && !rollover && !input.weakEnv && !red &&
                 context!!.strongDirection && stockNearHigh(input) -> tTrendHold(input)
-            holding && tReady && rally && !rollover && !input.weakEnv && !red &&
+            tSellAllowed && holding && tReady && rally && !rollover && !input.weakEnv && !red &&
                 (expanded || atResistance(input)) && strongContinuation(input, expanded) ->
                 tHold(input)
-            holding && tReady && rally && !rollover && !input.weakEnv && !red &&
+            tSellAllowed && holding && tReady && rally && !rollover && !input.weakEnv && !red &&
                 (expanded || atResistance(input)) && cautiousContinuation(input, expanded) ->
                 tHoldCaution(input)
             // 板块龙头仍强：冲高后的首次回落先不给减仓股数，龙头强势途中下车容易卖飞。
-            holding && rollover && !deepRollover && sectorHot && rally &&
+            tSellAllowed && holding && rollover && !deepRollover && sectorHot && rally &&
+                (expanded || atResistance(input)) -> tSellDeferred(input, expanded)
+            tSellAllowed && holding && rollover && !deepRollover && rhythm.retreatFactor > 1.0 && rally &&
                 (expanded || atResistance(input)) -> tSellDeferred(input, expanded)
             // 回落真加深了（或板块无涨停）照样给做T股数，不静音。
-            holding && deepRollover && rally &&
+            tSellAllowed && holding && deepRollover && rally &&
                 (expanded || atResistance(input)) -> tSell(input, expanded)
             // 买入侧：转弱就别接回，塌陷直接不提——系统性下跌里接回是接飞刀。
-            holding && input.changePct <= -tThreshold(input) &&
+            tBuyAllowed && highAllowsNewBuy && holding && input.changePct <= -tThreshold(input) &&
                 input.support > 0 && input.price >= input.support &&
                 input.price <= input.support * (1 + PULLBACK_TOLERANCE) && confirmedTRebound(input) ->
                 tBuy(input)
-            !holding && pullback && input.score >= 2 && !input.weakEnv ->
+            ordinaryAllowed && highAllowsNewBuy && !holding && pullback &&
+                input.score >= 2 && !input.weakEnv ->
                 pullback(input)
-            setup == null && !holding && input.support > 0 && input.score >= 2 &&
+            ordinaryAllowed && highAllowsNewBuy && setup == null && !holding &&
+                input.support > 0 && input.score >= 2 &&
                 input.price >= input.support &&
                 input.price <= input.support * (1 + PULLBACK_TOLERANCE) && !input.weakEnv -> pullback(input)
             else -> null
         }
+    }
+
+    private fun trendWatch(input: Input, trend: TrendAssessment): IntradaySignal = IntradaySignal(
+        IntradaySignalType.TREND_WATCH,
+        "👀 ${input.name}·趋势条件待确认",
+        "${trend.summary}；${trend.reason}。当前不执行买入、接回或做T，风险卖出仍按15分钟风险信号即时提醒。",
+    )
+
+    private fun highDistributionRisk(
+        input: Input,
+        decision: HighPositionDecision,
+    ): IntradaySignal = IntradaySignal(
+        IntradaySignalType.HIGH_REDUCE_POSITION,
+        "⚠️ ${input.name}·高位派发风险",
+        "现价 ${price(input.price)}；${decision.reason}。停止买入和接回，持仓优先减仓或退出；" +
+            "若跌破 ${price(input.support)}，按破位风险继续升级。",
+    )
+
+    private fun breakoutReversalRisk(
+        input: Input,
+        decision: BreakoutRiskDecision,
+    ): IntradaySignal = IntradaySignal(
+        IntradaySignalType.BREAKOUT_REVERSAL_RISK,
+        "⚠️ ${input.name}·突破延续下杀风险",
+        "${decision.reason}；持仓优先减仓或退出，未持仓禁止追买，暂停接回和做T。",
+    )
+
+    private fun bottomReversal(input: Input, trend: TrendAssessment): IntradaySignal {
+        val fullEntry = entryQuantity(input)
+        val trialEntry = floor(fullEntry * 0.25 / LOT) * LOT
+        val quantityText = if (trialEntry > 0) "可观察试错约 ${qty(trialEntry)} 股" else "数量需按25%初始仓位重新核算"
+        return IntradaySignal(
+            IntradaySignalType.BOTTOM_REVERSAL,
+            "🌱 ${input.name}·底部反转观察",
+            "现价 ${price(input.price)}；${trend.summary}。$quantityText，最多按初始仓位25%轻仓试错，" +
+                "禁止正常加仓和做T；重新跌破 ${price(input.support)}则筑底窗口失效。${sectorBuyNote(input)}",
+        )
+    }
+
+    private fun highConsolidation(
+        input: Input,
+        decision: HighPositionDecision,
+    ): IntradaySignal = IntradaySignal(
+        IntradaySignalType.HIGH_CONSOLIDATION,
+        "📊 ${input.name}·高位整理蓄势",
+        "现价 ${price(input.price)}；${decision.reason}。只保留底仓或继续观察，未突破并确认前不买入、不接回。",
+    )
+
+    private fun secondWaveCandidate(
+        input: Input,
+        decision: HighPositionDecision,
+    ): IntradaySignal = IntradaySignal(
+        IntradaySignalType.SECOND_WAVE_CANDIDATE,
+        "📈 ${input.name}·二波候选",
+        "现价 ${price(input.price)}；${decision.reason}。等待突破确认：突破 ${price(input.resistance)} 并获得量能确认，" +
+            "当前不执行买入、接回或做T。",
+    )
+
+    private fun secondWave(input: Input, decision: HighPositionDecision): IntradaySignal {
+        val stop = input.entrySetup?.stopPrice ?: input.support.takeIf { it > 0 }
+        val stopText = stop?.let { "止损参考 ${price(it)}" } ?: "止损参考暂缺"
+        val action = if (input.quantity > 0) {
+            "持仓可继续持有底仓，不追高加仓；跌破 ${price(stop ?: input.support)}则二波结构失效。"
+        } else {
+            val entry = entryQuantity(input)
+            if (entry > 0) {
+                "可按风险试仓约 ${qty(entry)} 股，不追高加仓。"
+            } else {
+                "按初始仓位重新核算，不追高加仓。"
+            }
+        }
+        return IntradaySignal(
+            IntradaySignalType.SECOND_WAVE,
+            "🚀 ${input.name}·二波突破确认",
+            "现价 ${price(input.price)}；${decision.reason}。$action$stopText。",
+        )
     }
 
     /** 做 T 的当日涨跌幅阈值（百分数）。 */
@@ -304,15 +475,59 @@ object IntradayTactics {
             abs(input.changePct) < input.limitPct - 0.2
     }
 
-    private fun marketEnvironment(input: Input): MarketEnvironmentQuality = MarketEnvironmentQuality.evaluate(
-        predictedTurnoverYi = input.predictedMarketTurnoverYi,
+    internal fun marketEnvironment(input: Input): MarketEnvironmentQuality {
+        val fallbackTurnover = MarketTurnoverFallbackPolicy.evaluate(
+            predictedTurnoverYi = input.predictedMarketTurnoverYi,
+            recentTurnoversYi = input.recentMarketTurnoversYi,
+        )
+        val source = when {
+            input.marketTurnoverRatio?.let { it.isFinite() && it > 0.0 } == true ->
+                MarketTurnoverSource.SAME_TIME
+            fallbackTurnover != null -> fallbackTurnover.source
+            else -> null
+        }
+        return MarketEnvironmentQuality.evaluateAdaptive(
+        marketTurnoverRatio = input.marketTurnoverRatio ?: fallbackTurnover?.ratio,
+        marketTurnoverSource = source,
         marketChangePct = input.marketChangePct,
         marketPrice = input.marketIndexPrice,
         marketHighPrice = input.marketIndexHighPrice,
         industryBreadth = input.industryBreadth,
         conceptBreadth = input.conceptBreadth,
-        recentTurnoversYi = input.recentMarketTurnoversYi,
-    )
+        )
+    }
+
+    private fun adaptiveRhythm(input: Input): AdaptiveRhythmDecision {
+        val fallbackTurnover = MarketTurnoverFallbackPolicy.evaluate(
+            predictedTurnoverYi = input.predictedMarketTurnoverYi,
+            recentTurnoversYi = input.recentMarketTurnoversYi,
+        )
+        val turnoverSource = when {
+            input.marketTurnoverRatio?.let { it.isFinite() && it > 0.0 } == true ->
+                MarketTurnoverSource.SAME_TIME
+            fallbackTurnover != null -> fallbackTurnover.source
+            else -> null
+        }
+        val relativeTurnover = input.marketTurnoverRatio ?: fallbackTurnover?.ratio
+        return AdaptiveRhythmPolicy.evaluate(
+            AdaptiveRhythmEvidence(
+                marketTurnoverRatio = relativeTurnover,
+                marketTurnoverSource = turnoverSource,
+                marketChangePct = input.marketChangePct,
+                industryBreadth = input.industryBreadth,
+                conceptBreadth = input.conceptBreadth,
+                marketRegime = input.marketRegime,
+                shortTermTrend = input.trendAssessment?.shortTerm,
+                majorTrend = input.trendAssessment?.major,
+                impulse = input.impulse,
+                atrPct = input.atrPct,
+                volumeRatio = input.volumeRatio,
+                changePct = input.changePct,
+                biasFromMa5Pct = input.ma5.takeIf { it.isFinite() && it > 0.0 }
+                    ?.let { (input.price / it - 1.0) * 100.0 },
+            ),
+        )
+    }
 
     private fun strongContinuation(input: Input, expanded: Boolean): Boolean =
         expanded && input.sectorChangePct?.let { it.isFinite() && it >= 0.0 } == true &&
@@ -438,8 +653,13 @@ object IntradayTactics {
         val reason = if (expanded) "放量冲高后出现连续回落" else "接近压力 ${price(input.resistance)} 后出现连续回落"
         val names = input.strongLeaderNames.filter { it.isNotBlank() }.take(MAX_STRONG_LEADER_NAMES)
             .joinToString("、")
-        val limitText = "板块状态参考，非买卖指令：同板块龙头 ${names.ifBlank { "${input.strongLeaderCount} 只" }} " +
-            "仍强（封板或炸板守住高位线），龙头强势途中做T容易被震下车"
+        val leaderContext = leadersStrong(input)
+        val limitText = if (leaderContext) {
+            "板块状态参考，非买卖指令：同板块龙头 ${names.ifBlank { "${input.strongLeaderCount} 只" }} " +
+                "仍强（封板或炸板守住高位线），龙头强势途中做T容易被震下车"
+        } else {
+            "自适应市场节奏：${adaptiveRhythm(input).reason}，浅回落先观察，不把上涨第几天直接当卖点"
+        }
         val action = "暂缓减仓，保留底仓；" +
             (deepPrice?.let { "回落加深到 ${price(it)} 附近" } ?: "回落继续加深") +
             "，或龙头转弱后再评估机动仓，不因到价直接卖出。"
@@ -473,8 +693,10 @@ object IntradayTactics {
     private fun tTrendHold(input: Input): IntradaySignal = IntradaySignal(
         IntradaySignalType.T_TREND_HOLD,
         "${input.name}·趋势延续观察",
-        "${input.holdingTContext?.summary()}；现价${price(input.price)}仍接近日内高位，" +
-            "尚无连续回落证据。暂缓冲高做T，保留底仓，不追高加仓；遇阻回落后再评估机动仓。",
+        "${input.holdingTContext?.summary()}；自适应市场节奏：${adaptiveRhythm(input).reason}；" +
+            "MA20仍上行，回踩未破坏结构，保留观察仓等待二波；" +
+            "已有浮盈不是卖出理由。现价${price(input.price)}仍接近日内高位，暂缓冲高做T，不追高加仓；" +
+            "只有趋势或关键结构失效才按风险减仓或退出。",
     )
 
     private fun tHold(input: Input): IntradaySignal {

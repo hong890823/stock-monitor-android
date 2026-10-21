@@ -9,6 +9,8 @@ import com.example.stockmonitor.analysis.EntrySetupType
 import com.example.stockmonitor.analysis.EnvContext
 import com.example.stockmonitor.analysis.FundamentalHealth
 import com.example.stockmonitor.analysis.HealthLevel
+import com.example.stockmonitor.analysis.HighPositionDecision
+import com.example.stockmonitor.analysis.HighPositionPhase
 import com.example.stockmonitor.analysis.KdjValues
 import com.example.stockmonitor.analysis.MacdValues
 import com.example.stockmonitor.analysis.MarketFilter
@@ -16,14 +18,17 @@ import com.example.stockmonitor.analysis.MarketRegime
 import com.example.stockmonitor.analysis.MarketState
 import com.example.stockmonitor.analysis.MarketRiskContext
 import com.example.stockmonitor.analysis.MarketTimingContext
+import com.example.stockmonitor.analysis.MajorTrend
 import com.example.stockmonitor.analysis.NorthboundFlowSummary
 import com.example.stockmonitor.analysis.OpeningStructure
 import com.example.stockmonitor.analysis.PortfolioAnalysis
 import com.example.stockmonitor.analysis.SectorContext
 import com.example.stockmonitor.analysis.StrongContinuationEvent
+import com.example.stockmonitor.analysis.ShortTermTrend
 import com.example.stockmonitor.analysis.TechnicalResult
 import com.example.stockmonitor.analysis.TurnoverContext
 import com.example.stockmonitor.analysis.TrendStrength
+import com.example.stockmonitor.analysis.TrendAssessment
 import com.example.stockmonitor.analysis.Volatility
 import com.example.stockmonitor.core.Portfolio
 import com.example.stockmonitor.core.Position
@@ -237,6 +242,78 @@ class PortfolioAnalysisTest {
     }
 
     @Test
+    fun risingMa20IntactPullbackKeepsObservationPositionInsteadOfSellingForProfit() {
+        val entry = EntrySetup(
+            type = EntrySetupType.NONE,
+            confirmed = false,
+            trendWeak = false,
+            priorHigh = null,
+            ma20SlopePct = 1.2,
+            volumeConfirmed = false,
+            marketFilter = MarketFilter.NEUTRAL,
+            stopPrice = 29.5,
+            reason = "MA20上行且回踩未破坏结构",
+        )
+        val assessment = TrendAssessment(
+            shortTerm = ShortTermTrend.UP,
+            major = MajorTrend.UP,
+            reason = "短中期趋势向上",
+            allowsOrdinaryBuy = true,
+            allowsAddPosition = true,
+            allowsTBuy = true,
+            allowsTSell = true,
+            allowsBottomReversal = false,
+            riskOnly = false,
+        )
+        val technical = technical(price = 31.0, support = 30.0, trendWeak = false).copy(
+            priceChange = 3.5,
+            ma5 = 30.8,
+            ma20 = 30.0,
+            entrySetup = entry,
+            trendAssessment = assessment,
+            score = 3,
+        )
+
+        val result = PortfolioAnalysis.evaluate(
+            position = Position("sh600522", "中天科技", 500.0, 28.0),
+            technical = technical,
+            live = null,
+            portfolio = portfolio(),
+        )
+
+        assertEquals("持有观察", result.signal)
+        assertTrue(result.action.contains("MA20仍上行"))
+        assertTrue(result.action.contains("保留观察仓等待二波"))
+        assertTrue(result.action.contains("已有浮盈不是卖出理由"))
+        val advice = PortfolioAnalysis.overallAdvice(listOf(result)).joinToString("\n")
+        assertTrue(advice.contains("保留观察仓等待二波"))
+        assertFalse(advice.contains("冲高到压力附近滞涨再考虑分批止盈"))
+    }
+
+    @Test
+    fun positionReportCarriesAdaptiveRhythmAndUnknownWhenMarketBreadthIsMissing() {
+        val result = evaluate(price = 31.0, support = 30.0, cost = 28.0, trendWeak = false).copy(
+            entrySetup = EntrySetup(
+                type = EntrySetupType.NONE,
+                confirmed = false,
+                trendWeak = false,
+                priorHigh = null,
+                ma20SlopePct = 1.0,
+                volumeConfirmed = false,
+                marketFilter = MarketFilter.NEUTRAL,
+                stopPrice = 29.5,
+                reason = "结构完整",
+            ),
+        )
+
+        assertEquals(
+            com.example.stockmonitor.analysis.AdaptiveRhythmPhase.UNKNOWN,
+            result.rhythm?.phase,
+        )
+        assertTrue(PortfolioAnalysis.formatReport(listOf(result), "2026-10-15 10:00").contains("市场节奏"))
+    }
+
+    @Test
     fun swingRecommendationPrecedesDetailsAndDoesNotAlsoSayHoldStill() {
         val result = evaluate(price = 31.0, support = 30.0, cost = 30.0, trendWeak = false)
         val row = com.example.stockmonitor.analysis.SwingDecision(result.code, result.name,
@@ -433,6 +510,41 @@ class PortfolioAnalysisTest {
         envContext = env,
         breakObservation = breakObservation,
     )
+
+    @Test
+    fun positionResultCarriesSharedTrendAndHighPositionState() {
+        val trend = TrendAssessment(
+            shortTerm = ShortTermTrend.UP,
+            major = MajorTrend.UP,
+            reason = "测试趋势向上",
+            allowsOrdinaryBuy = true,
+            allowsAddPosition = true,
+            allowsTBuy = true,
+            allowsTSell = true,
+            allowsBottomReversal = false,
+            riskOnly = false,
+        )
+        val highPosition = HighPositionDecision(
+            phase = HighPositionPhase.CONSOLIDATION,
+            reason = "测试高位整理",
+            allowBuy = false,
+            allowSecondWaveEntry = false,
+            allowHoldBase = true,
+            riskPriority = false,
+        )
+        val result = PortfolioAnalysis.evaluate(
+            position = Position("sh600522", "中天科技", 500.0, 45.0),
+            technical = technical(price = 30.0, support = 30.5).copy(
+                trendAssessment = trend,
+                highPosition = highPosition,
+            ),
+            live = null,
+            portfolio = portfolio(),
+        )
+
+        assertEquals(trend, result.trendAssessment)
+        assertEquals(highPosition, result.highPosition)
+    }
 
     @Test
     fun deepLossBrokenSupportShowsOnePrimaryAction() {

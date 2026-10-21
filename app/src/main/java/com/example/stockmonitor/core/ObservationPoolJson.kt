@@ -1,5 +1,6 @@
 package com.example.stockmonitor.core
 
+import com.example.stockmonitor.analysis.BreakoutRiskDecision
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -27,6 +28,12 @@ object ObservationPoolJson {
                     put("entry_confirmation_rounds", item.entryConfirmationRounds)
                     put("entry_confirmed_at_ms", item.entryConfirmedAtMs)
                     put("entry_confirmation_volume", item.entryConfirmationVolume)
+                    item.breakoutRisk?.let { risk ->
+                        put("breakout_risk", JSONObject().apply {
+                            put("risk", risk.risk)
+                            put("reason", risk.reason)
+                        })
+                    }
                     ObservationEvidenceJson.put(this, "supporting", item.evidence.supporting)
                     ObservationEvidenceJson.put(this, "counter", item.evidence.counter)
                     ObservationEvidenceJson.put(this, "missing", item.evidence.missing)
@@ -69,6 +76,12 @@ object ObservationPoolJson {
                     entryConfirmationRounds = item.optInt("entry_confirmation_rounds", 0),
                     entryConfirmedAtMs = item.optLong("entry_confirmed_at_ms", 0L),
                     entryConfirmationVolume = item.optDouble("entry_confirmation_volume", 0.0),
+                    breakoutRisk = item.optJSONObject("breakout_risk")?.let { risk ->
+                        BreakoutRiskDecision(
+                            risk = risk.optBoolean("risk", false),
+                            reason = risk.optString("reason"),
+                        )
+                    },
                 )
             }.filter { it.code.isNotBlank() }.toMutableList()
         }.getOrDefault(mutableListOf())
