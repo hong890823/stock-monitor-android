@@ -32,6 +32,8 @@ import com.example.stockmonitor.analysis.MarketAlertEngine
 import com.example.stockmonitor.analysis.MarketBreadthFreshnessPolicy
 import com.example.stockmonitor.analysis.MarketBreadthSnapshot
 import com.example.stockmonitor.analysis.MarketEnvironmentQuality
+import com.example.stockmonitor.analysis.MarketTurnoverFallbackPolicy
+import com.example.stockmonitor.analysis.MarketTurnoverSource
 import com.example.stockmonitor.analysis.MarketRegime
 import com.example.stockmonitor.analysis.MarketRiskContext
 import com.example.stockmonitor.analysis.MarketState
@@ -1287,15 +1289,24 @@ class MonitorService : Service() {
             signalAlertLastAt[key] = now
             if (!signal.type.isRisk) signalAlertCount[position.code] = fired + 1
             if (signal.type == IntradaySignalType.T_HOLD || signal.type == IntradaySignalType.T_HOLD_CAUTION) {
+                val fallbackTurnover = MarketTurnoverFallbackPolicy.evaluate(
+                    predictedTurnoverYi = turnoverSnapshot?.predictedFullDay?.div(100_000_000.0),
+                    recentTurnoversYi = recentTurnovers,
+                )
+                val environmentSource = when {
+                    adaptiveMarketTurnoverRatio != null -> MarketTurnoverSource.SAME_TIME
+                    fallbackTurnover != null -> fallbackTurnover.source
+                    else -> null
+                }
                 val environment =
-                    MarketEnvironmentQuality.evaluate(
-                        predictedTurnoverYi = turnoverSnapshot?.predictedFullDay?.div(100_000_000.0),
+                    MarketEnvironmentQuality.evaluateAdaptive(
+                        marketTurnoverRatio = adaptiveMarketTurnoverRatio ?: fallbackTurnover?.ratio,
+                        marketTurnoverSource = environmentSource,
                         marketChangePct = currentQuotes["sh000001"]?.changePct,
                         marketPrice = currentQuotes["sh000001"]?.price,
                         marketHighPrice = currentQuotes["sh000001"]?.high,
                         industryBreadth = industryBreadth,
                         conceptBreadth = conceptBreadth,
-                        recentTurnoversYi = recentTurnovers,
                     )
                 recordStrongContinuationEvent(
                     position = position,
@@ -2244,13 +2255,28 @@ class MonitorService : Service() {
                     swingPlan = swingPlan,
                     strongContinuationEvents = Repo.strongContinuationEvents.filter { it.date == TimeUtils.todayText() },
                     marketEnvironment =
-                        MarketEnvironmentQuality.evaluate(
-                            predictedTurnoverYi = Repo.turnoverSnapshot?.predictedFullDay?.div(100_000_000.0),
-                            marketChangePct = Repo.quotes["sh000001"]?.changePct,
-                            marketPrice = Repo.quotes["sh000001"]?.price,
-                            marketHighPrice = Repo.quotes["sh000001"]?.high,
-                            recentTurnoversYi = turnoverTracker?.recentFullDayTurnoversYi(TimeUtils.todayText()).orEmpty(),
-                        ),
+                        run {
+                            val recent = turnoverTracker?.recentFullDayTurnoversYi(TimeUtils.todayText()).orEmpty()
+                            val fallbackTurnover = MarketTurnoverFallbackPolicy.evaluate(
+                                predictedTurnoverYi = Repo.turnoverSnapshot?.predictedFullDay?.div(100_000_000.0),
+                                recentTurnoversYi = recent,
+                            )
+                            val ratio = Repo.marketRiskContext?.turnover?.sameTimeRatio
+                            val source = when {
+                                ratio != null -> MarketTurnoverSource.SAME_TIME
+                                fallbackTurnover != null -> fallbackTurnover.source
+                                else -> null
+                            }
+                            MarketEnvironmentQuality.evaluateAdaptive(
+                                marketTurnoverRatio = ratio ?: fallbackTurnover?.ratio,
+                                marketTurnoverSource = source,
+                                marketChangePct = Repo.quotes["sh000001"]?.changePct,
+                                marketPrice = Repo.quotes["sh000001"]?.price,
+                                marketHighPrice = Repo.quotes["sh000001"]?.high,
+                                industryBreadth = marketBreadth().first,
+                                conceptBreadth = marketBreadth().second,
+                            )
+                        },
                 )
             Repo.portfolioReport = report
             store.lastPortfolioReport = report

@@ -29,6 +29,8 @@ object MarketSummary {
         val amounts: Map<String, Double>? = null,
         val predictedTurnoverYi: Double? = null,
         val recentTurnoversYi: List<Double> = emptyList(),
+        val marketTurnoverRatio: Double? = null,
+        val marketTurnoverSource: MarketTurnoverSource? = null,
     )
 
     fun hasFreshIndexQuotes(quotes: Map<String, Quote>, today: String): Boolean =
@@ -449,11 +451,11 @@ object MarketSummary {
         // ⑤ 一句话结论：与正文第八节的核心结论同一条口径，别在两处给出两个判断
         val environment = environmentQuality(inputs)
         val conclusion = if (environment.status == MarketEnvironmentStatus.DIVERGENCE) {
-            "成交额较高但指数或板块扩散不匹配，按放量分歧看待，不据此判断趋势延续。"
+            "同期相对量能较高但指数或板块扩散不匹配，按放量分歧看待，不据此判断趋势延续。"
         } else if (environment.status == MarketEnvironmentStatus.STRONG_SINGLE_DAY) {
-            "量能、指数和板块扩散暂时同向，但连续性证据尚不足，待后续交易日确认。"
+            "同期相对量能、指数和板块扩散暂时同向，但连续性证据尚不足，待后续交易日确认。"
         } else if (environment.status == MarketEnvironmentStatus.STRONG_SUSTAINED) {
-            "近期高成交额与指数、板块扩散暂时同向，连续性含今日预估，仍需收盘确认，不代表个股必涨。"
+            "同期相对量能与指数、板块扩散暂时同向，仍需收盘确认，不代表个股必涨。"
         } else if (environment.status == MarketEnvironmentStatus.UNKNOWN && inputs.predictedTurnoverYi != null) {
             "环境证据不足，不把缺数据解释成放量分歧或强势延续。"
         } else if (conTotal <= 0) {
@@ -480,14 +482,24 @@ object MarketSummary {
             (if (it.sectors.isNotEmpty()) it.sectors.count { sector -> sector.change > 0 } else it.rising).toDouble() / conceptTotal
         }
         val index = inputs.quotes["sh000001"]
-        return MarketEnvironmentQuality.evaluate(
+        val fallbackTurnover = MarketTurnoverFallbackPolicy.evaluate(
             predictedTurnoverYi = inputs.predictedTurnoverYi,
+            recentTurnoversYi = inputs.recentTurnoversYi,
+        )
+        val source = when {
+            inputs.marketTurnoverRatio?.let { it.isFinite() && it > 0.0 } == true ->
+                inputs.marketTurnoverSource ?: MarketTurnoverSource.SAME_TIME
+            fallbackTurnover != null -> fallbackTurnover.source
+            else -> null
+        }
+        return MarketEnvironmentQuality.evaluateAdaptive(
+            marketTurnoverRatio = inputs.marketTurnoverRatio ?: fallbackTurnover?.ratio,
+            marketTurnoverSource = source,
             marketChangePct = index?.changePct,
             marketPrice = index?.price,
             marketHighPrice = index?.high,
             industryBreadth = industryBreadth,
             conceptBreadth = conceptBreadth,
-            recentTurnoversYi = inputs.recentTurnoversYi,
         )
     }
 

@@ -73,7 +73,7 @@ data class MarketEnvironmentQuality(
                     ?: "行业板块宽度暂缺",
                 concept?.let { "概念板块上涨占比${String.format(Locale.CHINA, "%.0f%%", it * 100)}" }
                     ?: "概念板块宽度暂缺",
-            )
+            ).toMutableList()
             val complete = ratio != null && change != null && industry != null && concept != null && nearHigh != null
             val breadthStrong = industry != null && concept != null && minOf(industry, concept) >= MIN_BREADTH
             val indexStrong = change != null && change >= 0.0 && nearHigh == true
@@ -86,6 +86,17 @@ data class MarketEnvironmentQuality(
                     MarketEnvironmentStatus.STRONG_SINGLE_DAY
                 ratio >= thresholds.strongTurnoverRatio -> MarketEnvironmentStatus.DIVERGENCE
                 else -> MarketEnvironmentStatus.NORMAL
+            }
+            when (status) {
+                MarketEnvironmentStatus.STRONG_SUSTAINED ->
+                    reasons += "同期相对量能、指数和板块扩散暂时同向"
+                MarketEnvironmentStatus.STRONG_SINGLE_DAY ->
+                    reasons += "同期相对量能较高，但连续性证据尚不足"
+                MarketEnvironmentStatus.DIVERGENCE -> {
+                    if (!breadthStrong) reasons += "板块扩散不足，不能把高成交额等同于普涨"
+                    if (!indexStrong) reasons += "指数涨幅或日内位置不支持强势延续"
+                }
+                else -> Unit
             }
             return MarketEnvironmentQuality(
                 status = status,

@@ -99,6 +99,27 @@ class MarketSummaryBriefTest {
     }
 
     @Test
+    fun marketSummaryUsesRelativeTurnoverInsteadOfFixedYiThresholds() {
+        val strong = MarketSummary.brief(
+            inputs(rising = 70, falling = 30).copy(
+                predictedTurnoverYi = 12_000.0,
+                marketTurnoverRatio = 1.4,
+                marketTurnoverSource = com.example.stockmonitor.analysis.MarketTurnoverSource.SAME_TIME,
+                sectors = SectorData(
+                    top = emptyList(),
+                    bottom = emptyList(),
+                    all = listOf(
+                        SectorItem("行业甲", 1.0, 100, 1.0, "", ""),
+                        SectorItem("行业乙", 0.8, 100, 1.0, "", ""),
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(strong[4].contains("同期相对量能"))
+    }
+
+    @Test
     fun freshIndexQuotesRequireAllThreeIndicesToBeFromToday() {
         val today = inputs().quotes.mapValues { (_, quote) -> quote.copy(quoteDate = "2026-10-13") } +
             ("sz399006" to quote("sz399006", "创业板指", -0.7).copy(quoteDate = "2026-10-12"))
@@ -134,6 +155,8 @@ class MarketSummaryBriefTest {
             ),
             predictedTurnoverYi = 22_000.0,
             recentTurnoversYi = listOf(16_000.0, 17_000.0, 18_000.0),
+            marketTurnoverRatio = 1.4,
+            marketTurnoverSource = com.example.stockmonitor.analysis.MarketTurnoverSource.SAME_TIME,
             sectors = SectorData(
                 top = emptyList(),
                 bottom = emptyList(),
