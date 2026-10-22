@@ -224,8 +224,8 @@ class DailyReviewTest {
         )
         val body = sectionBody(text, "三、")
 
-        assertTrue(body.contains("近两日没有命中重大利好的公告"))
-        assertTrue(body.contains("结论：近两日无重大利好"))
+        assertTrue(body.contains("近两日没有命中利好或利空的公告"))
+        assertTrue(body.contains("结论：近两日无利好/利空"))
     }
 
     @Test
@@ -237,9 +237,9 @@ class DailyReviewTest {
         )
         val body = sectionBody(text, "三、")
 
-        // 没拉到公告 ≠ 没有利好：空清单不落库（Repo.publishAnnouncements），没数据就写暂缺。
+        // 没拉到公告 ≠ 没有消息：空清单不落库（Repo.publishAnnouncements），没数据就写暂缺。
         assertTrue(body.contains("公告数据暂缺"))
-        assertTrue(body.contains("不等于没有利好"))
+        assertTrue(body.contains("不等于没有消息"))
         assertFalse(body.contains("近两日没有命中"))
     }
 
@@ -261,6 +261,31 @@ class DailyReviewTest {
         assertEquals(listOf("甲"), positives.map { it.name })
         assertEquals("重组落地", positives.single().kind)
         assertEquals("2026-10-11", positives.single().date)
+    }
+
+    @Test
+    fun recentNegativeSectionListsHardNegativesOnly() {
+        val text = report(
+            positions = listOf(Position("sh600000", "甲", 1_000.0, 8.5)),
+            quotes = mapOf("sh600000" to quote("sh600000", 8.8, 8.6, "甲")),
+            results = listOf(result()),
+            recentAnnouncements = mapOf(
+                "sh600000" to listOf(
+                    Announcement("2026-10-12", "甲:关于收到中国证监会立案告知书的公告"),
+                    Announcement("2026-10-11", "甲:关于控股股东减持股份计划的公告"),
+                    // 问询函是流程噪声不算真利空；三天前的业绩预亏过了窗口也不列。
+                    Announcement("2026-10-12", "甲:关于收到上海证券交易所问询函的公告"),
+                    Announcement("2026-10-01", "甲:2026年度业绩预亏公告"),
+                ),
+            ),
+        )
+        val body = sectionBody(text, "三、")
+
+        assertTrue(body.contains("重大利空："))
+        assertTrue(body.contains("立案调查"))
+        assertTrue(body.contains("大股东减持"))
+        assertFalse(body.contains("问询"))
+        assertFalse(body.contains("业绩预亏"))
     }
 
     @Test

@@ -73,6 +73,7 @@ class EventCoilTest {
         // 真利好：重组落地获批、业绩爆发、中标/重大合同、大股东/实控人增持。
         assertEquals("重组落地", EventCoil.positiveEventKind("华天科技:关于标的资产过户完成的公告"))
         assertEquals("重组落地", EventCoil.positiveEventKind("甲:关于重大资产重组实施完成的公告"))
+        assertEquals("重组落地", EventCoil.positiveEventKind("甲:关于发行股份购买资产获中国证监会同意注册的公告"))
         assertEquals("业绩预增", EventCoil.positiveEventKind("甲:2026年前三季度业绩预增公告"))
         assertEquals("中标", EventCoil.positiveEventKind("甲:重大项目中标公告"))
         assertEquals("重大合同", EventCoil.positiveEventKind("甲:关于签订重大合同的公告"))
@@ -114,6 +115,10 @@ class EventCoilTest {
         assertNull(EventCoil.positiveEventKind("甲:关于回购计划的公告"))
         assertNull(EventCoil.positiveEventKind("甲:关于部分董事增持公司股份计划的公告"))
         assertNull(EventCoil.positiveEventKind("甲:关于股权激励计划实施完成的公告"))
+        // 「同意注册/注册批复」是证监会注册环节通用用语：纯定增（杉杉股份 40 亿那类）获批
+        // 是摊薄融资的流程节点，不能撞成「重组落地」。
+        assertNull(EventCoil.positiveEventKind("甲:关于向特定对象发行A股股票获中国证监会同意注册的公告"))
+        assertNull(EventCoil.positiveEventKind("甲:关于取得注册批复的公告"))
         // 未中标是利空，不能因为含「中标」二字就算利好。
         assertNull(EventCoil.positiveEventKind("甲:关于项目未中标的公告"))
     }
@@ -126,5 +131,35 @@ class EventCoilTest {
         assertEquals(2.5, EventCoil.ratioPct("占总股本的1.2%，占总市值的2.5%")!!, 0.01)
         assertNull(EventCoil.ratioPct("占公司最近一期经审计净资产的 5%"))
         assertNull(EventCoil.ratioPct("关于回购股份注销完成的公告"))
+    }
+
+    @Test
+    fun ratioPctFallsBackToShareCountsForTableStyleDisclosure() {
+        // 杉杉股份 2026-10-22 那类表格型披露：没有「占 X%」句式，用注销股数 ÷ 变动前总股本自己算。
+        val shanshan = "同意公司注销回购专用证券账户中的 47,735,691 股股份。" +
+            "公司总股本将相应减少 47,735,691 股。股份总数 2,245,639,258。"
+        assertEquals(2.13, EventCoil.ratioPct("关于注销部分回购股份并相应减少注册资本的公告", shanshan)!!, 0.01)
+        // 股数解析错位（注销数 ≥ 总股本）宁缺勿滥。
+        assertNull(EventCoil.ratioPct("注销 5,000,000 股", "股份总数 4,000,000。"))
+    }
+
+    @Test
+    fun negativeEventKindOnlyTakesRealBadNews() {
+        // 真利空：立案、处罚、退市风险、大股东减持、终止重组、业绩预亏、减值、司法冻结。
+        assertEquals("立案调查", EventCoil.negativeEventKind("甲:关于收到中国证监会立案告知书的公告"))
+        assertEquals("行政处罚", EventCoil.negativeEventKind("甲:关于收到行政处罚决定书的公告"))
+        assertEquals("退市风险", EventCoil.negativeEventKind("甲:关于公司股票被实施退市风险警示的公告"))
+        assertEquals("大股东减持", EventCoil.negativeEventKind("甲:关于控股股东减持股份计划的公告"))
+        assertEquals("终止重组", EventCoil.negativeEventKind("甲:关于终止重大资产重组事项的公告"))
+        assertEquals("业绩预亏/下滑", EventCoil.negativeEventKind("甲:2026年度业绩预亏公告"))
+        assertEquals("减值计提", EventCoil.negativeEventKind("甲:关于计提商誉减值准备的公告"))
+        assertEquals("股份冻结", EventCoil.negativeEventKind("甲:关于控股股东股份被司法冻结的公告"))
+
+        // 不算真利空：问询/警示（流程噪声）、质押（常见操作）、董监高小额减持计划、诉讼进展。
+        assertNull(EventCoil.negativeEventKind("甲:关于收到上海证券交易所问询函的公告"))
+        assertNull(EventCoil.negativeEventKind("甲:关于收到监管警示函的公告"))
+        assertNull(EventCoil.negativeEventKind("甲:关于股东办理股份质押的公告"))
+        assertNull(EventCoil.negativeEventKind("甲:关于部分董事减持股份计划的公告"))
+        assertNull(EventCoil.negativeEventKind("甲:关于诉讼事项进展的公告"))
     }
 }

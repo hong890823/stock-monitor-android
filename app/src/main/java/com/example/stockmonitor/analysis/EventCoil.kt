@@ -90,8 +90,9 @@ object EventCoil {
      *
      * 只收股价级别的硬催化：重组并购落地获批、业绩爆发、中标/重大合同、大股东/实控人增持、
      * **占比够大的**回购注销。分红/送转/股权激励、象征性回购与泛泛的增持计划这些**不收**——
-     * 不算真利好。「实施完成」也不单用，必须带重组/收购语境，否则「回购实施完成」
-     * 「权益分派实施完成」都会被误判成重组落地。利空词一票否决——
+     * 不算真利好。「实施完成 / 注册批复 / 同意注册」都不单用，必须带重组/收购语境：
+     * 它们是证监会注册环节的通用用语，纯定增（如杉杉股份 2026-10-22 的 40 亿向特定对象
+     * 发行获批）拿「同意注册」会撞成重组落地，那不是重组、更不是利好。利空词一票否决——
      * 「业绩预增」的标题里混着「减持」也别当利好看。
      *
      * 回购注销看**占股本/市值的比例**（[BUYBACK_CANCEL_MIN_PCT]）不看绝对金额——
@@ -103,9 +104,9 @@ object EventCoil {
         val majorHolder = title.contains("控股股东") || title.contains("大股东") || title.contains("实际控制人")
         return when {
             title.contains("过户完成") || title.contains("交割完成") ||
-                title.contains("注册批复") || title.contains("同意注册") ||
                 ((title.contains("重组") || title.contains("收购") || title.contains("购买资产")) &&
-                    title.contains("实施完成")) -> "重组落地"
+                    (title.contains("实施完成") || title.contains("注册批复") || title.contains("同意注册"))) ->
+                "重组落地"
             title.contains("业绩预增") || title.contains("大幅增长") ||
                 title.contains("扭亏为盈") || title.contains("业绩预盈") -> "业绩预增"
             title.contains("中标") -> "中标"
@@ -141,16 +142,59 @@ object EventCoil {
         "占[^。；%]{0,24}(?:总股本|流通股本|股本|股份总数|总市值|流通市值|市值)[^。；%]{0,12}?([0-9]+(?:\\.[0-9]+)?)\\s*%"
     )
 
+    /** 「注销/减少/取消……N 股」的注销股数；表格型披露没有「占 X%」句式时用它兜底。 */
+    private val CANCEL_SHARES = Regex("(?:注销|减少|取消)[^。；]{0,16}?([0-9][0-9,]{2,})\\s*股")
+
+    /** 「总股本/股份总数……N」的变动前总股本；同样给表格型披露兜底用。 */
+    private val TOTAL_SHARES = Regex("(?:总股本|股份总数)[^。；]{0,16}?([0-9][0-9,]{5,})")
+
     /**
-     * 公告里披露的占股本/市值比例（百分点），取最大；解析不出返回 null。
+     * 回购注销占股本比例（百分点）；解析不出返回 null。
      *
-     * 回购注销公告按惯例披露「占公司总股本的 X%」；按市价折算它与「占市值」同量级，
-     * 两者共用一个门槛。占比不明就当没有——宁缺勿滥。
+     * 两条路：① 正文直接写「占公司总股本的 X%」（按市价折算它与「占市值」同量级，共用门槛）；
+     * ② 表格型披露只给股数（如杉杉股份 2026-10-22 注销 4,773 万股那篇），用
+     * 「注销股数 ÷ 变动前总股本」自己算。两条路都看不出来就当没有——宁缺勿滥。
      */
-    fun ratioPct(title: String, content: String? = null): Double? =
-        RATIO.findAll("$title ${content.orEmpty()}")
+    fun ratioPct(title: String, content: String? = null): Double? {
+        val text = "$title ${content.orEmpty()}"
+        RATIO.findAll(text)
             .mapNotNull { it.groupValues[1].toDoubleOrNull() }
             .maxOrNull()
+            ?.let { return it }
+        val cancel = CANCEL_SHARES.findAll(text)
+            .mapNotNull { it.groupValues[1].replace(",", "").toDoubleOrNull() }
+            .maxOrNull() ?: return null
+        val total = TOTAL_SHARES.findAll(text)
+            .mapNotNull { it.groupValues[1].replace(",", "").toDoubleOrNull() }
+            .maxOrNull() ?: return null
+        // 股数解析错位（注销数 ≥ 总股本）就宁缺勿滥，别算出个离谱占比。
+        if (total <= 0 || cancel <= 0 || cancel >= total) return null
+        return cancel / total * 100
+    }
+
+    /**
+     * 公告标题里的**真利空**类型；不是利空返回 null。与 [positiveEventKind] 同一份
+     * 「真」的口径：只收股价级别的硬利空，例行公事和小动作不收。
+     *
+     * 收：立案调查、行政处罚、退市风险、大股东/实控人减持、终止重组收购、
+     * 业绩预亏/大幅下滑、商誉/计提减值、股份司法冻结。
+     * 不收：问询函/警示函（流程噪声）、质押（常见操作）、董监高小额减持计划（与小额
+     * 增持计划同一标准）、诉讼仲裁进展（金额不明不构成硬利空）。
+     */
+    fun negativeEventKind(title: String): String? = when {
+        title.contains("立案") -> "立案调查"
+        title.contains("处罚") -> "行政处罚"
+        title.contains("退市") -> "退市风险"
+        (title.contains("控股股东") || title.contains("大股东") || title.contains("实际控制人") ||
+            title.contains("5%以上") || title.contains("百分之五")) && title.contains("减持") -> "大股东减持"
+        (title.contains("终止") || title.contains("失败")) &&
+            (title.contains("重组") || title.contains("收购") || title.contains("购买资产")) -> "终止重组"
+        title.contains("业绩预亏") || title.contains("预亏") || title.contains("首亏") ||
+            title.contains("大幅下滑") || title.contains("业绩预减") -> "业绩预亏/下滑"
+        title.contains("商誉减值") || title.contains("减值准备") || title.contains("计提减值") -> "减值计提"
+        title.contains("司法冻结") || title.contains("轮候冻结") || title.contains("股份被冻结") -> "股份冻结"
+        else -> null
+    }
 
     private val NEGATIVE_MARKERS = listOf(
         "减持", "处罚", "立案", "诉讼", "仲裁", "终止", "失败", "问询", "警示",

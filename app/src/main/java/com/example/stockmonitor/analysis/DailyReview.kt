@@ -23,8 +23,9 @@ import kotlin.math.abs
  *
  * **缺数据写「暂缺 / 未计入」，绝不写 0**，不把「没行情」显示成「没亏没赚」。
  *
- * **利好只看近两日、且按交易日回溯**（见 [recentPositives]）：窗口是「上一交易日 → 今天」，
- * 周末/长假挂出的公告跟着上一交易日一起收；再往前的利好多半已兑现进股价，列出来是误导。
+ * **利好与利空都只看近两日、且按交易日回溯**（见 [recentPositives] / [recentNegatives]）：
+ * 窗口是「上一交易日 → 今天」，周末/长假挂出的公告跟着上一交易日一起收；
+ * 再往前的消息多半已兑现进股价，列出来是误导。只收「真」利好/真利空，口径同 [EventCoil]。
  *
  * 章节标题必须以中文数字开头（`ReportSectionAssertions` 的正则 `^[一二三四五六七八九十]+、`），
  * emoji 放在数字后面；每节最后一行顶格写「结论：」。
@@ -255,8 +256,9 @@ object DailyReview {
             append(healthSection(dayPnl, aggregates, inputs))
             append(separator())
             appendLine(
-                recentPositiveSection(
+                recentEventSection(
                     recentPositives(inputs.positions, inputs.recentAnnouncements, reviewDate, inputs.tradingDates),
+                    recentNegatives(inputs.positions, inputs.recentAnnouncements, reviewDate, inputs.tradingDates),
                     inputs,
                     reviewDate,
                 )
@@ -280,33 +282,51 @@ object DailyReview {
         appendLine("结论：这些时点优先观察趋势是否延续，不能仅凭单次冲高记录推断后续必然上涨。")
     }
 
-    // ── 三、近两日个股重大利好 ────────────────────────────────────────────────
+    // ── 三、近两日个股利好与利空 ──────────────────────────────────────────────
 
     /** 自然日兜底窗口（今天 + 昨天）；有交易日表时窗口回溯到上一交易日，见 [recentCutoff]。 */
     const val RECENT_POSITIVE_DAYS = 2L
 
-    /** 一条近两日利好落地公告；[kind] 与 [EventCoil.positiveEventKind] 同一口径。 */
-    data class RecentPositive(
+    /** 一条近两日利好/利空公告；[kind] 与 [EventCoil.positiveEventKind] / [EventCoil.negativeEventKind] 同一口径。 */
+    data class RecentEvent(
         val name: String,
         val date: String,
         val kind: String,
         val title: String,
+        val positive: Boolean,
     )
 
-    /**
-     * 近两日重大利好清单：窗口是「上一交易日 → 今天」（见 [recentCutoff]），再早的不给——
-     * 隔了几天的利好多半已经兑现进股价，列出来是误导。
-     *
-     * 「利好」判定复用 [EventCoil.positiveEventKind]，只收**真利好**（重组落地获批、业绩爆发、
-     * 中标/重大合同、大股东增持、高占比回购注销——占比口径不看绝对金额；分红/股权激励/
-     * 象征性动作都不算），口径全 app 只有一份。只看真实持仓（数量 > 0），观察股不在复盘范围。
-     */
+    /** 近两日真利好清单（窗口与「真」的口径见 [recentEvents]）。 */
     fun recentPositives(
         positions: List<Position>,
         announcements: Map<String, List<Announcement>>,
         today: String,
         tradingDates: List<String> = emptyList(),
-    ): List<RecentPositive> {
+    ): List<RecentEvent> = recentEvents(positions, announcements, today, tradingDates, positive = true)
+
+    /** 近两日真利空清单：与真利好同一窗口、同一「真」的标准，只收硬利空（问询函/质押/小额减持不算）。 */
+    fun recentNegatives(
+        positions: List<Position>,
+        announcements: Map<String, List<Announcement>>,
+        today: String,
+        tradingDates: List<String> = emptyList(),
+    ): List<RecentEvent> = recentEvents(positions, announcements, today, tradingDates, positive = false)
+
+    /**
+     * 近两日消息清单：窗口是「上一交易日 → 今天」（见 [recentCutoff]），再早的不给——
+     * 隔了几天的消息多半已经兑现进股价，列出来是误导。
+     *
+     * 判定复用 [EventCoil.positiveEventKind] / [EventCoil.negativeEventKind]，只收**真**消息
+     * （硬催化 / 硬利空，分红激励、问询函这类流程噪声都不算），口径全 app 只有一份。
+     * 只看真实持仓（数量 > 0），观察股不在复盘范围。
+     */
+    private fun recentEvents(
+        positions: List<Position>,
+        announcements: Map<String, List<Announcement>>,
+        today: String,
+        tradingDates: List<String>,
+        positive: Boolean,
+    ): List<RecentEvent> {
         val cutoff = recentCutoff(today, tradingDates) ?: return emptyList()
         return positions
             .filter { it.quantity.isFinite() && it.quantity > 0 }
@@ -314,16 +334,19 @@ object DailyReview {
                 announcements[position.code].orEmpty()
                     .filter { it.date.isNotBlank() && it.date in cutoff..today }
                     .mapNotNull { announcement ->
-                        EventCoil.positiveEventKind(announcement.title, announcement.content)?.let { kind ->
-                            RecentPositive(position.name, announcement.date, kind, announcement.title)
+                        val kind = if (positive) {
+                            EventCoil.positiveEventKind(announcement.title, announcement.content)
+                        } else {
+                            EventCoil.negativeEventKind(announcement.title)
                         }
+                        kind?.let { RecentEvent(position.name, announcement.date, it, announcement.title, positive) }
                     }
                     .sortedByDescending { it.date }
             }
     }
 
     /**
-     * 利好窗口的起始日（含当天）：**上一交易日**——周一复盘时窗口要够到周五，
+     * 消息窗口的起始日（含当天）：**上一交易日**——周一复盘时窗口要够到周五，
      * 周五盘后和周末挂出的公告才收得进来（自然日「今天+昨天」会漏）。
      *
      * 交易日表缺了或太旧（最近一根早于昨天）就退回「今天 + 昨天」[RECENT_POSITIVE_DAYS]，
@@ -337,16 +360,17 @@ object DailyReview {
         return tradingDates.filter { it < today }.maxOrNull() ?: yesterday
     }
 
-    private fun recentPositiveSection(
-        items: List<RecentPositive>,
+    private fun recentEventSection(
+        positives: List<RecentEvent>,
+        negatives: List<RecentEvent>,
         inputs: Inputs,
         today: String,
     ): String {
         val holdings = inputs.positions.filter { it.quantity.isFinite() && it.quantity > 0 }
-        // 公告没拉到 ≠ 没有利好：Repo.publishAnnouncements 空清单不落库，containsKey 才算「看过」。
+        // 公告没拉到 ≠ 没有消息：Repo.publishAnnouncements 空清单不落库，containsKey 才算「看过」。
         val announced = holdings.count { inputs.recentAnnouncements.containsKey(it.code) }
         val lines = mutableListOf<String>()
-        lines.add("三、🔔 近两日个股重大利好")
+        lines.add("三、🔔 近两日个股利好与利空")
         val cutoff = recentCutoff(today, inputs.tradingDates) ?: today
         val yesterday = runCatching { LocalDate.parse(today).minusDays(1).toString() }.getOrNull()
         val windowNote = if (yesterday != null && cutoff < yesterday) {
@@ -355,24 +379,41 @@ object DailyReview {
             "（今天与昨天）"
         }
         lines.add(
-            "只列 $cutoff 以来的真利好落地公告$windowNote；" +
-                "更早的利好可能已兑现进股价，不再列出。"
+            "只列 $cutoff 以来的真利好/真利空公告$windowNote；" +
+                "更早的可能已兑现进股价，不再列出。"
         )
         lines.add("")
         when {
             holdings.isEmpty() -> lines.add("没有持仓，本节不适用。")
-            announced == 0 -> lines.add("公告数据暂缺（还没拉到公告清单），近两日是否有利好无法判断。")
-            items.isEmpty() -> lines.add("近两日没有命中重大利好的公告。")
-            else -> items.forEach {
-                lines.add("· 『${it.name}』${it.date} ${it.kind}：${EventCoil.trimTitle(it.title)}")
+            announced == 0 -> lines.add("公告数据暂缺（还没拉到公告清单），近两日是否有利好利空无法判断。")
+            positives.isEmpty() && negatives.isEmpty() -> lines.add("近两日没有命中利好或利空的公告。")
+            else -> {
+                if (positives.isNotEmpty()) {
+                    lines.add("重大利好：")
+                    positives.forEach {
+                        lines.add("· 『${it.name}』${it.date} ${it.kind}：${EventCoil.trimTitle(it.title)}")
+                    }
+                }
+                if (negatives.isNotEmpty()) {
+                    lines.add("重大利空：")
+                    negatives.forEach {
+                        lines.add("· 『${it.name}』${it.date} ${it.kind}：${EventCoil.trimTitle(it.title)}")
+                    }
+                }
             }
         }
         lines.add(
             "结论：" + when {
                 holdings.isEmpty() -> "没有持仓，本节不适用。"
-                announced == 0 -> "公告暂缺，利好面未知，不等于没有利好。"
-                items.isEmpty() -> "近两日无重大利好消息面变化。"
-                else -> "以上均为近两日的真利好落地，消息面较新；利好不等于股价必涨，市场是否认账仍看量价。"
+                announced == 0 -> "公告暂缺，消息面未知，不等于没有消息。"
+                positives.isEmpty() && negatives.isEmpty() -> "近两日无利好/利空消息面变化。"
+                else -> {
+                    val counts = mutableListOf<String>()
+                    if (positives.isNotEmpty()) counts.add("利好 ${positives.size} 条")
+                    if (negatives.isNotEmpty()) counts.add("利空 ${negatives.size} 条")
+                    "以上为近两日的真利好/真利空（${counts.joinToString("、")}），消息面较新；" +
+                        "消息不等于股价必涨跌，市场是否认账仍看量价。"
+                }
             }
         )
         return lines.joinToString("\n")

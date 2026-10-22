@@ -320,21 +320,34 @@ object HoldingAnalyzer {
             refreshSectorContexts(store, portfolio.positions)
             val results = mutableListOf<PositionResult>()
             val liveQuotes = mutableMapOf<String, Quote>()
-            portfolio.positions.forEach { position ->
+            portfolio.positions.forEachIndexed { index, position ->
                 val live = quotes[position.code]
-                // 取不到行情的留给 DayPnl 标「未计入」，不拿 0 填成没亏没赚。
-                if (live == null) return@forEach
+                // 取不到行情的留给 DayPnl 标「未计入」，不拿 0 填成没亏没赚；
+                // 缺行情的也要计入进度，否则进度条永远到不了底。
+                if (live == null) {
+                    Repo.dailyReviewTask =
+                        BackgroundTaskState.running(
+                            "持仓复盘",
+                            done = index + 1,
+                            total = portfolio.positions.size,
+                            message = "${position.name} 缺行情，跳过",
+                        )
+                    Repo.notifyChanged()
+                    return@forEachIndexed
+                }
                 liveQuotes[position.code] = live
+                // 复盘不发盘中信号、不补拉基本面，所以只取分析结果。
+                runCatching { results.add(analyzePosition(position, portfolio, live, benchmark, market, marketRisk)) }
+                    .onFailure { Log.e(TAG, "复盘分析失败 ${position.name}", it) }
+                // 与持仓分析同一写法：每完成一只推进 done，进度条才动（曾漏传 done，一直 0/N）。
                 Repo.dailyReviewTask =
                     BackgroundTaskState.running(
                         "持仓复盘",
+                        done = index + 1,
                         total = portfolio.positions.size,
                         message = "正在分析 ${position.name}…",
                     )
                 Repo.notifyChanged()
-                // 复盘不发盘中信号、不补拉基本面，所以只取分析结果。
-                runCatching { results.add(analyzePosition(position, portfolio, live, benchmark, market, marketRisk)) }
-                    .onFailure { Log.e(TAG, "复盘分析失败 ${position.name}", it) }
             }
 
             val text =
