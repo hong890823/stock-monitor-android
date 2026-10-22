@@ -26,7 +26,7 @@ object ObservationEvidenceFactory {
                 if (signal.setupScore == 0) counter += "尚未形成有效趋势入场结构"
             }
 
-            ObservationStrategy.LEADER -> {
+            ObservationStrategy.LEADER, ObservationStrategy.LIMIT_UP_CONTINUATION -> {
                 if (signal.recentLimitUpDays > 0) supporting += "近5日涨停${signal.recentLimitUpDays}次"
                 if (signal.relativeStrengthPct != null && signal.relativeStrengthPct >= 0) {
                     supporting += String.format(Locale.CHINA, "相对大盘%+.1f%%", signal.relativeStrengthPct)
@@ -38,6 +38,15 @@ object ObservationEvidenceFactory {
                 if (signal.strongScore < 3) counter += "强势资格或回踩企稳条件尚未全部满足"
                 if (signal.confirmedEntry) supporting += "回踩技术条件满足，仍需连续复评；不是资金流入证明"
             }
+        }
+
+        signal.fundFlow?.let {
+            if (FundFlowPolicy.scoreDelta(it) > 0) supporting += it.reason
+            if (FundFlowPolicy.scoreDelta(it) < 0) counter += it.reason
+        }
+        signal.fundFlowWindow?.let {
+            if (it.tone == FundFlowWindowTone.PERSISTENT_INFLOW) supporting += it.reason
+            if (it.tone == FundFlowWindowTone.PERSISTENT_OUTFLOW) counter += it.reason
         }
 
         if (signal.relativeStrengthPct != null && signal.relativeStrengthPct >= 0) {

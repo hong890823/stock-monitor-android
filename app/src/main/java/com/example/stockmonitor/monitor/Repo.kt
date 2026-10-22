@@ -12,6 +12,7 @@ import com.example.stockmonitor.analysis.MarketState
 import com.example.stockmonitor.analysis.PaperTradeRecord
 import com.example.stockmonitor.analysis.PositionResult
 import com.example.stockmonitor.analysis.PriceContext
+import com.example.stockmonitor.analysis.SelectedHeadline
 import com.example.stockmonitor.analysis.SectorContext
 import com.example.stockmonitor.analysis.StrongContinuationEvent
 import com.example.stockmonitor.analysis.SwingPlan
@@ -20,6 +21,7 @@ import com.example.stockmonitor.analysis.TurnoverTracker
 import com.example.stockmonitor.core.BoardMember
 import com.example.stockmonitor.core.ConceptBoards
 import com.example.stockmonitor.core.ConceptSummary
+import com.example.stockmonitor.core.FundFlow
 import com.example.stockmonitor.core.LimitData
 import com.example.stockmonitor.core.ObservationCandidate
 import com.example.stockmonitor.core.ObservationSnapshot
@@ -75,6 +77,9 @@ object Repo {
     var observationPool: List<ObservationCandidate> = emptyList()
 
     @Volatile
+    var fundFlowHistory: Map<String, List<FundFlow>> = emptyMap()
+
+    @Volatile
     var observationSnapshots: List<ObservationSnapshot> = emptyList()
 
     @Volatile
@@ -91,6 +96,9 @@ object Repo {
     var screenPatternAt: String? = null
     var screenPatternAtMs: Long = 0L
     var summaryText: String? = null
+    @Volatile
+    var todayHeadlinesState: TodayHeadlinesState = TodayHeadlinesState()
+    var newsTask: BackgroundTaskState = BackgroundTaskState.idle("今日要闻")
     var portfolioResults: List<PositionResult> = emptyList()
     var portfolioSwing: SwingPlan? = null
 
@@ -370,6 +378,7 @@ object Repo {
         limits = null
         screenResult = ScreenResult(emptyList(), emptyList())
         observationPool = emptyList()
+        fundFlowHistory = emptyMap()
         observationSnapshots = emptyList()
         paperTrades = emptyList()
         screenStale = false

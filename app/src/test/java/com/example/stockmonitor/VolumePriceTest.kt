@@ -5,6 +5,8 @@ import com.example.stockmonitor.analysis.PriceLocation
 import com.example.stockmonitor.analysis.VolumePrice
 import com.example.stockmonitor.analysis.VolumePriceSignal
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -15,6 +17,19 @@ import org.junit.Test
  * ——高位＝借量出货，低位贴底＝底部换手，低位但已从低点反弹起来＝冲高遇阻。
  */
 class VolumePriceTest {
+
+    @Test
+    fun helpTextUsesConditionalLanguageInsteadOfCausalClaims() {
+        val text = VolumePrice.helpText
+
+        assertTrue(text.contains("可能"))
+        assertTrue(text.contains("需结合位置"))
+        assertTrue(text.contains("不单独构成买入或卖出依据"))
+        assertFalse(text.contains("资金进场确认"))
+        assertFalse(text.contains("基本可以先划掉"))
+        assertFalse(text.contains("最值得盯"))
+        assertFalse(text.contains("高度控盘"))
+    }
 
     /** 位置上下文：低位 + 从区间低点反弹幅度（0.25 = 已反弹 25%）。 */
     private fun low(rebound: Double) = PriceContext(PriceLocation.LOW, rebound)

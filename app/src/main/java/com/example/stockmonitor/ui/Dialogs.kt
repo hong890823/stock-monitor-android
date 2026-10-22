@@ -292,6 +292,27 @@ object Dialogs {
             .show()
     }
 
+    fun showDetails(activity: AppCompatActivity, title: String, text: String) {
+        val content =
+            BoundedScrollView(
+                activity,
+                (activity.resources.displayMetrics.heightPixels * 0.72f).toInt(),
+            ).apply {
+                setPadding(
+                    UiKit.dp(activity, 20),
+                    UiKit.dp(activity, 8),
+                    UiKit.dp(activity, 20),
+                    0,
+                )
+                addView(UiKit.body(activity, text, 12f))
+            }
+        MaterialAlertDialogBuilder(activity)
+            .setTitle(title)
+            .setView(content)
+            .setPositiveButton("知道了", null)
+            .show()
+    }
+
     /** 用名称/代码搜索并选择一只股票。 */
     fun searchStock(
         scope: CoroutineScope,

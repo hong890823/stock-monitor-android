@@ -42,6 +42,18 @@ class ObservationEligibilityTest {
     }
 
     @Test
+    fun legacyThreeBoardBuyCandidateNeedsThirdRound() {
+        val legacy = candidate.copy(
+            strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
+            limitStreak = 3,
+            entryConfirmationRounds = 2,
+        )
+        val displayed = ObservationEligibility.applyQuoteGate(legacy, sealed.copy(price = 10.5))
+
+        assertEquals(ObservationStage.NEAR_ENTRY, displayed.stage)
+    }
+
+    @Test
     fun freshNewDayQuoteDowngradesOldBuyLabelForEitherSourceUntilReevaluated() {
         ObservationStrategy.entries.forEach { strategy ->
             val old = candidate.copy(strategy = strategy, entryConfirmationRounds = 2)
@@ -55,14 +67,31 @@ class ObservationEligibilityTest {
 
     @Test
     fun everyStageHasIndependentPagesAndFullCounts() {
+        assertEquals(8, ObservationEligibility.PAGE_SIZE)
         val buys = (1..105).map { candidate.copy(code = "sh${600000 + it}") }
         val near = candidate.copy(code = "sz000001", stage = ObservationStage.NEAR_ENTRY)
         val sections = ObservationEligibility.sections(buys + near, emptyMap())
         assertEquals(105, sections.getValue(ObservationSection.BUY).size)
         assertEquals(listOf(near), sections.getValue(ObservationSection.NEAR))
-        val pages = (0..5).flatMap { ObservationEligibility.page(sections.getValue(ObservationSection.BUY), it) }
+        val lastPage = (buys.size - 1) / ObservationEligibility.PAGE_SIZE
+        val pages = (0..lastPage).flatMap {
+            ObservationEligibility.page(sections.getValue(ObservationSection.BUY), it)
+        }
         assertEquals(buys, pages)
         assertEquals(listOf(near), ObservationEligibility.page(sections.getValue(ObservationSection.NEAR), 0))
+    }
+
+    @Test
+    fun candidatesWithinTheSameSectionSortByScoreDescending() {
+        val lowScore = candidate.copy(code = "sz000011", stage = ObservationStage.NEAR_ENTRY, score = 1)
+        val highScore = candidate.copy(code = "sz000012", stage = ObservationStage.NEAR_ENTRY, score = 3)
+        val middleScore = candidate.copy(code = "sz000013", stage = ObservationStage.NEAR_ENTRY, score = 2)
+
+        val near = ObservationEligibility
+            .entrySections(listOf(lowScore, highScore, middleScore), emptyMap())
+            .getValue(ObservationSection.NEAR)
+
+        assertEquals(listOf("sz000012", "sz000013", "sz000011"), near.map { it.code })
     }
 
     @Test
@@ -140,10 +169,12 @@ class ObservationEligibilityTest {
             val entry = blockedSignal.copy(price = 10.6, limitUpBlocked = false,
                 limitUpShrinkAcceleration = false, evaluatedAtMs = 1_000_000L, quoteVolume = 1000.0)
             val first = ObservationPool.evaluate(stillShrinking, entry)
-            val confirmed = if (strategy == ObservationStrategy.LEADER) {
+            val confirmed = if (strategy == ObservationStrategy.PRE_BREAKOUT) {
+                first
+            } else {
                 assertFalse(ObservationBuyAlert.shouldNotify(stillShrinking, first))
-                ObservationPool.evaluate(first, entry.copy(evaluatedAtMs = 1_060_000L, quoteVolume = 1100.0))
-            } else first
+                ObservationPool.evaluate(first, entry.copy(evaluatedAtMs = 1_900_000L))
+            }
             assertTrue(ObservationBuyAlert.shouldNotify(stillShrinking, confirmed))
             assertFalse(ObservationBuyAlert.shouldNotify(confirmed, confirmed))
             assertEquals(2, confirmed.observedDays)

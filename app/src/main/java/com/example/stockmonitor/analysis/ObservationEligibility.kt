@@ -9,14 +9,16 @@ import com.example.stockmonitor.core.SinaClient
 enum class ObservationSection(val label: String) {
     BUY(ObservationStage.BUY_CANDIDATE.label),
     NEAR(ObservationStage.NEAR_ENTRY.label),
+    LIMIT_CONTINUOUS("涨停持续观察"),
     DEFERRED("暂缓参与 · 封板/缩量加速"),
     OBSERVING("其他观察对象"),
 }
 
 object ObservationEligibility {
-    const val PAGE_SIZE = 20
+    const val PAGE_SIZE = 8
     private const val LIMIT_TOLERANCE_PCT = 0.15
     const val LIMIT_WAIT_REASON = "涨停封板，暂不介入，开板后重新确认"
+    const val CONTINUOUS_LIMIT_WAIT_REASON = "涨停封板，持续观察；开板后重新确认，不执行买入"
     const val SHRINK_WAIT_REASON = "缩量加速风险，已降级观察；等待换手、承接及入场条件重新确认"
 
     fun isAtLimitUp(code: String, name: String, quote: Quote): Boolean {
@@ -54,9 +56,10 @@ object ObservationEligibility {
         val shrinkRisk = candidate.limitUpShrinkAcceleration || candidate.reason.contains("涨停缩量加速")
         if (!isLimitUpDeferred(candidate, quote)) {
             val newQuoteDay = quote?.quoteDate != null && quote.quoteDate != candidate.lastEvaluatedDate
+            val requiredConfirmationRounds = ObservationPool.requiredConfirmationRounds(candidate)
             return if (candidate.stage == ObservationStage.BUY_CANDIDATE &&
-                (newQuoteDay || (candidate.strategy == ObservationStrategy.LEADER &&
-                    candidate.entryConfirmationRounds < ObservationPool.ENTRY_CONFIRMATION_ROUNDS))) {
+                (newQuoteDay || (candidate.strategy != ObservationStrategy.PRE_BREAKOUT &&
+                    candidate.entryConfirmationRounds < requiredConfirmationRounds))) {
                 candidate.copy(stage = ObservationStage.NEAR_ENTRY, reason = "等待回踩企稳及连续复评确认",
                     entryConfirmationRounds = 0, entryConfirmedAtMs = 0L, entryConfirmationVolume = 0.0)
             } else candidate
@@ -67,7 +70,13 @@ object ObservationEligibility {
                 candidate.stage == ObservationStage.BUY_CANDIDATE -> ObservationStage.NEAR_ENTRY
                 else -> candidate.stage
             },
-            reason = if (shrinkRisk) SHRINK_WAIT_REASON else LIMIT_WAIT_REASON,
+            reason = when {
+                candidate.continuousObservation &&
+                    candidate.strategy == ObservationStrategy.LIMIT_UP_CONTINUATION ->
+                    CONTINUOUS_LIMIT_WAIT_REASON
+                shrinkRisk -> SHRINK_WAIT_REASON
+                else -> LIMIT_WAIT_REASON
+            },
             limitUpBlocked = candidate.limitUpBlocked || quote?.let {
                 isAtLimitUp(candidate.code, candidate.name, it)
             } == true,
@@ -88,6 +97,8 @@ object ObservationEligibility {
         return ObservationSection.entries.associateWith { section ->
             active.filter { item ->
                 val actual = when {
+                    item.continuousObservation && isLimitUpDeferred(item, quotes[item.code]) ->
+                        ObservationSection.LIMIT_CONTINUOUS
                     isLimitUpDeferred(item, quotes[item.code]) -> ObservationSection.DEFERRED
                     item.stage == ObservationStage.BUY_CANDIDATE -> ObservationSection.BUY
                     item.stage == ObservationStage.NEAR_ENTRY -> ObservationSection.NEAR
@@ -105,7 +116,10 @@ object ObservationEligibility {
         candidates: List<ObservationCandidate>,
         quotes: Map<String, Quote>,
     ): Map<ObservationSection, List<ObservationCandidate>> =
-        sections(candidates, quotes).filterKeys { it == ObservationSection.BUY || it == ObservationSection.NEAR }
+        sections(candidates, quotes).filterKeys {
+            it == ObservationSection.BUY || it == ObservationSection.NEAR ||
+                it == ObservationSection.LIMIT_CONTINUOUS
+        }.filterValues { it.isNotEmpty() }
 
     fun forDisplay(candidates: List<ObservationCandidate>, quotes: Map<String, Quote>): List<ObservationCandidate> =
         candidates.filter { it.stage != ObservationStage.ELIMINATED }
@@ -118,6 +132,8 @@ object ObservationEligibility {
                         it.stage == ObservationStage.NEAR_ENTRY -> 1
                         else -> 3
                     }
-                }.thenByDescending { it.lastEvaluatedDate ?: it.addedDate },
+                }.thenByDescending { it.score }
+                    .thenByDescending { it.lastEvaluatedDate ?: it.addedDate }
+                    .thenBy { it.code },
             )
 }

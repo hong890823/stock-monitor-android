@@ -1,11 +1,14 @@
 package com.example.stockmonitor.ui
 
 import android.content.Context
+import android.widget.LinearLayout
+import android.widget.TextView
 import android.widget.Toast
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
 import com.example.stockmonitor.R
+import com.example.stockmonitor.analysis.FundFlowWindowPolicy
 import com.example.stockmonitor.analysis.MarketSummary
 import com.example.stockmonitor.analysis.TimeUtils
 import com.example.stockmonitor.analysis.LimitReport
@@ -133,11 +136,20 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
         }
 
         // ── 自选股 ──
+        val watchRowKeys = stockItems.mapNotNull { (code, _) ->
+            Repo.quotes[code]?.let { "market-watch:$code" }
+        }
+        val watchRows = mutableListOf<UiKit.ExpandableQuoteRowView>()
         UiKit.card(
             context,
             "⭐ 自选股",
             actionText = if (fillAction == null) null else "补齐监控股票（${missingPositions.size}）",
             onAction = fillAction,
+            onSecondaryAction = {
+                val expanded = QuoteRowExpansionState.toggleAll(watchRowKeys)
+                watchRows.forEach { it.setExpanded(expanded) }
+                expanded
+            },
         ).apply {
             if (stockItems.isEmpty()) addText("还没有自选股，可在「工具」页添加。")
             stockItems.forEach { (code, name) ->
@@ -145,23 +157,35 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
                 if (quote == null) {
                     addKeyValue(name, "等待行情…")
                 } else {
-                    add(
-                        UiKit.quoteRow(
-                            context,
-                            name + if (code in barCodes) "  ●" else "",
-                            code,
-                            StockPriceText.of(quote.price),
-                            quote.changePct,
-                            note = watchNote(
-                                context,
-                                quote,
-                                Repo.volumeRatios[code],
-                                Repo.priceContexts[code],
+                    val row = UiKit.expandableQuoteRow(
+                            context = context,
+                            stateKey = "market-watch:$code",
+                            name = name + if (code in barCodes) "  ●" else "",
+                            code = code,
+                            price = StockPriceText.of(quote.price),
+                            changePct = quote.changePct,
+                            summary = watchSummary(
+                                context = context,
+                                changePct = quote.changePct,
+                                ratio = Repo.volumeRatios[code],
+                                priceContext = Repo.priceContexts[code],
+                                fundFlow = currentFundFlowSummary(code),
                             ),
-                        )
+                            details = watchDetails(
+                                code = code,
+                                quote = quote,
+                                ratio = Repo.volumeRatios[code],
+                                priceContext = Repo.priceContexts[code],
+                            ),
+                            onExpansionChanged = {
+                                setSecondaryExpanded(QuoteRowExpansionState.allExpanded(watchRowKeys))
+                            },
                     )
+                    watchRows.add(row)
+                    add(row.view)
                 }
             }
+            setSecondaryExpanded(QuoteRowExpansionState.allExpanded(watchRowKeys))
             container.addView(view)
         }
 
@@ -225,33 +249,133 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
                 addText("暂无数据 · 等待更新")
             } else {
                 addKeyValue("涨停 / 跌停", "${limits.up.size} 只 / ${limits.down.size} 只")
-                limits.up.take(12).forEach { stock ->
-                    addKeyValue(
-                        "▲ ${stock.name}",
-                        String.format(Locale.CHINA, "%+.2f%%", stock.pct),
-                        UiKit.changeColor(context, stock.pct),
-                        // 与 macOS 版一致：最多展示 3 个所属板块。
-                        note = stock.code + if (stock.boards.isNotEmpty())
-                            "｜" + stock.boards.take(3).joinToString("、") else "",
-                    )
+                addText(
+                    "每侧最多显示 8 只；封单为数据源时点快照。数据来源：${limits.source.label}。" +
+                        "封板质量仅用于涨停观察排序，不代表买入信号。",
+                    11.5f,
+                )
+                val upRowKeys = limits.up.take(8).map { "market-limit-up:${it.code}" }
+                val downRowKeys = limits.down.take(8).map { "market-limit-down:${it.code}" }
+                val upRows = mutableListOf<UiKit.ExpandableQuoteRowView>()
+                val downRows = mutableListOf<UiKit.ExpandableQuoteRowView>()
+                val upToggle = TextView(context).apply {
+                    textSize = 12f
+                    setTextColor(UiKit.color(context, R.color.brand_primary))
+                    gravity = android.view.Gravity.END
+                    setPadding(0, UiKit.dp(context, 2), 0, UiKit.dp(context, 4))
                 }
-                limits.down.take(12).forEach { stock ->
-                    addKeyValue(
-                        "▼ ${stock.name}",
-                        String.format(Locale.CHINA, "%+.2f%%", stock.pct),
-                        UiKit.changeColor(context, stock.pct),
-                        note = stock.code + if (stock.boards.isNotEmpty())
-                            "｜" + stock.boards.take(3).joinToString("、") else "",
-                    )
+                val downToggle = TextView(context).apply {
+                    textSize = 12f
+                    setTextColor(UiKit.color(context, R.color.brand_primary))
+                    gravity = android.view.Gravity.END
+                    setPadding(0, UiKit.dp(context, 4), 0, UiKit.dp(context, 4))
                 }
-                if (limits.up.size > 12 || limits.down.size > 12) {
-                    addText("仅显示前 12 只，点击下方按钮查看完整列表。", 11.5f)
+                fun updateLimitToggle(toggle: TextView, keys: List<String>) {
+                    toggle.text = if (QuoteRowExpansionState.allExpanded(keys)) {
+                        "全部收起 ▴"
+                    } else {
+                        "全部展开 ▾"
+                    }
+                }
+                add(upToggle)
+                limits.up.take(8).forEach { stock ->
+                    val boards = stock.boards.take(3).joinToString("、")
+                    val row = UiKit.expandableQuoteRow(
+                        context = context,
+                        stateKey = "market-limit-up:${stock.code}",
+                        name = "▲ ${stock.name}",
+                        code = stock.code,
+                        price = StockPriceText.of(stock.price),
+                        changePct = stock.pct,
+                        summary = buildString {
+                            append(stock.code)
+                            if (boards.isNotBlank()) append("｜$boards")
+                            appendLine()
+                            append("封板质量 ${stock.sealQualityScore?.let { "${it}分" } ?: "—"}")
+                            stock.sealQualityCoveragePct?.let { append("（覆盖 $it%）") }
+                            stock.limitStreak?.takeIf { it > 0 }?.let { append("｜${it}连板") }
+                            stock.firstSealTime?.takeIf { it.length >= 5 }?.let {
+                                append("｜首封 ${it.substring(0, 5)}")
+                            }
+                            stock.lastSealTime?.takeIf { it.length >= 5 }?.let {
+                                append("｜末封 ${it.substring(0, 5)}")
+                            }
+                            append("｜${LimitReport.fundFlowSummary(stock.fundFlow)}")
+                        },
+                        details = LimitReport.detailRows(stock).map { (label, value) ->
+                            UiKit.DetailRow(label, value)
+                        },
+                        onExpansionChanged = {
+                            updateLimitToggle(upToggle, upRowKeys)
+                        },
+                    )
+                    upRows.add(row)
+                    add(row.view)
+                }
+                updateLimitToggle(upToggle, upRowKeys)
+                upToggle.setOnClickListener {
+                    val expanded = QuoteRowExpansionState.toggleAll(upRowKeys)
+                    upRows.forEach { it.setExpanded(expanded) }
+                    updateLimitToggle(upToggle, upRowKeys)
                 }
                 add(
                     MaterialButton(context).apply {
-                        text = "查看全部涨跌停（${limits.up.size + limits.down.size}只）"
+                        text = "查看全部涨停（${limits.up.size}只）"
+                        layoutParams =
+                            LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT,
+                            ).apply { topMargin = UiKit.dp(context, 8) }
                         setOnClickListener {
-                            ReportActivity.open(context, "📊 全部涨跌停", LimitReport.format(limits))
+                            ReportActivity.open(context, "📊 全部涨停", LimitReport.formatUp(limits))
+                        }
+                    }
+                )
+                addDivider()
+                add(downToggle)
+                limits.down.take(8).forEach { stock ->
+                    val boards = stock.boards.take(3).joinToString("、")
+                    val row = UiKit.expandableQuoteRow(
+                        context = context,
+                        stateKey = "market-limit-down:${stock.code}",
+                        name = "▼ ${stock.name}",
+                        code = stock.code,
+                        price = StockPriceText.of(stock.price),
+                        changePct = stock.pct,
+                        summary = buildString {
+                            append(stock.code)
+                            if (boards.isNotBlank()) append("｜$boards")
+                            appendLine()
+                            append("开板 ${stock.openCount?.toString() ?: "—"}")
+                            if (stock.openCount != null) append("次")
+                            append("｜${LimitReport.fundFlowSummary(stock.fundFlow)}")
+                        },
+                        details = LimitReport.detailRows(stock).map { (label, value) ->
+                            UiKit.DetailRow(label, value)
+                        },
+                        onExpansionChanged = {
+                            updateLimitToggle(downToggle, downRowKeys)
+                        },
+                    )
+                    downRows.add(row)
+                    add(row.view)
+                }
+                updateLimitToggle(downToggle, downRowKeys)
+                downToggle.setOnClickListener {
+                    val expanded = QuoteRowExpansionState.toggleAll(downRowKeys)
+                    downRows.forEach { it.setExpanded(expanded) }
+                    updateLimitToggle(downToggle, downRowKeys)
+                }
+                add(
+                    MaterialButton(context).apply {
+                        text = "查看全部跌停（${limits.down.size}只）"
+                        layoutParams =
+                            LinearLayout.LayoutParams(
+                                LinearLayout.LayoutParams.MATCH_PARENT,
+                                LinearLayout.LayoutParams.WRAP_CONTENT,
+                            ).apply { topMargin = UiKit.dp(context, 8) }
+                        setOnClickListener {
+                            ReportActivity.open(context, "📊 全部跌停", LimitReport.formatDown(limits))
                         }
                     }
                 )
@@ -279,42 +403,66 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
      * 量比口径与个股报告、持仓报告里的「量比」完全一致（见 VolumeRatio），
      * 位置口径见 PricePosition。
      */
-    private fun watchNote(
+    private fun watchSummary(
         context: Context,
-        quote: Quote,
+        changePct: Double,
         ratio: Double?,
         priceContext: PriceContext?,
+        fundFlow: String,
     ): CharSequence {
         val builder = SpannableStringBuilder()
-        builder.append(String.format(Locale.CHINA, "%+.2f%%｜", quote.changePct))
-        val turnoverStart = builder.length
-        builder.append(String.format(Locale.CHINA, "成交 %.2f亿", quote.turnover / 1e8))
-        val turnoverEnd = builder.length
-        builder.append(String.format(Locale.CHINA, "｜最高 %.2f 最低 %.2f", quote.high, quote.low))
-        val signal = VolumePrice.of(ratio, quote.changePct, priceContext)
+        val signal = VolumePrice.of(ratio, changePct, priceContext)
         if (signal != VolumePriceSignal.NEUTRAL && ratio != null) {
             val color = UiKit.signalColor(context, signal)
-            builder.setSpan(
-                ForegroundColorSpan(color),
-                turnoverStart,
-                turnoverEnd,
-                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-            )
             val labelStart = builder.length
-            builder.append(
-                String.format(
-                    Locale.CHINA, "｜%s %.2f倍",
-                    VolumePrice.tag(signal), ratio,
-                )
-            )
+            builder.append(String.format(Locale.CHINA, "%s %.2f倍", VolumePrice.tag(signal), ratio))
             builder.setSpan(
                 ForegroundColorSpan(color),
                 labelStart,
                 builder.length,
                 Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
             )
+        } else {
+            builder.append("量价中性")
         }
+        builder.append("｜$fundFlow")
         return builder
+    }
+
+    private fun watchDetails(
+        code: String,
+        quote: Quote,
+        ratio: Double?,
+        priceContext: PriceContext?,
+    ): List<UiKit.DetailRow> {
+        val signal = VolumePrice.of(ratio, quote.changePct, priceContext)
+        return listOf(
+            UiKit.DetailRow("股票代码", code),
+            UiKit.DetailRow("成交额", String.format(Locale.CHINA, "%.2f亿", quote.turnover / 1e8)),
+            UiKit.DetailRow(
+                "最高 / 最低",
+                String.format(Locale.CHINA, "%.2f / %.2f", quote.high, quote.low),
+            ),
+            UiKit.DetailRow("量比", ratio?.let { String.format(Locale.CHINA, "%.2f倍", it) } ?: "—"),
+            UiKit.DetailRow("量价信号", VolumePrice.tag(signal).ifBlank { "中性" }),
+            UiKit.DetailRow("资金流", currentFundFlowSummary(code)),
+            UiKit.DetailRow("近3日资金流", fundFlowWindowSummary(code).ifBlank { "样本不足" }),
+        )
+    }
+
+    private fun currentFundFlowSummary(code: String): String {
+        val current = Repo.fundFlowHistory[code].orEmpty().lastOrNull()
+        return LimitReport.fundFlowSummary(current)
+    }
+
+    private fun fundFlowWindowSummary(code: String): String {
+        val window = FundFlowWindowPolicy.assess(Repo.fundFlowHistory[code].orEmpty())
+        return when {
+            window.sampleCount >= 2 ->
+                "近3日${window.recent3PositiveDays}/${minOf(window.sampleCount, 3)}日净流入"
+            window.sampleCount == 1 -> "多日样本1/3"
+            else -> ""
+        }
     }
 
 }

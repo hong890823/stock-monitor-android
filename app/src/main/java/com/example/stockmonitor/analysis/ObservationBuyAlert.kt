@@ -11,7 +11,7 @@ object ObservationBuyAlert {
         current: ObservationCandidate,
     ): Boolean = previous.stage != ObservationStage.BUY_CANDIDATE &&
         current.stage == ObservationStage.BUY_CANDIDATE &&
-        (current.strategy != ObservationStrategy.LEADER ||
+        (current.strategy == ObservationStrategy.PRE_BREAKOUT ||
             current.entryConfirmationRounds >= ObservationPool.ENTRY_CONFIRMATION_ROUNDS) &&
         !ObservationEligibility.isLimitUpDeferred(current, null)
 

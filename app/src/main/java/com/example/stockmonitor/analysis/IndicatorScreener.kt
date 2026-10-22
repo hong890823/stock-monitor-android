@@ -321,8 +321,13 @@ class IndicatorScreener(private val sina: SinaClient) {
     }
 }
 
-/** 严格档命中项都满足同样的三项条件，按 RSI 升序，越靠前越超卖。 */
-internal fun orderStrictHits(hits: List<ScreenHit>): List<ScreenHit> = hits.sortedBy { it.rsi }
+/** 严格档先按条件评分降序；同分时按 RSI 升序，越靠前越超卖。 */
+internal fun orderStrictHits(hits: List<ScreenHit>): List<ScreenHit> =
+    hits.sortedWith(
+        compareByDescending<ScreenHit> { it.relaxedScore }
+            .thenBy { it.rsi }
+            .thenBy { it.code },
+    )
 
 /**
  * 宽松档先按满足项数降序，再优先DIF非负、KDJ修复；不把更低RSI视为更高优先级。

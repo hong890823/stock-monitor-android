@@ -8,6 +8,9 @@ import com.example.stockmonitor.analysis.StockRiskPolicy
 object MonitoringCopy {
     data class Rule(val label: String, val text: String)
 
+    const val SERVICE_REMINDER =
+        "划掉最近任务卡片会立即停止后台监控，常驻通知同时消失；重新打开应用即恢复。"
+
     fun rules(dropAlertPct: Double = 5.0): List<Rule> = listOf(
         Rule(
             "监控范围",
@@ -43,4 +46,13 @@ object MonitoringCopy {
             "指数均回到 -${MarketRiskPolicy.REARM_PCT}% 以上，只解除大盘风险提醒",
         ),
     )
+
+    fun detailText(dropAlertPct: Double = 5.0): String =
+        buildString {
+            rules(dropAlertPct).forEach { rule ->
+                appendLine("${rule.label}：${rule.text}")
+            }
+            appendLine()
+            append(SERVICE_REMINDER)
+        }
 }

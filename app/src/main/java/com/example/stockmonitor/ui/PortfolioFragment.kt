@@ -1,11 +1,16 @@
 package com.example.stockmonitor.ui
 
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import com.example.stockmonitor.R
 import com.example.stockmonitor.analysis.PositionResult
+import com.example.stockmonitor.analysis.FundFlowWindowPolicy
+import com.example.stockmonitor.analysis.LimitReport
 import com.example.stockmonitor.analysis.VolumePrice
 import com.example.stockmonitor.analysis.VolumePriceSignal
 import com.example.stockmonitor.core.LeaderStrengthTracker
+import com.example.stockmonitor.core.Position
+import com.example.stockmonitor.core.Quote
 import com.example.stockmonitor.core.SectorLeaders
 import com.example.stockmonitor.core.Store
 import com.example.stockmonitor.core.TradeLotLedger
@@ -29,6 +34,12 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             val nextDayTotal = tradeAvailability.sumOf { it.nextTradingDaySellable }
             val untrackedTotal = tradeAvailability.sumOf { it.untrackedQuantity }
             val swingPlan = Repo.portfolioSwing?.validatedFor(portfolio)
+            val holdingRowKeys = if (Repo.portfolioResults.isEmpty()) {
+                portfolio.positions.map { "portfolio:${it.code}" }
+            } else {
+                Repo.portfolioResults.map { "portfolio:${it.code}" }
+            }
+            val holdingRows = mutableListOf<UiKit.ExpandableQuoteRowView>()
 
             UiKit.card(context, "⚙️ 持仓设置").apply {
                 val cash = portfolio.cashPosition()
@@ -100,8 +111,13 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             UiKit
                 .card(
                     context,
-                    "📦 持仓 / 观察信号",
+                    "📦 持仓股",
                     if (Repo.portfolioTask.isActive) "进行中…" else "立即分析",
+                    onSecondaryAction = {
+                        val expanded = QuoteRowExpansionState.toggleAll(holdingRowKeys)
+                        holdingRows.forEach { it.setExpanded(expanded) }
+                        expanded
+                    },
                 ) {
                     // 不用等盘中槽位，随时可以重跑一次；后台分析完成后 Repo 变化会自动刷新本页。
                     if (!Repo.portfolioTask.isActive) {
@@ -109,6 +125,7 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                     }
                 }.apply {
                     addTaskStatus(Repo.portfolioTask)
+                    add(holdingSignalLegend(context))
                     val results = Repo.portfolioResults
                     if (portfolio.positions.isEmpty()) {
                         addText("还没有配置监控股票。先在「持仓设置」里追加股票，盘中每 30 分钟自动分析一次。")
@@ -116,27 +133,26 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                         addText("等待盘中分析结果（每 30 分钟一个槽位，盘后保留最后一次结果）；也可点右上角「立即分析」。")
                         portfolio.positions.forEach { position ->
                             val quote = Repo.quotes[position.code]
-                            add(
-                                UiKit.quoteRow(
-                                    context,
-                                    position.name,
-                                    position.code,
-                                    quote?.let { String.format(Locale.CHINA, "%.2f", it.price) } ?: "—",
-                                    quote?.changePct ?: Double.NaN,
-                                    note =
-                                        if (position.quantity > 0) {
-                                            String.format(
-                                                Locale.CHINA,
-                                                "%s｜持仓 %.0f 股｜成本 %.2f",
-                                                position.code,
-                                                position.quantity,
-                                                position.cost,
-                                            )
-                                        } else {
-                                            "${position.code}｜未持仓观察"
-                                        },
-                                ),
+                            val row = UiKit.expandableQuoteRow(
+                                    context = context,
+                                    stateKey = "portfolio:${position.code}",
+                                    name = position.name,
+                                    code = position.code,
+                                    price = quote?.let { String.format(Locale.CHINA, "%.2f", it.price) } ?: "—",
+                                    changePct = quote?.changePct ?: Double.NaN,
+                                    summary = portfolioSummary(
+                                        positionText = positionSummary(position),
+                                        fundFlow = currentFundFlowSummary(position.code),
+                                    ),
+                                    details = portfolioDetails(position, quote),
+                                    onExpansionChanged = {
+                                        setSecondaryExpanded(
+                                            QuoteRowExpansionState.allExpanded(holdingRowKeys),
+                                        )
+                                    },
                             )
+                            holdingRows.add(row)
+                            add(row.view)
                         }
                     } else {
                         results.forEach { result ->
@@ -147,45 +163,41 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                                 } else {
                                     "未持仓观察"
                                 }
-                            // 用行情行的样式：价格旁边直接给出当日涨跌幅，信号仍由名称前的图标表示。
-                            add(
-                                UiKit.quoteRow(
-                                    context,
-                                    "${signalIcon(result.signal)} ${result.name}",
-                                    result.code,
-                                    String.format(Locale.CHINA, "%.2f", result.price),
-                                    result.changePct,
-                                    note =
-                                        String.format(
-                                            Locale.CHINA,
-                                            "%s｜%s｜评分 %+d",
-                                            result.code,
-                                            positionText,
-                                            result.score,
-                                        ),
-                                ),
+                            val responseText =
+                                swing?.takeIf { it.addQuantity > 0 }?.action() ?: result.action
+                            val swingText =
+                                swing?.takeIf { it.addQuantity <= 0 }?.action()
+                            val row = UiKit.expandableQuoteRow(
+                                    context = context,
+                                    stateKey = "portfolio:${result.code}",
+                                    name = "${signalIcon(result.signal)} ${result.name}",
+                                    code = result.code,
+                                    price = String.format(Locale.CHINA, "%.2f", result.price),
+                                    changePct = result.changePct,
+                                    summary = portfolioSummary(
+                                        positionText = positionText,
+                                        score = result.score,
+                                        fundFlow = currentFundFlowSummary(result.code),
+                                    ),
+                                    details = portfolioDetails(
+                                        result = result,
+                                        positionText = positionText,
+                                        responseText = responseText,
+                                        swingText = swingText,
+                                    ),
+                                    onExpansionChanged = {
+                                        setSecondaryExpanded(
+                                            QuoteRowExpansionState.allExpanded(holdingRowKeys),
+                                        )
+                                    },
                             )
-                            val pct = result.positionPct?.let { String.format(Locale.CHINA, "，占总资金 %.1f%%", it) } ?: ""
-                            addText(
-                                "状态：${result.exitDecision?.stage?.label ?: result.signal}$pct\n" +
-                                    "支撑 ${String.format(Locale.CHINA, "%.2f", result.support)}｜" +
-                                    "压力 ${String.format(Locale.CHINA, "%.2f", result.resistance)}｜" +
-                                    "量比 ${String.format(Locale.CHINA, "%.2f", result.volumeRatio)}" +
-                                    volumeTag(result) + "\n" +
-                                    "入场结构：${result.entrySetup.conciseText()}" +
-                                    (
-                                        result.entrySetup.stopPrice?.let {
-                                            "｜止损 ${String.format(Locale.CHINA, "%.2f", it)}"
-                                        } ?: ""
-                                    ) + "\n" +
-                                    "应对：${swing?.takeIf { it.addQuantity > 0 }?.action() ?: result.action}" +
-                                    (swing?.takeIf { it.addQuantity <= 0 }?.let { "\n波段追加：${it.action()}" } ?: ""),
-                                12f,
-                            )
+                            holdingRows.add(row)
+                            add(row.view)
                             addDivider()
                         }
 
                     }
+                    setSecondaryExpanded(QuoteRowExpansionState.allExpanded(holdingRowKeys))
                     container.addView(view)
                 }
 
@@ -361,6 +373,102 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             String.format(Locale.CHINA, "｜%s", VolumePrice.tag(result.volumeSignal))
         }
 
+    private fun fundFlowSummary(code: String): String {
+        val history = Repo.fundFlowHistory[code].orEmpty()
+        val current = history.lastOrNull()
+        return listOf(LimitReport.fundFlowSummary(current), fundFlowWindowSummary(code))
+            .filter { it.isNotBlank() }
+            .joinToString("｜")
+    }
+
+    private fun currentFundFlowSummary(code: String): String =
+        LimitReport.fundFlowSummary(Repo.fundFlowHistory[code].orEmpty().lastOrNull())
+
+    private fun fundFlowWindowSummary(code: String): String {
+        val window = FundFlowWindowPolicy.assess(Repo.fundFlowHistory[code].orEmpty())
+        return when {
+            window.sampleCount >= 2 ->
+                "近3日${window.recent3PositiveDays}/${minOf(window.sampleCount, 3)}日净流入"
+            window.sampleCount == 1 -> "多日样本1/3"
+            else -> ""
+        }
+    }
+
+    private fun positionSummary(position: Position): String =
+        if (position.quantity > 0) {
+            String.format(
+                Locale.CHINA,
+                "持仓 %.0f 股｜成本 %.2f",
+                position.quantity,
+                position.cost,
+            )
+        } else {
+            "未持仓观察"
+        }
+
+    private fun portfolioSummary(
+        positionText: String,
+        score: Int? = null,
+        fundFlow: String,
+    ): String = listOfNotNull(
+        positionText,
+        score?.let { String.format(Locale.CHINA, "评分 %+d", it) },
+        fundFlow,
+    ).joinToString("｜")
+
+    private fun portfolioDetails(position: Position, quote: Quote?): List<UiKit.DetailRow> =
+        listOfNotNull(
+            UiKit.DetailRow("股票代码", position.code),
+            UiKit.DetailRow("持仓 / 成本", positionSummary(position)),
+            quote?.let {
+                UiKit.DetailRow(
+                    "成交额",
+                    String.format(Locale.CHINA, "%.2f亿", it.turnover / 1e8),
+                )
+            },
+            UiKit.DetailRow("资金流", currentFundFlowSummary(position.code)),
+            UiKit.DetailRow(
+                "近3日资金流",
+                fundFlowWindowSummary(position.code).ifBlank { "样本不足" },
+            ),
+            UiKit.DetailRow("分析状态", "等待盘中分析结果"),
+        )
+
+    private fun portfolioDetails(
+        result: PositionResult,
+        positionText: String,
+        responseText: String,
+        swingText: String?,
+    ): List<UiKit.DetailRow> {
+        val pct = result.positionPct?.let { String.format(Locale.CHINA, "，占总资金 %.1f%%", it) } ?: ""
+        return listOfNotNull(
+            UiKit.DetailRow("股票代码", result.code),
+            UiKit.DetailRow("持仓 / 成本", positionText),
+            UiKit.DetailRow("状态", "${result.exitDecision?.stage?.label ?: result.signal}$pct"),
+            UiKit.DetailRow("评分", String.format(Locale.CHINA, "%+d", result.score)),
+            UiKit.DetailRow(
+                "支撑 / 压力",
+                String.format(Locale.CHINA, "%.2f / %.2f", result.support, result.resistance),
+            ),
+            UiKit.DetailRow(
+                "量比 / 量价",
+                String.format(Locale.CHINA, "%.2f倍", result.volumeRatio) + volumeTag(result),
+            ),
+            UiKit.DetailRow("资金流", currentFundFlowSummary(result.code)),
+            UiKit.DetailRow(
+                "近3日资金流",
+                fundFlowWindowSummary(result.code).ifBlank { "样本不足" },
+            ),
+            UiKit.DetailRow("入场结构", result.entrySetup.compactText()),
+            UiKit.DetailRow("结构依据", result.entrySetup.reason),
+            result.entrySetup.stopPrice?.let {
+                UiKit.DetailRow("失效 / 止损", String.format(Locale.CHINA, "%.2f", it))
+            },
+            UiKit.DetailRow("应对", responseText),
+            swingText?.let { UiKit.DetailRow("波段追加", it) },
+        )
+    }
+
     private fun formatShares(value: Double): String =
         String.format(Locale.CHINA, "%.0f 股", value)
 
@@ -371,7 +479,47 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             "持有观察" -> "⚪"
             "持有/止盈观察" -> "🟡"
             "减仓风险" -> "🔴"
-            else -> "⚫"
+            "趋势转弱观察", "等待" -> "⚫"
+            else -> "⚪"
+        }
+
+    private fun holdingSignalLegend(context: android.content.Context): android.view.View =
+        HorizontalScrollView(context).apply {
+            isHorizontalScrollBarEnabled = false
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            ).apply {
+                topMargin = UiKit.dp(context, 4)
+                bottomMargin = UiKit.dp(context, 6)
+            }
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    listOf(
+                        "🟢" to "买入确认",
+                        "🔵" to "买入观察",
+                        "⚪" to "持有观察",
+                        "🟡" to "持有/止盈观察",
+                        "⚫" to "趋势转弱观察 / 等待",
+                        "🔴" to "减仓风险",
+                    ).forEach { (icon, label) ->
+                        addView(
+                            UiKit.body(context, "$icon\n$label", 11f).apply {
+                                gravity = android.view.Gravity.CENTER
+                                minWidth = UiKit.dp(context, 58)
+                                setPadding(
+                                    UiKit.dp(context, 5),
+                                    UiKit.dp(context, 2),
+                                    UiKit.dp(context, 5),
+                                    UiKit.dp(context, 2),
+                                )
+                                contentDescription = "$label：$icon"
+                            },
+                        )
+                    }
+                },
+            )
         }
 
     private fun buttonRow(

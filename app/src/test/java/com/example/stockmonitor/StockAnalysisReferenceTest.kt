@@ -2,8 +2,10 @@ package com.example.stockmonitor
 
 import com.example.stockmonitor.analysis.StockAnalysis
 import com.example.stockmonitor.analysis.DivergenceState
+import com.example.stockmonitor.analysis.FundFlowTone
 import com.example.stockmonitor.analysis.ReportMarkup
 import com.example.stockmonitor.core.DayBar
+import com.example.stockmonitor.core.FundFlow
 import com.example.stockmonitor.core.Quote
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -52,6 +54,32 @@ class StockAnalysisReferenceTest {
         volume = 39_869_351.0,
         turnover = 728_209_800.0,
     )
+
+    @Test
+    fun fundFlowChangesScoreByAtMostOneAndReportsAssessment() {
+        val quote = liveQuote().copy(price = 18.60, high = 18.62)
+        val base = StockAnalysis.analyze(bars(), "sh600089", "特变电工", quote)
+        val supported = StockAnalysis.analyze(
+            bars(),
+            "sh600089",
+            "特变电工",
+            quote,
+            fundFlow = FundFlow(
+                code = "sh600089",
+                name = "特变电工",
+                asOfMs = 1L,
+                amountYuan = 10_000_000.0,
+                mainNetPct = 5.0,
+            ),
+        )
+
+        assertTrue(supported.score - base.score in 0..1)
+        assertEquals(1, supported.fundFlowScoreDelta)
+        assertEquals(base.score, supported.intradayScore)
+        assertEquals(FundFlowTone.SUPPORTIVE, supported.fundFlowAssessment!!.tone)
+        assertTrue(supported.fundFlowNote!!.contains("订单规模"))
+        assertTrue(StockAnalysis.formatReport(supported).contains("资金流"))
+    }
 
     @Test
     fun reportIncludesSharedTrendAndHighPositionState() {

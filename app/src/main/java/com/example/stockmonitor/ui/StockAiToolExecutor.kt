@@ -224,7 +224,13 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
             val security = resolveGlobal(code, name)
             GlobalFundamentalsClient().kline(security, 240)
         }
-        val result = StockAnalysis.analyze(history, code, name, live = null)
+        val result = StockAnalysis.analyze(
+            history = history,
+            code = code,
+            name = name,
+            live = null,
+            fundFlowHistory = if (isA股(code)) Repo.fundFlowHistory[code].orEmpty() else emptyList(),
+        )
         // 个股报告要带环境：不带的话，塌陷期那句「回踩不破均线可以继续持有」是反话。
         // 板块归属只对 A 股有数据源，港美股写「归属暂缺」而不是硬套 A 股板块。
         val aShare = isA股(code)

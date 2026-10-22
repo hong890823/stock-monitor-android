@@ -263,6 +263,7 @@ class AnalysisService : Service() {
                 benchmark,
                 // 盘中按已过交易时间折算量比，收盘后自动退回纯日线口径。
                 elapsedTradingMinutes = TradingCalendar.tradingMinutesElapsed(),
+                fundFlowHistory = Repo.fundFlowHistory[hit.first].orEmpty(),
             )
         // 环境要先就位，否则报告里那句「回踩不破均线可以继续持有」在塌陷期是反话。
         val env =
@@ -342,6 +343,7 @@ class AnalysisService : Service() {
                         live = live,
                         benchmark = benchmark,
                         elapsedTradingMinutes = TradingCalendar.tradingMinutesElapsed(),
+                        fundFlowHistory = Repo.fundFlowHistory[hit.first].orEmpty(),
                     )
                 }
             }.getOrNull()

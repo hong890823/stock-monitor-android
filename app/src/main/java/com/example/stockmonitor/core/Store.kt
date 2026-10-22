@@ -138,6 +138,10 @@ class Store(
         get() = ObservationPoolJson.decode(prefs.getString(KEY_OBSERVATION_POOL, null))
         set(value) = prefs.edit().putString(KEY_OBSERVATION_POOL, ObservationPoolJson.encode(value)).apply()
 
+    var fundFlowHistory: Map<String, List<FundFlow>>
+        get() = FundFlowHistoryJson.decode(prefs.getString(KEY_FUND_FLOW_HISTORY, null))
+        set(value) = prefs.edit().putString(KEY_FUND_FLOW_HISTORY, FundFlowHistoryJson.encode(value)).apply()
+
     /** 观察池每日证据快照；只保留每只股票最近 30 个交易日。 */
     var observationSnapshots: List<ObservationSnapshot>
         get() = ObservationSnapshotJson.decode(prefs.getString(KEY_OBSERVATION_SNAPSHOTS, null))
@@ -168,6 +172,19 @@ class Store(
     var lastSummaryAfternoon: String?
         get() = prefs.getString(KEY_SUMMARY_AFTERNOON, null)
         set(value) = prefs.edit().putString(KEY_SUMMARY_AFTERNOON, value).apply()
+
+    /** 最近一次有效今日要闻及其刷新时间；失败时保留，不清空用户还能看到的内容。 */
+    var lastNewsJson: String?
+        get() = prefs.getString(KEY_LAST_NEWS, null)
+        set(value) = prefs.edit().putString(KEY_LAST_NEWS, value).apply()
+
+    var lastNewsUpdatedAtMs: Long
+        get() = prefs.getLong(KEY_LAST_NEWS_UPDATED_AT, 0L)
+        set(value) = prefs.edit().putLong(KEY_LAST_NEWS_UPDATED_AT, value).apply()
+
+    var lastNewsAttemptAtMs: Long
+        get() = prefs.getLong(KEY_LAST_NEWS_ATTEMPT_AT, 0L)
+        set(value) = prefs.edit().putLong(KEY_LAST_NEWS_ATTEMPT_AT, value).apply()
 
     /**
      * 概念板块榜的落盘缓存。东财不可达时用新浪兜底，两个源都拿不到时也能立刻显示上一次成功的结果，
@@ -453,6 +470,7 @@ class Store(
         private const val KEY_BOARD_GROUPS = "board_groups"
         private const val KEY_SCREEN_RESULT = "screen_result"
         private const val KEY_OBSERVATION_POOL = "observation_pool"
+        private const val KEY_FUND_FLOW_HISTORY = "fund_flow_history"
         private const val KEY_OBSERVATION_SNAPSHOTS = "observation_snapshots"
         private const val KEY_PAPER_TRADES = "paper_trades"
         private const val KEY_SUMMARY_TEXT = "summary_text"
@@ -460,6 +478,9 @@ class Store(
         private const val KEY_SUMMARY_DATE = "summary_date"
         private const val KEY_SUMMARY_NIGHT = "summary_night"
         private const val KEY_SUMMARY_AFTERNOON = "summary_afternoon"
+        private const val KEY_LAST_NEWS = "last_news"
+        private const val KEY_LAST_NEWS_UPDATED_AT = "last_news_updated_at"
+        private const val KEY_LAST_NEWS_ATTEMPT_AT = "last_news_attempt_at"
         private const val KEY_MONITOR_ENABLED = "monitor_enabled"
         private const val KEY_BOOT_AUTOSTART = "boot_autostart"
         private const val KEY_LAST_STARTUP_ERROR = "last_startup_error"

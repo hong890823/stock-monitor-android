@@ -23,23 +23,56 @@ class ObservationPoolStrategyTest {
         assertEquals(ObservationStage.NEAR_ENTRY, first.stage)
         val restored = ObservationPoolJson.decode(ObservationPoolJson.encode(listOf(first))).single()
         assertEquals(first, restored)
-        val second = ObservationPool.evaluate(restored, entry.copy(evaluatedAtMs = 1_060_000L, quoteVolume = 1100.0))
+        val second = ObservationPool.evaluate(restored, entry.copy(evaluatedAtMs = 1_900_000L))
         assertEquals(ObservationStage.BUY_CANDIDATE, second.stage)
         assertTrue(ObservationBuyAlert.shouldNotify(first, second))
         assertFalse(ObservationBuyAlert.shouldNotify(second, second))
     }
 
     @Test
-    fun repeatedQuoteFastPollGapAndNewDayDoNotCompleteConfirmation() {
+    fun cumulativeVolumeAloneDoesNotCompleteConfirmation() {
         val first = ObservationPool.evaluate(candidate(ObservationStrategy.LEADER), entry)
-        listOf(
-            entry.copy(evaluatedAtMs = 1_060_000L),
-            entry.copy(evaluatedAtMs = 1_010_000L, quoteVolume = 1100.0),
-            entry.copy(evaluatedAtMs = 1_400_000L, quoteVolume = 1100.0),
-            entry.copy(date = "2026-10-16", evaluatedAtMs = 1_060_000L, quoteVolume = 1100.0),
-        ).forEach { signal ->
-            assertEquals(ObservationStage.NEAR_ENTRY, ObservationPool.evaluate(first, signal).stage)
-        }
+        val repeated = ObservationPool.evaluate(first, entry.copy(evaluatedAtMs = 1_060_000L, quoteVolume = 1100.0))
+        assertEquals(ObservationStage.NEAR_ENTRY, repeated.stage)
+        assertEquals(1, repeated.entryConfirmationRounds)
+
+        val freshWithoutVolumeChange = ObservationPool.evaluate(
+            first,
+            entry.copy(evaluatedAtMs = 1_900_000L, quoteVolume = 1000.0),
+        )
+        assertEquals(ObservationStage.BUY_CANDIDATE, freshWithoutVolumeChange.stage)
+    }
+
+    @Test
+    fun newDayDoesNotCompleteConfirmation() {
+        val first = ObservationPool.evaluate(candidate(ObservationStrategy.LEADER), entry)
+        val nextDay = ObservationPool.evaluate(
+            first,
+            entry.copy(date = "2026-10-16", evaluatedAtMs = 1_900_000L),
+        )
+        assertEquals(ObservationStage.NEAR_ENTRY, nextDay.stage)
+        assertEquals(1, nextDay.entryConfirmationRounds)
+    }
+
+    @Test
+    fun threeBoardCandidateRequiresThreeSpacedRounds() {
+        val highBoard = candidate(ObservationStrategy.LIMIT_UP_CONTINUATION).copy(
+            continuousObservation = true,
+            limitUpBlocked = true,
+            limitStreak = 3,
+        )
+        val opened = entry.copy(
+            strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
+            evaluatedAtMs = 1_000_000L,
+        )
+        val first = ObservationPool.evaluate(highBoard, opened)
+        val second = ObservationPool.evaluate(first, opened.copy(evaluatedAtMs = 1_900_000L))
+        val third = ObservationPool.evaluate(second, opened.copy(evaluatedAtMs = 2_800_000L))
+
+        assertEquals(1, first.entryConfirmationRounds)
+        assertEquals(2, second.entryConfirmationRounds)
+        assertEquals(ObservationStage.NEAR_ENTRY, second.stage)
+        assertEquals(ObservationStage.BUY_CANDIDATE, third.stage)
     }
 
     @Test
@@ -49,7 +82,7 @@ class ObservationPoolStrategyTest {
         assertEquals(0, blocked.entryConfirmationRounds)
         val risk = ObservationPool.evaluate(first, entry.copy(riskFlag = true))
         assertEquals(0, risk.entryConfirmationRounds)
-        val restarted = ObservationPool.evaluate(risk, entry.copy(evaluatedAtMs = 1_060_000L, quoteVolume = 1100.0))
+        val restarted = ObservationPool.evaluate(risk, entry.copy(evaluatedAtMs = 1_900_000L))
         assertEquals(ObservationStage.NEAR_ENTRY, restarted.stage)
     }
 

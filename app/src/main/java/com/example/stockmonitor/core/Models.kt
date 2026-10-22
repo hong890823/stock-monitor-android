@@ -317,7 +317,12 @@ data class ConceptSummary(
     }
 }
 
-/** 涨跌停个股。 */
+enum class LimitDataSource(val label: String) {
+    EASTMONEY_LIMIT_POOL("东方财富涨跌停池"),
+    SINA_APPROX("新浪近似阈值"),
+}
+
+/** 涨跌停个股。缺失的盘口统计字段保持为空，不使用应用内抽样补写历史。 */
 data class LimitStock(
     val code: String,
     val name: String,
@@ -325,9 +330,56 @@ data class LimitStock(
     val prev: Double,
     val pct: Double,
     val boards: List<String> = emptyList(),
+    val sealAmountYuan: Double? = null,
+    val turnoverYuan: Double? = null,
+    val floatMarketValueYuan: Double? = null,
+    val openCount: Int? = null,
+    val firstSealTime: String? = null,
+    val lastSealTime: String? = null,
+    val limitStreak: Int? = null,
+    val industry: String? = null,
+    val source: LimitDataSource = LimitDataSource.SINA_APPROX,
+    val fundFlow: FundFlow? = null,
+    val sealQualityScore: Int? = null,
+    val sealQualityCoveragePct: Int? = null,
+) {
+    val sealToTurnoverPct: Double?
+        get() = ratioPercent(sealAmountYuan, turnoverYuan)
+
+    val sealToFloatPct: Double?
+        get() = ratioPercent(sealAmountYuan, floatMarketValueYuan)
+
+    private fun ratioPercent(numerator: Double?, denominator: Double?): Double? {
+        if (numerator == null || denominator == null) return null
+        if (!numerator.isFinite() || !denominator.isFinite() || denominator <= 0.0) return null
+        return numerator / denominator * 100.0
+    }
+}
+
+/** 按主动买卖订单规模归类的资金流快照，单位为元/百分比；缺失字段保持为空。 */
+data class FundFlow(
+    val code: String,
+    val name: String,
+    val asOfMs: Long,
+    val amountYuan: Double? = null,
+    val mainNetYuan: Double? = null,
+    val mainNetPct: Double? = null,
+    val superLargeNetYuan: Double? = null,
+    val superLargeNetPct: Double? = null,
+    val largeNetYuan: Double? = null,
+    val largeNetPct: Double? = null,
+    val mediumNetYuan: Double? = null,
+    val mediumNetPct: Double? = null,
+    val smallNetYuan: Double? = null,
+    val smallNetPct: Double? = null,
+    val tradingDate: String? = null,
 )
 
-data class LimitData(val up: List<LimitStock>, val down: List<LimitStock>)
+data class LimitData(
+    val up: List<LimitStock>,
+    val down: List<LimitStock>,
+    val source: LimitDataSource = LimitDataSource.SINA_APPROX,
+)
 
 /**
  * 板块成分股。
@@ -506,6 +558,7 @@ enum class ObservationStage(val label: String) {
 enum class ObservationStrategy(val label: String) {
     PRE_BREAKOUT("启动前潜力"),
     LEADER("强势龙头"),
+    LIMIT_UP_CONTINUATION("涨停持续观察"),
 }
 
 data class ObservationCandidate(
@@ -529,6 +582,11 @@ data class ObservationCandidate(
     val entryConfirmedAtMs: Long = 0L,
     val entryConfirmationVolume: Double = 0.0,
     val breakoutRisk: BreakoutRiskDecision? = null,
+    val continuousObservation: Boolean = false,
+    val limitStreak: Int? = null,
+    val sealQualityScore: Int? = null,
+    val sealQualityCoveragePct: Int? = null,
+    val boards: List<String> = emptyList(),
 )
 
 data class ObservationSignal(
@@ -558,6 +616,9 @@ data class ObservationSignal(
     val boxRange: BoxRangeAssessment? = null,
     val highPosition: HighPositionDecision? = null,
     val breakoutRisk: BreakoutRiskDecision? = null,
+    val fundFlow: com.example.stockmonitor.analysis.FundFlowAssessment? = null,
+    val fundFlowWindow: com.example.stockmonitor.analysis.FundFlowWindowAssessment? = null,
+    val environmentGate: String? = null,
 )
 
 /**

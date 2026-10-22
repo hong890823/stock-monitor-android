@@ -58,7 +58,11 @@ data class PositionResult(
     val highPosition: HighPositionDecision? = null,
     val rhythm: AdaptiveRhythmDecision? = null,
     val impulse: ImpulseContext? = null,
-)
+    val fundFlowScoreDelta: Int = 0,
+) {
+    val intradayScore: Int
+        get() = score - fundFlowScoreDelta
+}
 
 object PortfolioAnalysis {
 
@@ -330,6 +334,7 @@ object PortfolioAnalysis {
             highPosition = technical.highPosition,
             rhythm = rhythm,
             impulse = technical.impulse,
+            fundFlowScoreDelta = technical.fundFlowScoreDelta,
         )
     }
 

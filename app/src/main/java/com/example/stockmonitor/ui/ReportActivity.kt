@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
+import android.text.util.Linkify
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -30,7 +31,10 @@ class ReportActivity : AppCompatActivity() {
             this.title = title
             setNavigationOnClickListener { finish() }
         }
-        findViewById<TextView>(R.id.report_text).text = styled(text)
+        findViewById<TextView>(R.id.report_text).apply {
+            this.text = styled(text)
+            Linkify.addLinks(this, Linkify.WEB_URLS)
+        }
         findViewById<android.view.View>(R.id.action_copy).setOnClickListener {
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             clipboard.setPrimaryClip(ClipData.newPlainText(title, plain))

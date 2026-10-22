@@ -268,7 +268,7 @@ object DailyReview {
                 appendLine(strongContinuationSection(inputs.strongContinuationEvents))
             }
             append(separator())
-            appendLine("说明：本报告由规则按固定口径拼装（不调用 AI），每个数字都可在「持仓 / 观察信号」卡片与「📦 持仓信息」报告里核对；")
+            appendLine("说明：本报告由规则按固定口径拼装（不调用 AI），每个数字都可在「持仓股」卡片与「📦 持仓信息」报告里核对；")
             appendLine("只给条件式技术参考，不自动下单，不替你拍板。")
             appendLine("⚠️ 市场有风险，投资需谨慎，不构成投资建议。")
             append("--- 数据截至 ${inputs.analyzedAt}，仅供参考 ---")

@@ -23,11 +23,16 @@ object ObservationPoolJson {
                     put("source", item.source)
                     put("reason", item.reason)
                     put("strategy", item.strategy.name)
+                    put("continuous_observation", item.continuousObservation)
                     put("limit_up_blocked", item.limitUpBlocked)
                     put("limit_up_shrink_acceleration", item.limitUpShrinkAcceleration)
                     put("entry_confirmation_rounds", item.entryConfirmationRounds)
                     put("entry_confirmed_at_ms", item.entryConfirmedAtMs)
                     put("entry_confirmation_volume", item.entryConfirmationVolume)
+                    item.limitStreak?.let { put("limit_streak", it) }
+                    item.sealQualityScore?.let { put("seal_quality_score", it) }
+                    item.sealQualityCoveragePct?.let { put("seal_quality_coverage_pct", it) }
+                    put("boards", JSONArray(item.boards))
                     item.breakoutRisk?.let { risk ->
                         put("breakout_risk", JSONObject().apply {
                             put("risk", risk.risk)
@@ -68,6 +73,7 @@ object ObservationPoolJson {
                     strategy = runCatching {
                         ObservationStrategy.valueOf(item.optString("strategy"))
                     }.getOrDefault(ObservationStrategy.PRE_BREAKOUT),
+                    continuousObservation = item.optBoolean("continuous_observation", false),
                     evidence = ObservationEvidenceJson.read(item),
                     limitUpBlocked = item.optBoolean("limit_up_blocked", item.optString("reason").contains("涨停封板")),
                     limitUpShrinkAcceleration = item.optBoolean(
@@ -76,6 +82,22 @@ object ObservationPoolJson {
                     entryConfirmationRounds = item.optInt("entry_confirmation_rounds", 0),
                     entryConfirmedAtMs = item.optLong("entry_confirmed_at_ms", 0L),
                     entryConfirmationVolume = item.optDouble("entry_confirmation_volume", 0.0),
+                    limitStreak = if (item.has("limit_streak")) item.optInt("limit_streak") else null,
+                    sealQualityScore = if (item.has("seal_quality_score")) {
+                        item.optInt("seal_quality_score")
+                    } else {
+                        null
+                    },
+                    sealQualityCoveragePct = if (item.has("seal_quality_coverage_pct")) {
+                        item.optInt("seal_quality_coverage_pct")
+                    } else {
+                        null
+                    },
+                    boards = item.optJSONArray("boards")?.let { boards ->
+                        (0 until boards.length()).mapNotNull { index ->
+                            boards.optString(index).takeIf { it.isNotBlank() }
+                        }
+                    }.orEmpty(),
                     breakoutRisk = item.optJSONObject("breakout_risk")?.let { risk ->
                         BreakoutRiskDecision(
                             risk = risk.optBoolean("risk", false),

@@ -97,6 +97,7 @@ object HoldingAnalyzer {
                 benchmark = if (position.code == "sh000001") null else benchmark,
                 // 盘中按已过交易时间折算量比，收盘后自动退回纯日线口径。
                 elapsedTradingMinutes = TradingCalendar.tradingMinutesElapsed(),
+                fundFlowHistory = Repo.fundFlowHistory[position.code].orEmpty(),
             )
         val today = TimeUtils.todayText()
         val now = System.currentTimeMillis()

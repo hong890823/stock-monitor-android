@@ -1,6 +1,7 @@
 package com.example.stockmonitor.analysis
 
 import com.example.stockmonitor.core.DayBar
+import com.example.stockmonitor.core.FundFlow
 import com.example.stockmonitor.core.Quote
 import com.example.stockmonitor.core.RowSnapshot
 import java.util.Locale
@@ -72,7 +73,16 @@ data class TechnicalResult(
     val highPositionEvidence: HighPositionEvidence? = null,
     val highPosition: HighPositionDecision? = null,
     val impulse: ImpulseContext? = null,
-)
+    val fundFlow: FundFlow? = null,
+    val fundFlowAssessment: FundFlowAssessment? = null,
+    val fundFlowNote: String? = null,
+    val fundFlowScoreDelta: Int = 0,
+    val fundFlowWindowAssessment: FundFlowWindowAssessment? = null,
+    val fundFlowWindowNote: String? = null,
+) {
+    val intradayScore: Int
+        get() = score - fundFlowScoreDelta
+}
 
 /**
  * 单股技术分析，逐条对应 stock_analysis.analyze_history / format_report。
@@ -92,6 +102,8 @@ object StockAnalysis {
          * 盘中调用时传 TradingCalendar.tradingMinutesElapsed()。
          */
         elapsedTradingMinutes: Int = VolumeRatio.TRADING_MINUTES,
+        fundFlow: FundFlow? = null,
+        fundFlowHistory: List<FundFlow> = emptyList(),
     ): TechnicalResult {
         require(history.size >= 60) { "历史数据不足60个交易日，无法进行稳定分析" }
         val bars = history.filter { it.close > 0 }
@@ -382,6 +394,25 @@ object StockAnalysis {
             signals.add("开盘后站稳，短线承接较好")
         }
 
+        val effectiveFundFlow = fundFlow ?: fundFlowHistory.lastOrNull()
+        val fundFlowAssessment = FundFlowPolicy.assess(priceChange, effectiveFundFlow)
+        val fundFlowWindowAssessment = FundFlowWindowPolicy.assess(fundFlowHistory)
+        val fundFlowDelta = listOf(
+            FundFlowPolicy.scoreDelta(fundFlowAssessment),
+            FundFlowWindowPolicy.scoreDelta(fundFlowWindowAssessment),
+        ).let { deltas ->
+            when {
+                deltas.any { it < 0 } -> -1
+                deltas.any { it > 0 } -> 1
+                else -> 0
+            }
+        }
+        score += fundFlowDelta
+        val fundFlowNote = effectiveFundFlow?.let { fundFlowAssessment.reason }
+        val fundFlowWindowNote = fundFlowHistory.takeIf { it.isNotEmpty() }?.let {
+            fundFlowWindowAssessment.reason
+        }
+
         val action = when {
             score >= 4 -> "技术面偏强：不建议追高，优先等待回踩MA20或前高突破确认。"
             score >= 2 -> "技术面震荡偏强：可观察，不在放量冲高时追入，等待量价共振。"
@@ -441,6 +472,12 @@ object StockAnalysis {
             highPositionEvidence = highPositionEvidence,
             highPosition = highPosition,
             impulse = impulse,
+            fundFlow = effectiveFundFlow,
+            fundFlowAssessment = effectiveFundFlow?.let { fundFlowAssessment },
+            fundFlowNote = fundFlowNote,
+            fundFlowScoreDelta = fundFlowDelta,
+            fundFlowWindowAssessment = fundFlowWindowNote?.let { fundFlowWindowAssessment },
+            fundFlowWindowNote = fundFlowWindowNote,
         )
     }
 
@@ -591,6 +628,8 @@ object StockAnalysis {
             if (locationMeaning.isNotBlank()) appendLine("位置：$locationMeaning")
             // 第二节只讲量价，这里放量价那一条结论；它不在 signals 末尾，用 takeLast 会取到别的指标。
             appendLine("结论：$volumeNote")
+            result.fundFlowNote?.let { appendLine("资金流：$it") }
+            result.fundFlowWindowNote?.let { appendLine("多日资金流：$it") }
             appendLine()
             appendLine("三、开盘结构")
             appendLine("昨收 ${price(result.opening.previousClose)}｜今开 ${price(result.opening.open)}｜跳空 ${String.format(Locale.CHINA, "%+.2f%%", result.opening.gapPct)}")

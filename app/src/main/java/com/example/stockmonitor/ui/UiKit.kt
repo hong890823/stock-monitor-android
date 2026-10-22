@@ -209,8 +209,20 @@ object UiKit {
         setPadding(0, dp(context, 18), 0, dp(context, 18))
     }
 
-    fun card(context: Context, title: String? = null, actionText: String? = null, onAction: (() -> Unit)? = null): Card =
-        Card(context, title, actionText, onAction)
+    fun card(
+        context: Context,
+        title: String? = null,
+        actionText: String? = null,
+        onSecondaryAction: (() -> Boolean)? = null,
+        onAction: (() -> Unit)? = null,
+    ): Card =
+        Card(
+            context,
+            title,
+            actionText,
+            onAction = onAction,
+            secondaryAction = onSecondaryAction,
+        )
 
     fun collapsibleCard(
         context: Context,
@@ -227,6 +239,7 @@ object UiKit {
         onAction: (() -> Unit)?,
         initialExpanded: Boolean? = null,
         onExpansionChanged: ((Boolean) -> Unit)? = null,
+        secondaryAction: (() -> Boolean)? = null,
     ) {
         val view: MaterialCardView = MaterialCardView(context).apply {
             layoutParams = LinearLayout.LayoutParams(
@@ -248,6 +261,7 @@ object UiKit {
         val body: LinearLayout = LinearLayout(context).apply {
             orientation = LinearLayout.VERTICAL
         }
+        private var secondaryActionView: TextView? = null
 
         init {
             view.addView(inner)
@@ -275,6 +289,19 @@ object UiKit {
                             setOnClickListener { onAction() }
                         }
                     )
+                }
+                if (secondaryAction != null) {
+                    val secondaryLabel = TextView(context).apply {
+                        textSize = 12f
+                        setTextColor(color(context, R.color.brand_primary))
+                        setPadding(dp(context, 8), dp(context, 4), 0, dp(context, 4))
+                        setOnClickListener {
+                            setSecondaryExpanded(secondaryAction())
+                        }
+                    }
+                    secondaryActionView = secondaryLabel
+                    header.addView(secondaryLabel)
+                    setSecondaryExpanded(false)
                 }
                 val headerDivider = View(context).apply {
                     layoutParams = LinearLayout.LayoutParams(
@@ -312,6 +339,10 @@ object UiKit {
                 inner.addView(headerDivider)
             }
             inner.addView(body)
+        }
+
+        fun setSecondaryExpanded(allExpanded: Boolean) {
+            secondaryActionView?.text = if (allExpanded) "全部收起 ▴" else "全部展开 ▾"
         }
 
         fun addRow(view: View): Card {
@@ -449,5 +480,105 @@ object UiKit {
         val detail: CharSequence = note ?: code
         row.addView(UiKit.body(context, detail, 11.5f))
         return row
+    }
+
+    data class DetailRow(val label: String, val value: String)
+
+    class ExpandableQuoteRowView(
+        val view: View,
+        private val applyExpansion: (Boolean) -> Unit,
+    ) {
+        fun setExpanded(expanded: Boolean) {
+            applyExpansion(expanded)
+        }
+    }
+
+    /**
+     * 个股列表的收缩行：点击核心区域展开结构化详情，点击状态文字也能切换。
+     * 状态按 [stateKey] 保存在页面会话中，行情刷新重建视图后不会意外收起。
+     */
+    fun expandableQuoteRow(
+        context: Context,
+        stateKey: String,
+        name: String,
+        code: String,
+        price: String,
+        changePct: Double,
+        summary: CharSequence,
+        details: List<DetailRow>,
+        onExpansionChanged: (Boolean) -> Unit = {},
+    ): ExpandableQuoteRowView {
+        val root = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+        }
+        val core = quoteRow(context, name, code, price, changePct, summary)
+        root.addView(core)
+
+        val detailsView = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(context, 8), dp(context, 2), dp(context, 4), dp(context, 5))
+            visibility = if (QuoteRowExpansionState.isExpanded(stateKey)) View.VISIBLE else View.GONE
+        }
+        details.forEach { detail ->
+            val row = LinearLayout(context).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(context, 2), 0, dp(context, 2))
+            }
+            row.addView(
+                TextView(context).apply {
+                    text = detail.label
+                    textSize = 11.5f
+                    setTextColor(color(context, R.color.text_secondary))
+                    layoutParams = LinearLayout.LayoutParams(
+                        dp(context, 82),
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                    )
+                }
+            )
+            row.addView(
+                body(context, detail.value, 11.5f, color(context, R.color.text_primary)).apply {
+                    layoutParams = LinearLayout.LayoutParams(
+                        0,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        1f,
+                    )
+                }
+            )
+            detailsView.addView(row)
+        }
+        root.addView(detailsView)
+
+        val toggleLabel = TextView(context).apply {
+            textSize = 11.5f
+            setTextColor(color(context, R.color.brand_primary))
+            gravity = Gravity.END
+            setPadding(dp(context, 8), 0, dp(context, 4), dp(context, 4))
+            importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+        }
+        root.addView(toggleLabel)
+
+        fun updateExpansion(expanded: Boolean) {
+            detailsView.visibility = if (expanded) View.VISIBLE else View.GONE
+            toggleLabel.text = if (expanded) "收起详情 ▴" else "展开详情 ▾"
+            ViewCompat.setStateDescription(core, if (expanded) "已展开详情" else "已收起详情")
+        }
+
+        val toggleExpansion = View.OnClickListener {
+            val expanded = QuoteRowExpansionState.toggle(stateKey)
+            updateExpansion(expanded)
+            onExpansionChanged(expanded)
+        }
+        core.isClickable = true
+        core.isFocusable = true
+        core.contentDescription = "$name $code"
+        core.setOnClickListener(toggleExpansion)
+        toggleLabel.setOnClickListener(toggleExpansion)
+        updateExpansion(QuoteRowExpansionState.isExpanded(stateKey))
+        return ExpandableQuoteRowView(view = root, applyExpansion = { updateExpansion(it) })
     }
 }

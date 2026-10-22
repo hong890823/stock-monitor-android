@@ -12,7 +12,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * 选股榜单排序：严格档按 RSI 升序；宽松档优先条件齐全、修复较明确的候选。
+ * 选股榜单排序：先看条件评分，评分相同时再按各策略的次级指标排序。
  */
 class IndicatorScreenerOrderTest {
 
@@ -31,10 +31,10 @@ class IndicatorScreenerOrderTest {
     )
 
     @Test
-    fun `严格档按 RSI 升序`() {
-        val ordered = orderStrictHits(listOf(hit("a", 25.0, 3), hit("b", 12.0, 3), hit("c", 18.0, 3)))
+    fun `严格档先按评分降序 同分按 RSI 升序`() {
+        val ordered = orderStrictHits(listOf(hit("a", 25.0, 3), hit("b", 12.0, 2), hit("c", 18.0, 3)))
 
-        assertEquals(listOf("b", "c", "a"), ordered.map { it.code })
+        assertEquals(listOf("c", "a", "b"), ordered.map { it.code })
     }
 
     @Test

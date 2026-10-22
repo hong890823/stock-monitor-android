@@ -18,6 +18,7 @@ import com.example.stockmonitor.analysis.FundamentalsReport
 import com.example.stockmonitor.analysis.GlobalCard
 import com.example.stockmonitor.analysis.GlobalFundamentalsReport
 import com.example.stockmonitor.analysis.Governance
+import com.example.stockmonitor.analysis.HeadlineSelector
 import com.example.stockmonitor.analysis.HoldingTContext
 import com.example.stockmonitor.analysis.HoldingTTrend
 import com.example.stockmonitor.analysis.IntradaySignal
@@ -47,6 +48,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import java.util.TimeZone
 
 /** 工具页：个股技术分析、自选股管理、盘面总结、监控设置。 */
 class ToolsFragment : BaseFragment(R.layout.fragment_scroll) {
@@ -270,6 +272,51 @@ class ToolsFragment : BaseFragment(R.layout.fragment_scroll) {
                 ).view,
             )
 
+            // ── 今日要闻 ──
+            UiKit.card(context, "📰 今日要闻").apply {
+                val nowMs = System.currentTimeMillis()
+                val newsState = Repo.todayHeadlinesState
+                val headlines = newsState.displayItems(nowMs)
+                addTaskStatus(Repo.newsTask)
+                addText(
+                    "公开财经快讯自动筛选｜更新时间 ${formatNewsTime(newsState.updatedAtMs)}",
+                    11.5f,
+                )
+                if (headlines.isEmpty()) {
+                    addText(
+                        if (newsState.error.isNullOrBlank()) "暂无今日可用要闻" else "刷新失败，暂时没有可展示的今日要闻",
+                        12f,
+                    )
+                } else {
+                    headlines.take(HeadlineSelector.CARD_LIMIT).forEachIndexed { index, selected ->
+                        addText(
+                            "${index + 1}. ${selected.item.title}\n" +
+                                "${selected.category.label}｜${selected.item.source}｜${formatNewsTime(selected.item.publishedAtMs)}",
+                            11.5f,
+                        )
+                    }
+                }
+                add(
+                    button(context, if (newsState.loading) "正在刷新…" else "刷新今日要闻") {
+                        if (!newsState.loading) {
+                            MonitorService.send(context, MonitorService.ACTION_NEWS)
+                        }
+                    },
+                )
+                if (headlines.isNotEmpty()) {
+                    add(
+                        button(context, "查看全部要闻（${headlines.size}条）") {
+                            ReportActivity.open(
+                                context,
+                                "📰 今日要闻",
+                                HeadlineSelector.formatReport(headlines, newsState.updatedAtMs),
+                            )
+                        },
+                    )
+                }
+                container.addView(view)
+            }
+
             // ── 盘面总结 ──
             UiKit.card(context, "📋 盘面总结").apply {
                 val hasSummary = !Repo.summaryText.isNullOrBlank() || !store.lastSummaryText.isNullOrBlank()
@@ -308,11 +355,19 @@ class ToolsFragment : BaseFragment(R.layout.fragment_scroll) {
                     if (store.alertsEnabled && store.intradaySignalEnabled) "已开启" else "已关闭",
                 )
                 addKeyValue("涨跌停扫描", if (store.limitScanEnabled) "已开启" else "已关闭")
-                MonitoringCopy.rules(store.dropAlertPct).forEach { rule -> addKeyValue(rule.label, rule.text) }
                 addKeyValue("当前状态", Repo.statusText)
                 add(
                     button(context, "打开设置") {
                         Dialogs.showSettings(requireActivity() as AppCompatActivity) { render() }
+                    },
+                )
+                add(
+                    button(context, "监控规则与说明") {
+                        Dialogs.showDetails(
+                            requireActivity() as AppCompatActivity,
+                            "监控规则与说明",
+                            MonitoringCopy.detailText(store.dropAlertPct),
+                        )
                     },
                 )
                 add(
@@ -373,7 +428,6 @@ class ToolsFragment : BaseFragment(R.layout.fragment_scroll) {
                         }
                     },
                 )
-                addText("划掉最近任务卡片会立即停止后台监控，常驻通知同时消失；重新打开应用即恢复。", 11.5f)
                 add(
                     button(context, "停止后台监控") {
                         MonitorService.stop(context)
@@ -869,6 +923,11 @@ class ToolsFragment : BaseFragment(R.layout.fragment_scroll) {
     ) {
         addKeyValue(label, value, level?.let { riskColor(context, it) } ?: UiKit.color(context, R.color.text_primary), note)
     }
+
+    private fun formatNewsTime(timestampMs: Long): String =
+        if (timestampMs <= 0L) "—" else java.text.SimpleDateFormat("MM-dd HH:mm", Locale.CHINA)
+            .apply { timeZone = TimeZone.getTimeZone("Asia/Shanghai") }
+            .format(timestampMs)
 
     private fun riskColor(
         context: Context,

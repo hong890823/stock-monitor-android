@@ -3,8 +3,25 @@ package com.example.stockmonitor
 import com.example.stockmonitor.ui.MonitoringCopy
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Locale
 
 class MonitoringCopyTest {
+    @Test
+    fun secondaryDetailsCombineRulesAndServiceReminder() {
+        val method =
+            MonitoringCopy::class.java.methods.singleOrNull {
+                it.name == "detailText" && it.parameterCount == 1
+            }
+        assertTrue("监控说明应提供二级弹窗文案", method != null)
+
+        val text = method!!.invoke(MonitoringCopy, 0.8) as String
+        MonitoringCopy.rules(0.8).forEach { rule ->
+            assertTrue(text.contains("${rule.label}：${rule.text}"))
+        }
+        assertTrue(text.contains("划掉最近任务卡片会立即停止后台监控"))
+        assertTrue(text.contains(String.format(Locale.CHINA, "当前 %.1f%%", 0.8)))
+    }
+
     @Test
     fun compactRulesDescribeActualAlertScopeAndLimits() {
         val text = MonitoringCopy.rules(0.8).joinToString("\n") { "${it.label}：${it.text}" }

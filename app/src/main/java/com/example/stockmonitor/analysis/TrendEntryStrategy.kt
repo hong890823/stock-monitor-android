@@ -36,6 +36,23 @@ data class EntrySetup(
 ) {
     val label: String get() = type.label
 
+    fun compactText(): String {
+        val structure = when (type) {
+            EntrySetupType.BREAKOUT -> "突破"
+            EntrySetupType.BREAKOUT_WATCH -> "突破观察"
+            EntrySetupType.M20_PULLBACK -> "M20回踩"
+            EntrySetupType.NONE -> "无结构"
+        }
+        val status = when {
+            type == EntrySetupType.NONE && trendWeak -> "跌破M20"
+            type == EntrySetupType.NONE -> "等待突破/回踩"
+            confirmed && !canBuy -> "仅观察"
+            confirmed -> "已确认"
+            else -> "待确认"
+        }
+        return "$structure · $status"
+    }
+
     fun conciseText(): String = when {
         type == EntrySetupType.NONE -> reason
         confirmed && !canBuy -> "$label：$reason；仅作观察，不作为买入依据"
