@@ -2,6 +2,7 @@ package com.example.stockmonitor.core
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TradeLotJsonTest {
@@ -63,5 +64,27 @@ class TradeLotJsonTest {
         assertThrows(IllegalArgumentException::class.java) {
             TradeLotJson.decode("{not-json")
         }
+    }
+
+    /** 回归：成本为 0 的批次以前读档时被静默丢掉，变成「未记录日期」残股被 T+1 一直锁定。 */
+    @Test
+    fun zeroCostLotSurvivesRoundTrip() {
+        val book = TradeBook(lots = listOf(TradeLot("sz000001", "测试股", 300.0, 0.0, "2026-10-21")))
+
+        val decoded = TradeLotJson.decode(TradeLotJson.encode(book))
+
+        assertEquals(1, decoded.lots.size)
+        assertEquals(0.0, decoded.lots.single().unitCost, 0.0)
+        assertEquals(300.0, decoded.lots.single().quantity, 0.001)
+        assertEquals("2026-10-21", decoded.lots.single().buyDate)
+    }
+
+    @Test
+    fun negativeCostLotIsDropped() {
+        val book = TradeBook(lots = listOf(TradeLot("sz000001", "测试股", 300.0, -1.0, "2026-10-21")))
+
+        val decoded = TradeLotJson.decode(TradeLotJson.encode(book))
+
+        assertTrue(decoded.lots.isEmpty())
     }
 }

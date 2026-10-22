@@ -100,6 +100,24 @@ class TurnoverTracker(private val store: Store) {
     fun previousDate(today: String): String? =
         store.turnoverSamples.keys().asSequence().filter { it < today }.maxOrNull()
 
+    /**
+     * 用 [date] 当天已落盘的最后一次采样重建快照（只读不写）。
+     * 进程重启后恢复「较昨日同期」用——采样时刻取当日最后一条，与服务被杀前的显示对齐。
+     */
+    fun restoreSnapshot(date: String): Snapshot? {
+        val day = store.turnoverSamples.optJSONObject(date) ?: return null
+        val lastMinute = day.keys().asSequence().mapNotNull { it.toIntOrNull() }.maxOrNull() ?: return null
+        val amount = day.optDouble(lastMinute.toString(), 0.0)
+        if (amount <= 0) return null
+        val local = loadCurve(previousDate(date))?.takeIf { !it.isEmpty }
+        return buildSnapshot(
+            today = amount,
+            sampleMinute = lastMinute,
+            curve = local,
+            source = if (local != null) Source.LOCAL else Source.NONE,
+        )
+    }
+
     /** 最近已记录交易日的全天成交额（亿元），按时间从旧到新返回。 */
     fun recentFullDayTurnoversYi(beforeDate: String, limit: Int = 5): List<Double> =
         fullDayHistoryYi(store.turnoverSamples, beforeDate, limit)

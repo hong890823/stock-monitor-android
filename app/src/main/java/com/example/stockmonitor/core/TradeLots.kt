@@ -41,6 +41,12 @@ data class TradeAvailability(
     val sellableToday: Double,
     val lockedToday: Double,
     val nextTradingDaySellable: Double,
+    /**
+     * [lockedToday] 里「没有买入日期」的部分（手工加仓没记批次留下的残股）。
+     * 它和「今天买入受 T+1 锁定」不是一回事：补记买入日期后就按实际日期计算，
+     * 不会到下一交易日自动解锁，所以提醒文案要分开说。
+     */
+    val untrackedQuantity: Double = 0.0,
 )
 
 data class TradeApplicationResult(
@@ -96,6 +102,55 @@ object TradeLotLedger {
             }
         }
         return TradeBook(book.entries + record, lots.filter { it.quantity > EPSILON })
+    }
+
+    /**
+     * 手工编辑持仓（「添加/编辑监控股票」对话框）后的批次同步：
+     * - 数量比账面多出来的部分按 [buyDate] 记成买入批次。不留「未记录日期」残股——
+     *   那部分会被 [availability] 永远按 T+1 锁定算（见 [TradeAvailability.untrackedQuantity]）；
+     * - 少掉的部分按 FIFO 消耗批次（持仓校正，不校验当日可卖）。
+     *
+     * 不写交易流水：这是对持仓数字的校正，不是一笔按录入价格成交的买卖。
+     */
+    fun syncPositionEdit(
+        book: TradeBook,
+        code: String,
+        name: String,
+        oldQuantity: Double,
+        newQuantity: Double,
+        unitCost: Double,
+        buyDate: String,
+    ): TradeBook {
+        check(code.isNotBlank() && name.isNotBlank())
+        check(newQuantity.isFinite() && newQuantity >= 0.0)
+        val delta = newQuantity - oldQuantity
+        return when {
+            delta > EPSILON -> {
+                // 只有真加仓才用到日期；改成本不动数量时日期可留空。
+                check(buyDate.matches(DATE_PATTERN)) { "买入日期必须是 yyyy-MM-dd" }
+                TradeBook(
+                    book.entries,
+                    book.lots + TradeLot(code, name, delta, unitCost, buyDate),
+                )
+            }
+            delta < -EPSILON -> consumeLots(book, code, -delta)
+            else -> book
+        }
+    }
+
+    /** 按 FIFO 消耗某只股票的批次，不限当日可卖（[sell] 的持仓校正版）。 */
+    private fun consumeLots(book: TradeBook, code: String, quantity: Double): TradeBook {
+        var remaining = quantity
+        val lots = book.lots.map { lot ->
+            if (remaining <= EPSILON || lot.code != code) {
+                lot
+            } else {
+                val used = minOf(remaining, lot.quantity)
+                remaining -= used
+                lot.copy(quantity = lot.quantity - used)
+            }
+        }
+        return TradeBook(book.entries, lots.filter { it.quantity > EPSILON })
     }
 
     fun buyToPortfolio(
@@ -155,6 +210,7 @@ object TradeLotLedger {
                 sellableToday = sellable,
                 lockedToday = position.quantity - sellable,
                 nextTradingDaySellable = nextDay,
+                untrackedQuantity = untracked,
             ).also {
                 check(untracked >= -EPSILON)
             }

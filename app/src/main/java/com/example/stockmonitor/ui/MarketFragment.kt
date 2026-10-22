@@ -7,6 +7,7 @@ import android.text.Spanned
 import android.text.style.ForegroundColorSpan
 import com.example.stockmonitor.R
 import com.example.stockmonitor.analysis.MarketSummary
+import com.example.stockmonitor.analysis.TimeUtils
 import com.example.stockmonitor.analysis.LimitReport
 import com.example.stockmonitor.analysis.PriceContext
 import com.example.stockmonitor.analysis.VolumePrice
@@ -64,6 +65,17 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
                 13f,
                 UiKit.color(context, R.color.text_primary),
             )
+            // 休市时段（周末/节假日/清晨）显示的是最近交易日收盘，标出来免得当成实时行情。
+            val dataDate = Repo.quotes.values
+                .mapNotNull { it.quoteDate?.substringBefore(' ') }
+                .maxOrNull()
+            if (dataDate != null && dataDate < TimeUtils.todayText()) {
+                addText(
+                    "休市中 · 显示 $dataDate 收盘数据",
+                    11.5f,
+                    UiKit.color(context, R.color.text_secondary),
+                )
+            }
             // 成交额整块统一用最近一次 15 分钟采样的值，保证标题、总额、对比口径一致。
             val snapshot = Repo.turnoverSnapshot
             val displayTurnover = snapshot?.today ?: Repo.turnoverToday

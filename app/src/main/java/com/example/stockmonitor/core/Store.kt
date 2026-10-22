@@ -21,7 +21,8 @@ class Store(
         set(value) = prefs.edit().putString(KEY_WATCHLIST, toWatchlistJson(value).toString()).apply()
 
     var portfolio: Portfolio
-        get() = parsePortfolio(prefs.getString(KEY_PORTFOLIO, null))
+        // 读档时就折算旧版钉死值，这样后续 copy 改持仓会带着固定修正值浮动。
+        get() = parsePortfolio(prefs.getString(KEY_PORTFOLIO, null)).materializeCapitalCorrection()
         set(value) {
             val sanitized =
                 value.copy(
@@ -31,6 +32,9 @@ class Store(
                     availableCapitalOverride =
                         value.availableCapitalOverride
                             ?.takeIf { it.isFinite() && it >= 0 },
+                    availableCapitalDelta =
+                        value.availableCapitalDelta
+                            .takeIf { it.isFinite() } ?: 0.0,
                 )
             prefs.edit().putString(KEY_PORTFOLIO, toPortfolioJson(sanitized).toString()).apply()
         }
@@ -185,6 +189,14 @@ class Store(
             runCatching { JSONObject(prefs.getString(KEY_VOLUME_BASELINE, "{}") ?: "{}") }
                 .getOrDefault(JSONObject())
         set(value) = prefs.edit().putString(KEY_VOLUME_BASELINE, value.toString()).apply()
+
+    /**
+     * 最近一份行情快照（[QuoteCache] 编解码）。进程被系统回收后「市场」页靠它垫上最近
+     * 交易日的收盘数据，否则盘后/周末开屏只能空等网络（或等下个交易日）。
+     */
+    var lastQuotes: String?
+        get() = prefs.getString(KEY_LAST_QUOTES, null)
+        set(value) = prefs.edit().putString(KEY_LAST_QUOTES, value).apply()
 
     /** 技术面、基本面和港美股报告缓存，供 AI 综合分析跨页面复用。 */
     var analysisReports: String
@@ -375,18 +387,23 @@ class Store(
                     ),
                 )
             }
+            // 新档带 available_capital_delta，此时忽略旧版钉死字段，免得被误当成新的校正。
+            val hasDelta = json.has("available_capital_delta")
             Portfolio(
                 totalCapital = json.optDouble("total_capital", 0.0),
-                availableCapital = json.optDouble("available_capital", 0.0),
+                availableCapital = if (hasDelta) 0.0 else json.optDouble("available_capital", 0.0),
                 initialEntryPct = json.optDouble("initial_entry_pct", 5.0),
                 maxPositionPct = json.optDouble("max_position_pct", 20.0),
                 positions = positions,
                 availableCapitalOverride =
-                    if (json.has("available_capital_override")) {
+                    if (hasDelta) {
+                        null
+                    } else if (json.has("available_capital_override")) {
                         json.optDouble("available_capital_override").takeIf { it.isFinite() && it >= 0 }
                     } else {
                         null
                     },
+                availableCapitalDelta = if (hasDelta) json.optDouble("available_capital_delta", 0.0) else 0.0,
             )
         }.getOrDefault(fallback)
     }
@@ -404,10 +421,10 @@ class Store(
         }
         return JSONObject()
             .put("total_capital", portfolio.totalCapital)
-            .put("available_capital", portfolio.availableCapital)
-            .apply {
-                portfolio.availableCapitalOverride?.let { put("available_capital_override", it) }
-            }.put("initial_entry_pct", portfolio.initialEntryPct)
+            // available_capital 只为兼容 macOS 版显示当前现金；取值以 available_capital_delta 为准。
+            .put("available_capital", portfolio.resolvedAvailableCapital())
+            .put("available_capital_delta", portfolio.availableCapitalDelta)
+            .put("initial_entry_pct", portfolio.initialEntryPct)
             .put("max_position_pct", portfolio.maxPositionPct)
             .put("positions", positions)
     }
@@ -455,6 +472,7 @@ class Store(
         private const val KEY_TURNOVER_SAMPLES = "turnover_samples"
         private const val KEY_CONCEPT_BOARDS = "concept_boards"
         private const val KEY_VOLUME_BASELINE = "volume_baseline"
+        private const val KEY_LAST_QUOTES = "last_quotes"
         private const val KEY_ANALYSIS_REPORTS = "analysis_reports"
         private const val KEY_AI_REPORT_TEXT = "ai_report_text"
         private const val KEY_AI_REPORT_TITLE = "ai_report_title"

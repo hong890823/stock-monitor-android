@@ -994,6 +994,56 @@ class IntradayTacticsTest {
     }
 
     @Test
+    fun tBuyUsesReboundTrackerConfirmationEvenWhenObservationIsShallow() {
+        // 即时观察窗还没走出回升形态（reboundPct 小、不算 rising），但反弹跟踪已判
+        // 「真反弹企稳」——站稳时间与承接都验证过，接回不该再等一轮观察。
+        val base = input(price = 19.10, changePct = -3.6, volumeRatio = 1.1, support = 19.0, quantity = 2_000.0)
+            .copy(
+                holdingTObservation = HoldingTObservation(18.95, 19.3, 0.1, 0.0, rising = false, falling = false),
+                reboundConfirmed = true,
+            )
+        val signal = IntradayTactics.evaluate(base)!!
+        assertEquals(IntradaySignalType.T_BUY, signal.type)
+    }
+
+    @Test
+    fun tBuyStaysSilentWhenPriceIsFallingNowEvenIfReboundWasConfirmed() {
+        // 跟踪判过企稳，但当前 3 分钟在回落：接回一样不提，防止接在诱多回落里。
+        val base = input(price = 19.10, changePct = -3.6, volumeRatio = 1.1, support = 19.0, quantity = 2_000.0)
+            .copy(
+                holdingTObservation = HoldingTObservation(18.95, 19.3, 0.1, 0.0, rising = false, falling = true),
+                reboundConfirmed = true,
+            )
+        assertNull(IntradayTactics.evaluate(base))
+    }
+
+    @Test
+    fun reboundConfirmationNeverOverridesTrendGate() {
+        // 分层约束：盘中反弹确认只是时机信号，不能顶开趋势闸门、更不能改写趋势判断。
+        val base = input(price = 19.10, changePct = -3.6, volumeRatio = 1.1, support = 19.0, quantity = 2_000.0)
+            .copy(
+                holdingTObservation = HoldingTObservation(18.95, 19.3, 0.1, 0.0, rising = false, falling = false),
+                reboundConfirmed = true,
+            )
+        // 大趋势向下（riskOnly）：任何信号都不给。
+        assertNull(IntradayTactics.evaluate(base.copy(trendAssessment = majorDown)))
+        // 大趋势不许 T 买（但还允许别的处置）：接回照样不给，别的信号不被确认污染。
+        val softDown = TrendAssessment(
+            shortTerm = ShortTermTrend.DOWN,
+            major = MajorTrend.DOWN,
+            reason = "测试趋势向下但非 riskOnly",
+            allowsOrdinaryBuy = false,
+            allowsAddPosition = false,
+            allowsTBuy = false,
+            allowsTSell = true,
+            allowsBottomReversal = false,
+            riskOnly = false,
+        )
+        val signal = IntradayTactics.evaluate(base.copy(trendAssessment = softDown))
+        assertTrue(signal == null || signal.type != IntradaySignalType.T_BUY)
+    }
+
+    @Test
     fun tBuyIsSilentOnceSupportIsLost() {
         // 跌了 3.6% 但已经跌穿支撑：那是减仓问题，不是接回机会。
         val signal = IntradayTactics.evaluate(

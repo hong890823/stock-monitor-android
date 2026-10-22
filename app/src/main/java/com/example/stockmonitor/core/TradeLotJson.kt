@@ -78,8 +78,10 @@ object TradeLotJson {
             val buyDate = item.optString("buy_date")
             val quantity = item.optDouble("quantity", Double.NaN)
             val unitCost = item.optDouble("unit_cost", Double.NaN)
+            // 成本 0（未填成本的持仓）也要保留批次：丢掉会让这些股份变成「未记录日期」残股，
+            // 被 T+1 永远按锁定算。
             if (code.isBlank() || name.isBlank() || buyDate.isBlank() ||
-                !quantity.isFinite() || quantity <= 0.0 || !unitCost.isFinite() || unitCost <= 0.0
+                !quantity.isFinite() || quantity <= 0.0 || !unitCost.isFinite() || unitCost < 0.0
             ) {
                 return@mapNotNull null
             }

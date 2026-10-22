@@ -52,6 +52,7 @@ import com.example.stockmonitor.analysis.PortfolioSwing
 import com.example.stockmonitor.analysis.PriceContext
 import com.example.stockmonitor.analysis.PricePosition
 import com.example.stockmonitor.analysis.PriceWindow
+import com.example.stockmonitor.analysis.ReboundTracker
 import com.example.stockmonitor.analysis.RelaxedScreenSelection
 import com.example.stockmonitor.analysis.SectorContext
 import com.example.stockmonitor.analysis.SectorTurnoverTracker
@@ -99,6 +100,7 @@ import com.example.stockmonitor.core.PortfolioSnapshotJson
 import com.example.stockmonitor.core.PortfolioSnapshotState
 import com.example.stockmonitor.core.Position
 import com.example.stockmonitor.core.Quote
+import com.example.stockmonitor.core.QuoteCache
 import com.example.stockmonitor.core.ScreenResult
 import com.example.stockmonitor.core.ScreenResultJson
 import com.example.stockmonitor.core.SectorLeaders
@@ -174,6 +176,7 @@ class MonitorService : Service() {
     private var stockDropAlertDay: String? = null
     private val marketAlertEngine = MarketAlertEngine()
     private val dipReboundEngine = DipReboundEngine()
+    private val reboundTracker = ReboundTracker()
     private val portfolioSignals = mutableMapOf<String, String>()
 
     /** 盘中提醒的当前形态：只有形态变化（含从无到有）才提醒，见 checkIntradaySignals。 */
@@ -302,6 +305,7 @@ class MonitorService : Service() {
         Repo.paperTrades = store.paperTrades
         Repo.statusText = "正在加载行情…"
         restoreVolumeBaseline()
+        restoreQuoteCache()
         lastPortfolioSlot = store.portfolioSlot
         tickJob = scope.launch { runTickLoop() }
     }
@@ -416,13 +420,18 @@ class MonitorService : Service() {
             Repo.statusText = "正在刷新行情…"
             Repo.notifyChanged()
             fetchData(calendar)
-            firstLoadDone = true
+            // 「首轮加载完成」的真正含义是手里有行情了：拉到才算，
+            // 否则空响应会让市场页一直「等待行情数据…」，且盘后不再重试。
+            firstLoadDone = Repo.quotes.isNotEmpty()
             Repo.refreshing = false
             updateDisplay()
         } catch (error: Exception) {
             Log.e(TAG, "刷新失败", error)
             Repo.lastError = Errors.friendly(error)
             Repo.statusText = "刷新失败：${Errors.friendly(error)}"
+            // 失败但手里已有行情（落盘缓存或早前拉到的）就不再在盘后逐轮打接口；
+            // 盘中窗口由 tickPlan 的时段判断继续拉，不受这里影响。
+            firstLoadDone = firstLoadDone || Repo.quotes.isNotEmpty()
         } finally {
             tickBusy.set(false)
             Repo.refreshing = false
@@ -443,23 +452,33 @@ class MonitorService : Service() {
                     Repo.sectorLeaders.values.flatMap { leaders -> leaders.members.map { it.quoteCode } }
             ).distinct()
         if (codes.isNotEmpty()) {
-            val quotes = sina.quotes(codes)
+            val incoming = sina.quotes(codes)
             val today = TimeUtils.todayText()
-            val freshQuotes = quotes.filterValues { it.quoteDate == today }
-            // 旧日期响应只能补日志，不能覆盖内存里已经拿到的今日行情。
-            Repo.quotes = Repo.quotes + freshQuotes
+            // 显示口径：不比内存旧就收。盘后/周末/清晨新浪返回的是最近交易日的收盘快照，
+            // 日期不是「今天」也照单全收——那正是市场页要显示的收盘数据；
+            // 但旧行情绝不覆盖内存里更新的行情（防延迟响应把今日数据盖回昨天）。
+            Repo.quotes = QuoteCache.mergeNewer(Repo.quotes, incoming)
+            if (incoming.isNotEmpty()) {
+                // 快照落盘：进程被杀后重启先垫上这份数据（见 restoreQuoteCache）。
+                store.lastQuotes = QuoteCache.encode(QuoteCache.Snapshot(TimeUtils.nowText(), Repo.quotes))
+                // 成交额与量比是展示口径，用合并后的行情算，夜间/周末重启也能出数。
+                refreshTurnover(Repo.quotes, calendar)
+                refreshVolumeMetrics(calendar)
+            }
+            // 盘中口径：预警、信号、分钟K线只认今天的行情，防旧行情触发盘中逻辑。
+            val freshQuotes = incoming.filterValues { it.quoteDate == today }
             if (freshQuotes.isNotEmpty()) {
                 checkDropAlerts(freshQuotes, calendar)
                 checkMarketRiskAlert(freshQuotes, calendar)
                 checkDipReboundAlerts(freshQuotes, calendar)
-                refreshTurnover(freshQuotes, calendar)
-                refreshVolumeMetrics(calendar, freshQuotes)
+                // 反弹跟踪先于信号链跑：同一 tick 的接回/站回支撑要读它刚判出的「已企稳」。
+                checkReboundTracking(calendar, freshQuotes)
                 checkIntradaySignals(calendar, freshQuotes)
                 // 风险卖出必须先于分钟K线网络请求送达；数据不全只降级普通操作，绝不延迟风险处置。
                 refreshIntradayBars(freshQuotes, calendar)
                 launchObservationPoolRefresh(freshQuotes)
             } else {
-                Log.w(TAG, "行情日期未更新，跳过盘中预警与量比重算：today=$today")
+                Log.w(TAG, "今日行情未更新（today=$today），跳过盘中预警")
             }
         }
 
@@ -683,14 +702,19 @@ class MonitorService : Service() {
                         .map { it.code }
             ).distinct()
         if (codes.isEmpty()) return
-        ensureVolumeBaseline(codes)
+        ensureVolumeBaseline(codes, currentQuotes)
         val elapsed = TradingCalendar.tradingMinutesElapsed(calendar)
+        val today = TimeUtils.todayText()
         val ratios = LinkedHashMap<String, Double>()
         val contexts = LinkedHashMap<String, PriceContext>()
         codes.forEach { code ->
             val quote = currentQuotes[code] ?: return@forEach
             volumeBaseline[code]?.let { average ->
-                VolumeRatio.of(quote.volume, average, elapsed)?.let { ratios[code] = it }
+                // 行情日期不是今天时（周末/清晨拿到的是最近交易日收盘），成交量是那一整场的，
+                // 按全天口径算，不能按墙钟折算——周六上午按「已走 30 分钟」折算会把量比放大约 8 倍。
+                val quoteElapsed =
+                    if (quote.quoteDate?.substringBefore(' ') == today) elapsed else VolumeRatio.TRADING_MINUTES
+                VolumeRatio.of(quote.volume, average, quoteElapsed)?.let { ratios[code] = it }
             }
             priceWindows[code]?.contextOf(quote.price)?.let { contexts[code] = it }
         }
@@ -729,8 +753,26 @@ class MonitorService : Service() {
         volumeBaselineDay = date
     }
 
+    /**
+     * 重启后先用落盘的最近一份行情垫上，「市场」页开屏即有数（盘后/周末尤其需要），
+     * 网络到位后由 tick 的新一轮用更新的响应覆盖。
+     */
+    private fun restoreQuoteCache() {
+        val cache = QuoteCache.decode(store.lastQuotes) ?: return
+        if (cache.quotes.isEmpty()) return
+        Repo.quotes = cache.quotes
+        Repo.lastUpdateAt = cache.savedAt
+        val total = TURNOVER_CODES.sumOf { cache.quotes[it]?.turnover ?: 0.0 }
+        if (total > 0) Repo.turnoverToday = total
+        // 「较昨日同期」按快照里的交易日期从落盘采样重建：周末重启时墙钟是周六、
+        // 采样挂在周五名下，不能拿「今天」去查。
+        val sessionDate = cache.quotes["sh000001"]?.quoteDate?.substringBefore(' ')
+            ?: cache.savedAt.substringBefore(' ')
+        turnoverTracker?.restoreSnapshot(sessionDate)?.let { Repo.turnoverSnapshot = it }
+    }
+
     /** 只在缺基线时拉日线；失败后隔 15 分钟再试，避免每 15 秒打一次接口。 */
-    private fun ensureVolumeBaseline(codes: List<String>) {
+    private fun ensureVolumeBaseline(codes: List<String>, currentQuotes: Map<String, Quote> = Repo.quotes) {
         val today = TimeUtils.todayText()
         if (volumeBaselineDay != today) {
             volumeBaseline.clear()
@@ -748,10 +790,13 @@ class MonitorService : Service() {
                 val windows = LinkedHashMap<String, PriceWindow>()
                 missing.forEach { code ->
                     // 70 根日线：够算 20 日均量，也够出近 60 日区间。
-                    // 均量与区间都排除当日（收盘后日线会补上当日），口径见 VolumeRatio / PricePosition。
+                    // 均量排除的是「行情标注的那一天」（分子的量来自那天），不是墙钟的今天：
+                    // 周末/清晨行情是最近交易日的，排错日子会把那天的量同时算进分子和分母。
                     val bars = runCatching { sina.kline(code, 70) }.getOrNull() ?: return@forEach
+                    val excludeDate =
+                        currentQuotes[code]?.quoteDate?.substringBefore(' ') ?: TimeUtils.todayText()
                     VolumeRatio
-                        .averageVolumeExcludingToday(bars)
+                        .averageVolumeExcludingToday(bars, excludeDate)
                         ?.takeIf { it > 0 }
                         ?.let { fetched[code] = it }
                     PricePosition.of(bars, TimeUtils.todayText())?.let { windows[code] = it }
@@ -953,6 +998,60 @@ class MonitorService : Service() {
                 !alert.vibrate -> Notifier.alert(this, id, alert.title, alert.body)
                 alert.stock -> Notifier.signal(this, id, alert.title, alert.body)
                 else -> Notifier.marketRisk(this, id, alert.title, alert.body)
+            }
+        }
+    }
+
+    /**
+     * 反弹质量跟踪：深砸回升段的「企稳确认 / 诱多警示」（见 [ReboundTracker]）。
+     *
+     * 覆盖持仓 + 自选股 + 观察池：非持仓的票给「关注/别追」类提示，防诱多也管到想进的标的。
+     * 与买卖点提示共用 [intradaySignalEnabled] 开关和每日推送预算；确认结果同 tick 先于
+     * 信号链写好，接回 / 站回支撑（见 [IntradayTactics]）拿它当确认源。
+     */
+    private fun checkReboundTracking(
+        calendar: Calendar,
+        currentQuotes: Map<String, Quote>,
+    ) {
+        if (!store.alertsEnabled || !TradingCalendar.inMarketHoursForAlert(calendar)) {
+            reboundTracker.reset()
+            return
+        }
+        if (!store.intradaySignalEnabled) return
+        val heldCodes = StockAlertScope.heldCodes(store.portfolio.positions)
+        val watchCodes = store.watchlist
+            .map { it.code }
+            .filter { !it.startsWith("sh000") && !it.startsWith("sz399") }
+        val observationCodes = store.observationPool
+            .filter { it.stage != ObservationStage.ELIMINATED }
+            .map { it.code }
+        val codes = (heldCodes + watchCodes + observationCodes).distinct()
+        if (codes.isEmpty()) return
+        val today = TimeUtils.todayText()
+        val timestamp = System.currentTimeMillis()
+        val levels = Repo.portfolioResults.associateBy { it.code }
+        val samples = codes.mapNotNull { code ->
+            val quote = currentQuotes[code] ?: return@mapNotNull null
+            ReboundTracker.Sample(
+                code = code,
+                name = quote.name,
+                price = quote.price,
+                changePct = quote.changePct,
+                volumeRatio = Repo.volumeRatios[code],
+                cumulativeTurnover = quote.turnover,
+                timestamp = timestamp,
+                atrPct = levels[code]?.volatility?.atrPct,
+                resistance = levels[code]?.resistance ?: 0.0,
+                held = code in heldCodes,
+            )
+        }
+        reboundTracker.update(samples, today).forEach { event ->
+            if (!consumePushBudget(event.code)) return@forEach
+            val id = ALERT_ID_REBOUND_TRACK + event.code.hashCode()
+            if (event.vibrate) {
+                Notifier.signal(this, id, event.title, event.body)
+            } else {
+                Notifier.alert(this, id, event.title, event.body)
             }
         }
     }
@@ -1201,6 +1300,8 @@ class MonitorService : Service() {
                     maxPositionPct = portfolio.maxPositionPct,
                     sellableQuantity = availabilityByCode[position.code]?.sellableToday,
                     lockedQuantity = availabilityByCode[position.code]?.lockedToday ?: 0.0,
+                    untrackedQuantity = availabilityByCode[position.code]?.untrackedQuantity ?: 0.0,
+                    reboundConfirmed = reboundTracker.isConfirmed(position.code),
                     entrySetup = level?.entrySetup,
                     ma20 = level?.ma20 ?: 0.0,
                     ma5 = level?.ma5 ?: 0.0,
@@ -2787,6 +2888,7 @@ class MonitorService : Service() {
             result,
             sellableQuantity = availability.sellableToday,
             lockedToday = availability.lockedToday,
+            untrackedQuantity = availability.untrackedQuantity,
         ) ?: result.action
         if (result.signal == "减仓风险") {
             Notifier.riskSell(
@@ -3028,6 +3130,9 @@ class MonitorService : Service() {
 
         /** 下探回升提醒（大盘 + 持仓个股共用，按 code 取模错开）。 */
         private const val ALERT_ID_REBOUND = 7000
+
+        /** 反弹质量跟踪（企稳确认 / 诱多警示）的提醒 ID 基址，与下探回升的通知并存。 */
+        private const val ALERT_ID_REBOUND_TRACK = 7200
         private const val ALERT_ID_OBSERVATION_BUY = 8000
         private const val ALERT_ID_OBSERVATION_RISK = 8001
         private val MARKET_INDEX_CODES = listOf("sh000001", "sz399001", "sz399006")

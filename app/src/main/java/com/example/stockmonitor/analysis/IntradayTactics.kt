@@ -142,10 +142,24 @@ object IntradayTactics {
         val maxPositionPct: Double,
         /** 当日可卖数量；为空时兼容旧调用，按总持仓处理。 */
         val sellableQuantity: Double? = null,
-        /** 当日买入并受 T+1 锁定的数量。 */
+        /** 当日不可卖数量（当日买入 + 未记录买入日期的残股，见 [untrackedQuantity]）。 */
         val lockedQuantity: Double = 0.0,
+        /**
+         * [lockedQuantity] 里没有买入日期的部分（手工加仓没记批次）。
+         * 不会随交易日解冻，要补记买入日期；提醒文案与「今天买入」分开说。
+         */
+        val untrackedQuantity: Double = 0.0,
         /** 最近一次技术分析生成的趋势入场上下文；为空时保留兼容性的旧规则。 */
         val entrySetup: EntrySetup? = null,
+        /**
+         * 反弹质量跟踪已判「真反弹企稳」（见 [ReboundTracker]）。
+         * 接回 / 站回支撑拿它当确认源之一：企稳已经过站稳时间与承接量能验证，
+         * 不必要求价格正好回踩到支撑边才敢确认。
+         *
+         * **只影响时机确认，不影响趋势判定**：它永远不能顶开趋势闸门——
+         * [trendAssessment] 不许 T 买或 riskOnly 时，确认了也不给接回；趋势仍由日线口径说了算。
+         */
+        val reboundConfirmed: Boolean = false,
         val riskPerTradePct: Double = TrendEntryStrategy.RISK_PER_TRADE_PCT,
         val ma20: Double = 0.0,
         val ma5: Double = 0.0,
@@ -466,13 +480,21 @@ object IntradayTactics {
     private fun confirmedTRebound(input: Input): Boolean {
         val context = input.holdingTContext ?: return false
         val observed = input.holdingTObservation ?: return false
+        if (input.weakEnv || input.fundamentalHealth?.level == HealthLevel.ALERT) return false
+        if (!input.changePct.isFinite() || !input.limitPct.isFinite() || input.limitPct <= 0 ||
+            abs(input.changePct) >= input.limitPct - 0.2
+        ) {
+            return false
+        }
+        // 反弹跟踪已判「真反弹企稳」：站稳时间与承接都验证过，接回/站回只需确认
+        // 当前不在回落、量能没爆表——比等 3 分钟观察窗的即时判定更及时。
+        if (input.reboundConfirmed) {
+            return !observed.falling && input.volumeRatio?.let { it > 0 && it <= 1.2 } == true
+        }
         val required = maxOf(0.3, context.atrPct * 0.15) * if (context.cautiousBuy) 2 else 1
-        return !input.weakEnv && input.fundamentalHealth?.level != HealthLevel.ALERT &&
-            input.volumeRatio?.let { it > 0 && it <= 1.0 } == true &&
+        return input.volumeRatio?.let { it > 0 && it <= 1.0 } == true &&
             observed.rising && observed.reboundPct >= required &&
-            observed.low >= input.support * (1 - BREAK_TOLERANCE) &&
-            input.changePct.isFinite() && input.limitPct.isFinite() && input.limitPct > 0 &&
-            abs(input.changePct) < input.limitPct - 0.2
+            observed.low >= input.support * (1 - BREAK_TOLERANCE)
     }
 
     internal fun marketEnvironment(input: Input): MarketEnvironmentQuality {

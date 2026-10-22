@@ -146,4 +146,51 @@ class TradeNotificationTest {
         assertTrue(text.contains("板块状态参考"))
         assertTrue(text.contains("非买卖指令"))
     }
+
+    /** 回归：手工加仓没记批次的残股不能说成「今天买入的」，它不会自动解锁。 */
+    @Test fun untrackedLockedSharesAreNotCalledTodaysBuys() {
+        val text = TradeNotification.exit(
+            HoldingExitStage.REDUCE,
+            totalQuantity = 300.0,
+            sellableQuantity = 0.0,
+            price = 18.8,
+            support = 19.0,
+            lockedToday = 300.0,
+            untrackedQuantity = 300.0,
+        )
+
+        assertTrue(text.contains("未记录买入日期"))
+        assertTrue(text.contains("补记买入日期"))
+        assertFalse(text.contains("今天买入的"))
+        assertFalse(text.contains("今日新增"))
+        assertFalse(text.contains("下一交易日复核处置"))
+    }
+
+    @Test fun mixedLockedCopyNamesBothSourcesSeparately() {
+        val text = TradeNotification.exit(
+            HoldingExitStage.REDUCE,
+            totalQuantity = 700.0,
+            sellableQuantity = 400.0,
+            price = 18.8,
+            support = 19.0,
+            lockedToday = 300.0,
+            untrackedQuantity = 200.0,
+        )
+
+        assertTrue(text.contains("原有可卖400股"))
+        assertTrue(text.contains("今日新增100股"))
+        assertTrue(text.contains("未记录买入日期200股"))
+    }
+
+    @Test fun intradayT1BlockedCopyDistinguishesUntrackedFromTodaysBuy() {
+        val input = IntradayTactics.Input(
+            "sz000001", "测试", 18.8, -3.0, 1.5, 10.0,
+            19.0, 21.0, 3, 300.0, 20.0, 100000.0, 20000.0, 5.0, 20.0,
+        ).copy(sellableQuantity = 0.0, lockedQuantity = 300.0, untrackedQuantity = 300.0)
+
+        val text = TradeNotification.intraday(input, IntradaySignal(IntradaySignalType.T_SELL, "", ""))
+
+        assertTrue(text.contains("未记录买入日期"))
+        assertFalse(text.contains("今天买入的"))
+    }
 }

@@ -9,8 +9,7 @@ import com.example.stockmonitor.core.LeaderStrengthTracker
 import com.example.stockmonitor.core.SectorLeaders
 import com.example.stockmonitor.core.Store
 import com.example.stockmonitor.core.TradeLotLedger
-import com.example.stockmonitor.core.availableCapitalIsManual
-import com.example.stockmonitor.core.resolvedAvailableCapital
+import com.example.stockmonitor.core.cashPosition
 import com.example.stockmonitor.monitor.MonitorService
 import com.example.stockmonitor.monitor.Repo
 import com.google.android.material.button.MaterialButton
@@ -28,9 +27,11 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             val sellableTotal = tradeAvailability.sumOf { it.sellableToday }
             val lockedTotal = tradeAvailability.sumOf { it.lockedToday }
             val nextDayTotal = tradeAvailability.sumOf { it.nextTradingDaySellable }
+            val untrackedTotal = tradeAvailability.sumOf { it.untrackedQuantity }
             val swingPlan = Repo.portfolioSwing?.validatedFor(portfolio)
 
             UiKit.card(context, "⚙️ 持仓设置").apply {
+                val cash = portfolio.cashPosition()
                 addKeyValue(
                     "总资金",
                     if (portfolio.totalCapital > 0) {
@@ -38,22 +39,32 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                     } else {
                         "未设置"
                     },
+                    note = "本金口径，只有这里能改。",
                 )
-                addKeyValue("单股初始仓位", String.format(Locale.CHINA, "%.0f%%", portfolio.initialEntryPct))
+                // 可用现金只展示当前生效的一个值：自动算出来的，或手动校正后的，不再罗列推导过程。
+                val cashValue =
+                    if (cash.blockedReason != null && cash.value <= 0) {
+                        "算不出"
+                    } else {
+                        String.format(Locale.CHINA, "%,.0f 元", cash.value) +
+                            if (cash.isCorrected) " · 已校正" else ""
+                    }
                 addKeyValue(
                     "可用现金",
-                    String.format(
-                        Locale.CHINA,
-                        "%,.0f 元（%s）",
-                        portfolio.resolvedAvailableCapital(),
-                        if (portfolio.availableCapitalIsManual()) "手动校正" else "自动计算",
-                    ),
+                    cashValue,
+                    note = cash.blockedReason?.takeIf { cash.value <= 0 },
                 )
+                addKeyValue("单股初始仓位", String.format(Locale.CHINA, "%.0f%%", portfolio.initialEntryPct))
                 addKeyValue("单股最大仓位", String.format(Locale.CHINA, "%.0f%%", portfolio.maxPositionPct))
                 addKeyValue("监控股票", "${portfolio.positions.size} 只")
                 addKeyValue(
                     "T+1 可卖",
                     "今日可卖 ${formatShares(sellableTotal)}｜今日锁定 ${formatShares(lockedTotal)}｜下一交易日 ${formatShares(nextDayTotal)}",
+                    note = if (untrackedTotal > 0) {
+                        "其中 ${formatShares(untrackedTotal)} 股未记录买入日期，不会自动解锁；在「记录交易」里补记"
+                    } else {
+                        null
+                    },
                 )
                 addDivider()
                 add(
@@ -69,7 +80,7 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                             },
                         )
                         row.addView(
-                            actionButton(context, "✏️ 编辑股数 / 成本") {
+                            actionButton(context, "✏️ 编辑持仓") {
                                 Dialogs.editPosition(context) { render() }
                             },
                         )

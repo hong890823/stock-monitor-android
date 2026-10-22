@@ -17,14 +17,48 @@ object TradeNotification {
         return if (exit) floor(capped) else floor(capped / 3.0 / 100.0) * 100.0
     }
 
+    /**
+     * 不可卖的两种来源分开说：「今天买入」下一交易日会自动解锁，「未记录买入日期」
+     * 不会——那是手工加仓没记批次留下的残股（见 [TradeAvailability.untrackedQuantity]），
+     * 要在「记录交易」里补记买入日期后才按实际日期计算，不能混称「今天加的」。
+     */
+    private fun lockTail(lockedToday: Double, untrackedQuantity: Double): String {
+        val (sameDayLocked, untracked) = lockedSplit(lockedToday, untrackedQuantity)
+        return when {
+            sameDayLocked > 0.0 && untracked > 0.0 ->
+                "今日新增${qty(sameDayLocked)}股、未记录买入日期${qty(untracked)}股受T+1锁定。"
+            sameDayLocked > 0.0 -> "今日新增${qty(sameDayLocked)}股受T+1锁定。"
+            else -> "未记录买入日期的${qty(untracked)}股暂按T+1锁定（在「记录交易」补记买入日期后按实际日期计算）。"
+        }
+    }
+
+    private fun lockBlocked(lockedToday: Double, untrackedQuantity: Double): String {
+        val (sameDayLocked, untracked) = lockedSplit(lockedToday, untrackedQuantity)
+        return when {
+            sameDayLocked > 0.0 && untracked > 0.0 ->
+                "今天买入的${qty(sameDayLocked)}股、未记录买入日期的${qty(untracked)}股均受T+1锁定，停止加仓；" +
+                    "未记录部分补记买入日期后按实际日期计算，其余下一交易日复核处置。"
+            sameDayLocked > 0.0 -> "今天买入的${qty(sameDayLocked)}股受T+1锁定，停止加仓，下一交易日复核处置。"
+            else -> "未记录买入日期的${qty(untracked)}股暂按T+1锁定，停止加仓；" +
+                "在「记录交易」补记买入日期后按实际日期计算。"
+        }
+    }
+
+    /** 把「锁定总量」拆成今天买入 / 未记录日期两部分；未记录的计入 [lockedToday] 但不随交易日解冻。 */
+    private fun lockedSplit(lockedToday: Double, untrackedQuantity: Double): Pair<Double, Double> {
+        val untracked = minOf(untrackedQuantity.coerceAtLeast(0.0), lockedToday.coerceAtLeast(0.0))
+        return (lockedToday - untracked).coerceAtLeast(0.0) to untracked
+    }
+
     private fun sale(
         quantity: Double,
         sellableQuantity: Double = quantity,
         lockedToday: Double = 0.0,
+        untrackedQuantity: Double = 0.0,
         exit: Boolean = false,
     ): String {
         if (sellableQuantity <= 0.0 && lockedToday > 0.0) {
-            return "今天买入的${qty(lockedToday)}股受T+1锁定，停止加仓，下一交易日复核处置。"
+            return lockBlocked(lockedToday, untrackedQuantity)
         }
         val shares = sellQuantity(quantity, sellableQuantity, exit)
         if (shares <= 0) return if (quantity.isFinite() && quantity > 0 && !exit) {
@@ -34,7 +68,8 @@ object TradeNotification {
         }
         if (lockedToday > 0.0) {
             val action = if (exit) "退出目标约${shares.toLong()}股" else "先卖约${shares.toLong()}股"
-            return "原有可卖${qty(sellableQuantity)}股，$action（可卖仓位1/3向下取整）；今日新增${qty(lockedToday)}股受T+1锁定。"
+            return "原有可卖${qty(sellableQuantity)}股，$action（可卖仓位1/3向下取整）；" +
+                lockTail(lockedToday, untrackedQuantity)
         }
         val action = if (exit) "退出目标约${shares.toLong()}股，可分笔" else "先卖约${shares.toLong()}股（持仓1/3向下取整）"
         return "$action；按录入持仓估算，以实际可卖数量为限，T+1/跌停可能无法成交。"
@@ -47,15 +82,16 @@ object TradeNotification {
         support: Double,
         sellableQuantity: Double = totalQuantity,
         lockedToday: Double = 0.0,
+        untrackedQuantity: Double = 0.0,
     ): String {
         if (sellableQuantity <= 0.0 && lockedToday > 0.0) {
-            return "今天买入的${qty(lockedToday)}股受T+1锁定，停止加仓，下一交易日复核处置。"
+            return lockBlocked(lockedToday, untrackedQuantity)
         }
         val action = when (stage) {
             HoldingExitStage.WATCH -> "先不加仓，观察能否站回${price(support)}。"
-            HoldingExitStage.REDUCE -> "破位已确认，${sale(totalQuantity, sellableQuantity, lockedToday)}"
-            HoldingExitStage.HIGH_REDUCE -> "高位转弱，${sale(totalQuantity, sellableQuantity, lockedToday)}暂停接回。"
-            HoldingExitStage.EXIT -> "退出优先，${sale(totalQuantity, sellableQuantity, lockedToday, exit = true)}"
+            HoldingExitStage.REDUCE -> "破位已确认，${sale(totalQuantity, sellableQuantity, lockedToday, untrackedQuantity)}"
+            HoldingExitStage.HIGH_REDUCE -> "高位转弱，${sale(totalQuantity, sellableQuantity, lockedToday, untrackedQuantity)}暂停接回。"
+            HoldingExitStage.EXIT -> "退出优先，${sale(totalQuantity, sellableQuantity, lockedToday, untrackedQuantity, exit = true)}"
             HoldingExitStage.DEEP_T -> "先不补仓，等反弹再评估做T；持续走弱需重新评估退出。"
         }
         return "$action 现价${price(price)}，支撑${price(support)}。"
@@ -65,8 +101,9 @@ object TradeNotification {
         result: PositionResult,
         sellableQuantity: Double = result.quantity,
         lockedToday: Double = 0.0,
+        untrackedQuantity: Double = 0.0,
     ): String? = result.notificationExitDecision?.let {
-        exit(it.stage, result.quantity, result.price, result.support, sellableQuantity, lockedToday)
+        exit(it.stage, result.quantity, result.price, result.support, sellableQuantity, lockedToday, untrackedQuantity)
     }
 
     fun intraday(
@@ -97,6 +134,7 @@ object TradeNotification {
                 support = support,
                 sellableQuantity = input.sellableQuantity ?: input.quantity,
                 lockedToday = input.lockedQuantity,
+                untrackedQuantity = input.untrackedQuantity,
             )
         }
         val action = when (signal.type) {
@@ -118,7 +156,7 @@ object TradeNotification {
                 val sizing = IntradayTactics.suggestedTSellQuantity(input)
                 val action = when {
                     input.sellableQuantity == 0.0 && input.lockedQuantity > 0.0 ->
-                        "今天买入的${qty(input.lockedQuantity)}股受T+1锁定，停止加仓，下一交易日复核处置。"
+                        lockBlocked(input.lockedQuantity, input.untrackedQuantity)
                     sizing.quantity > 0 -> "冲高回落，做T先减约${sizing.quantity.toLong()}股（${sizing.note}），接回等企稳。"
                     sizing.liquidityBlocked -> "冲高回落，但成交额不足以支持机动仓交易，先观察。"
                     else -> "冲高回落，机动仓不足一手，先观察。"
@@ -129,6 +167,7 @@ object TradeNotification {
                 input.quantity,
                 input.sellableQuantity ?: input.quantity,
                 input.lockedQuantity,
+                input.untrackedQuantity,
             )}暂不接回。"
             IntradaySignalType.T_BUY, IntradaySignalType.RECLAIM_SUPPORT ->
                 if (input.trendAssessment?.allowsTBuy == false || input.trendAssessment?.major == MajorTrend.DOWN) {

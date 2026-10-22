@@ -121,36 +121,128 @@ private fun formatHoldingNumber(value: Double): String =
 
 /** 持仓配置，字段与 portfolio.json 一致。 */
 data class Portfolio(
+    /** 本金，只在「设置资金」里手动改，不会被自动写。 */
     val totalCapital: Double = 0.0,
-    /** 当前生效的可用现金；新配置优先由 [availableCapitalOverride] 决定。 */
+    /**
+     * 旧版钉死的可用现金绝对值，只作读旧档用。
+     * 新版折算进 [availableCapitalDelta]，见 [Portfolio.materializeCapitalCorrection]。
+     */
     val availableCapital: Double = 0.0,
     val initialEntryPct: Double = 5.0,
     val maxPositionPct: Double = 20.0,
     val positions: MutableList<Position> = mutableListOf(),
-    /** 手动校正值；为空时按持仓成本自动计算。 */
+    /** 旧版手动校正绝对值，同 [availableCapital]，只作读旧档用。 */
     val availableCapitalOverride: Double? = null,
+    /**
+     * 可用现金的持久修正值：`可用现金 = 总资金 − Σ(股数×成本) + availableCapitalDelta`。
+     *
+     * 在「设置资金」里输入可用现金时，按「输入值 − 当时的自动值」折算后存下来；
+     * 之后持仓变化仍走自动公式，修正值保持不变，直到下次重新输入。留 0 表示纯自动。
+     */
+    val availableCapitalDelta: Double = 0.0,
 )
 
-/**
- * 取得当前应供策略使用的可用资金。
- *
- * 非空校正值优先；没有校正值时，用总资金减去所有实际持仓的成本金额。
- * 旧版本保存的非零 [availableCapital] 视为历史手动输入，保证升级后不改变已有账户口径。
- */
-fun Portfolio.resolvedAvailableCapital(): Double {
-    availableCapitalOverride?.takeIf { it.isFinite() && it >= 0 }?.let { return it }
-    if (availableCapital.isFinite() && availableCapital > 0) return availableCapital
-    if (!totalCapital.isFinite() || totalCapital < 0) return availableCapital.coerceAtLeast(0.0)
-    val holdings = positions.filter { it.quantity.isFinite() && it.quantity > 0 }
-    if (holdings.any { !it.cost.isFinite() || it.cost <= 0 }) return availableCapital.coerceAtLeast(0.0)
-    val occupied = holdings.sumOf { it.quantity * it.cost }
-    if (!occupied.isFinite()) return availableCapital.coerceAtLeast(0.0)
-    return (totalCapital - occupied).coerceAtLeast(0.0)
+/** [Portfolio.cashPosition] 的结果。 */
+data class CashPosition(
+    /** 当前生效的可用现金。 */
+    val value: Double,
+    /** 不含修正值的自动值 `总资金 − Σ(股数×成本)`；算不出时为 null。 */
+    val autoValue: Double?,
+    /** 持久修正金额；非 0 表示用户校准过。 */
+    val correction: Double,
+    /** 自动口径算不出来时的中文原因，能算时为 null。 */
+    val blockedReason: String?,
+) {
+    val isCorrected: Boolean get() = correction != 0.0
 }
 
-fun Portfolio.availableCapitalIsManual(): Boolean =
-    availableCapitalOverride?.let { it.isFinite() && it >= 0 } == true ||
-        availableCapitalOverride == null && availableCapital.isFinite() && availableCapital > 0
+/**
+ * 可用现金的唯一口径：`总资金 − Σ(股数×成本) + 修正值`。
+ *
+ * 总资金是本金，固定不动；持仓变了自动跟着变。手动输入只产生一个持久修正值，
+ * 用来在自动公式偏离真实账户时重新校准一次（卖出盈利后成本口径就会偏）。
+ *
+ * 旧档存的是钉死的绝对值（[Portfolio.availableCapitalOverride] / [Portfolio.availableCapital]），
+ * 这里就地折算成修正值，所以升级瞬间显示不变，之后仍会随持仓浮动。
+ */
+fun Portfolio.cashPosition(): CashPosition {
+    val holdings = positions.filter { it.quantity.isFinite() && it.quantity > 0 }
+    val missingCost = holdings.count { !it.cost.isFinite() || it.cost <= 0 }
+    val occupied = holdings.sumOf { it.quantity * it.cost }
+
+    val blockedReason =
+        when {
+            !totalCapital.isFinite() || totalCapital <= 0 -> "总资金未设置，算不出可用现金"
+            missingCost > 0 -> "有 $missingCost 只持仓未填成本，算不出可用现金"
+            !occupied.isFinite() -> "持仓成本合计无效，算不出可用现金"
+            else -> null
+        }
+    val auto = if (blockedReason == null) (totalCapital - occupied).coerceAtLeast(0.0) else null
+
+    val pinned =
+        availableCapitalOverride?.takeIf { it.isFinite() && it >= 0 }
+            ?: availableCapital.takeIf { it.isFinite() && it > 0 }
+    val correction =
+        when {
+            availableCapitalDelta.isFinite() && availableCapitalDelta != 0.0 -> availableCapitalDelta
+            pinned != null && auto != null -> pinned - auto
+            else -> 0.0
+        }
+
+    val value =
+        when {
+            auto != null -> (auto + correction).coerceAtLeast(0.0)
+            pinned != null -> pinned.coerceAtLeast(0.0)
+            else -> correction.coerceAtLeast(0.0)
+        }
+    return CashPosition(value = value, autoValue = auto, correction = correction, blockedReason = blockedReason)
+}
+
+fun Portfolio.resolvedAvailableCapital(): Double = cashPosition().value
+
+fun Portfolio.availableCapitalIsManual(): Boolean = cashPosition().isCorrected
+
+/** 不含修正值的自动可用现金；算不出时为 null。 */
+fun Portfolio.autoAvailableCapital(): Double? = cashPosition().autoValue
+
+/**
+ * 把旧档的钉死绝对值折算成 [Portfolio.availableCapitalDelta]。
+ *
+ * 折算必须在读档时做：它用的是「当前」持仓成本，之后 [updatePosition] 的 copy
+ * 才会带着固定的修正值浮动。算不出自动值时不动，等下次再折。
+ */
+fun Portfolio.materializeCapitalCorrection(): Portfolio {
+    if (availableCapitalDelta.isFinite() && availableCapitalDelta != 0.0) return this
+    val pinned =
+        availableCapitalOverride?.takeIf { it.isFinite() && it >= 0 }
+            ?: availableCapital.takeIf { it.isFinite() && it > 0 }
+            ?: return this
+    val resolved = cashPosition()
+    if (resolved.autoValue == null) return this
+    return copy(
+        availableCapitalDelta = resolved.correction,
+        availableCapital = 0.0,
+        availableCapitalOverride = null,
+    )
+}
+
+/**
+ * 用「设置资金」里输入的可用现金重新校准：修正值 = 输入值 − 当时的自动值。
+ * 传 null 表示清空校正，回到纯自动。
+ */
+fun Portfolio.withCapitalCorrection(value: Double?): Portfolio {
+    if (value == null) {
+        return copy(availableCapitalDelta = 0.0, availableCapital = 0.0, availableCapitalOverride = null)
+    }
+    val auto = cashPosition().autoValue
+    return if (auto != null) {
+        copy(availableCapitalDelta = value - auto, availableCapital = 0.0, availableCapitalOverride = null)
+    } else {
+        // 总资金未设置或有持仓没填成本，算不出自动值：先钉住这个数，
+        // 等自动值可算时由 [materializeCapitalCorrection] 折算成修正值，免得之后被重复加算。
+        copy(availableCapitalDelta = 0.0, availableCapital = 0.0, availableCapitalOverride = value)
+    }
+}
 
 fun Portfolio.updatePosition(code: String, quantity: Double, cost: Double): Portfolio = copy(
     positions = positions.map { position ->

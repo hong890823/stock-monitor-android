@@ -28,6 +28,7 @@ import com.example.stockmonitor.core.TradeSide
 import com.example.stockmonitor.core.TradeSource
 import com.example.stockmonitor.core.WatchItem
 import com.example.stockmonitor.core.availableCapitalIsManual
+import com.example.stockmonitor.core.withCapitalCorrection
 import com.example.stockmonitor.core.HoldingSyncStatus
 import com.example.stockmonitor.core.resolvedAvailableCapital
 import com.example.stockmonitor.core.syncHoldingInput
@@ -550,13 +551,14 @@ object Dialogs {
         input(
             activity,
             "💰 持仓资金设置",
-            "总资金用于计算持仓占比；不填可用现金时，系统按总资金减去持仓成本自动计算。",
+            "总资金是本金，改了才变；可用现金默认按「总资金 − 持仓成本」算，改股数/成本会跟着动。" +
+                "填「可用现金校正」表示按这个数重新校准一次，之后仍会随持仓自动增减，留空则清掉校正。",
             listOf(
                 Field("总资金（元）", formatNumber(portfolio.totalCapital), numeric = true),
                 Field("单股初始仓位比例（%）", formatNumber(portfolio.initialEntryPct), numeric = true),
                 Field("单股最大仓位比例（%）", formatNumber(portfolio.maxPositionPct), numeric = true),
                 Field(
-                    "可用现金校正（元，留空自动计算）",
+                    "可用现金校正（元，留空清除校正）",
                     if (portfolio.availableCapitalIsManual()) formatNumber(portfolio.resolvedAvailableCapital()) else "",
                     numeric = true,
                 ),
@@ -568,16 +570,16 @@ object Dialogs {
             val cashText = values.getOrElse(3) { "" }.trim()
             val manual = cashText.toDoubleOrNull()
             if (cashText.isNotBlank() && (manual == null || manual < 0)) {
-                Toast.makeText(activity, "可用现金校正必须是大于等于 0 的数字，留空则自动计算", Toast.LENGTH_LONG).show()
+                Toast.makeText(activity, "可用现金校正必须是大于等于 0 的数字，留空则清掉校正", Toast.LENGTH_LONG).show()
                 return@input
             }
-            store.portfolio = portfolio.copy(
-                totalCapital = total,
-                initialEntryPct = initial,
-                maxPositionPct = max,
-                availableCapital = manual ?: 0.0,
-                availableCapitalOverride = manual,
-            )
+            store.portfolio =
+                portfolio
+                    .copy(
+                        totalCapital = total,
+                        initialEntryPct = initial,
+                        maxPositionPct = max,
+                    ).withCapitalCorrection(if (cashText.isBlank()) null else manual)
             onSaved()
         }
     }
@@ -594,13 +596,16 @@ object Dialogs {
         input(
             context,
             "📒 记录交易",
-            "用于计算 A 股 T+1 可卖数量。当天买入的股份当天不可卖出；卖出数量不得超过当天可卖仓位。",
+            "用于计算 A 股 T+1 可卖数量。当天买入的股份当天不可卖出；卖出数量不得超过当天可卖仓位。" +
+                "补记历史交易把日期改成实际买卖日；数量早已计入持仓、只想补上买入日期时，" +
+                "用「仅登记买入批次」，不会重复加持仓数量。",
             listOf(
                 Field("股票", labels.first(), choices = labels),
                 Field("交易日期", TimeUtils.todayText()),
                 Field("操作", "买入", choices = listOf("买入", "卖出")),
                 Field("数量（股）", "100", numeric = true, decimal = false),
                 Field("成交价格（元）", numeric = true),
+                Field("仅登记买入批次（数量已计入持仓）", "否", choices = listOf("否", "是")),
             ),
         ) { values ->
             val selectedIndex = labels.indexOf(values.getOrElse(0) { labels.first() })
@@ -613,6 +618,7 @@ object Dialogs {
             val sideText = values.getOrElse(2) { "买入" }
             val quantity = values.getOrElse(3) { "" }.toDoubleOrNull()
             val price = values.getOrElse(4) { "" }.toDoubleOrNull()
+            val lotOnly = values.getOrElse(5) { "否" } == "是"
             val today = TimeUtils.todayText()
             if (!date.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) || date > today) {
                 Toast.makeText(context, "交易日期必须是不晚于今天的 yyyy-MM-dd", Toast.LENGTH_LONG).show()
@@ -625,6 +631,10 @@ object Dialogs {
                 return@input
             }
             val side = if (sideText == "卖出") TradeSide.SELL else TradeSide.BUY
+            if (lotOnly && side == TradeSide.SELL) {
+                Toast.makeText(context, "「仅登记买入批次」只支持买入", Toast.LENGTH_LONG).show()
+                return@input
+            }
             val book = store.tradeBook.takeIf { it.lots.isNotEmpty() || it.entries.isNotEmpty() }
                 ?: TradeLotLedger.migrate(portfolio.positions)
             val record = TradeRecord(
@@ -637,6 +647,14 @@ object Dialogs {
                 price = price,
                 source = TradeSource.MANUAL,
             )
+            if (lotOnly) {
+                // 补记批次：数量已经在持仓里（手工加仓时没记买入日期），这里只登记批次，
+                // 让 T+1 按实际买入日期计算，不动持仓数量。
+                store.tradeBook = TradeLotLedger.buy(book, record)
+                Toast.makeText(context, "批次已登记（持仓数量未变）", Toast.LENGTH_SHORT).show()
+                onSaved()
+                return@input
+            }
             val applied = try {
                 if (side == TradeSide.BUY) {
                     TradeLotLedger.buyToPortfolio(book, portfolio, record)
@@ -666,14 +684,34 @@ object Dialogs {
             input(
                 context,
                 "添加 $name",
-                "数量填 0 表示只观察、不计算持仓成本。",
-                listOf(Field("持仓数量（股）", "0", numeric = true), Field("持仓成本（元）", "0", numeric = true)),
+                "数量填 0 表示只观察、不计算持仓成本。数量大于 0 时按「买入日期」记 T+1 批次；" +
+                    "补记之前买的股票请把日期改成实际买入日，否则会被当成今天买入、当天受 T+1 锁定。",
+                listOf(
+                    Field("持仓数量（股）", "0", numeric = true),
+                    Field("持仓成本（元）", "0", numeric = true),
+                    Field("买入日期", TimeUtils.todayText()),
+                ),
             ) { values ->
                 val quantity = values.getOrElse(0) { "0" }.toDoubleOrNull() ?: 0.0
                 val cost = values.getOrElse(1) { "0" }.toDoubleOrNull() ?: 0.0
+                val date = values.getOrElse(2) { "" }.trim()
+                if (quantity < 0 || cost < 0 || !quantity.isFinite() || !cost.isFinite()) {
+                    Toast.makeText(context, "数量和成本必须是大于等于 0 的数字", Toast.LENGTH_SHORT).show()
+                    return@input
+                }
+                if (quantity > 0 && !isTradeDate(date)) {
+                    Toast.makeText(context, "买入日期必须是不晚于今天的 yyyy-MM-dd", Toast.LENGTH_LONG).show()
+                    return@input
+                }
                 store.portfolio = portfolio.copy(
                     positions = (portfolio.positions + Position(code, name, quantity, cost)).toMutableList()
                 )
+                // 有数量就记批次：漏记会留下「未记录日期」残股，T+1 会一直按锁定算。
+                if (quantity > 0) {
+                    store.tradeBook = TradeLotLedger.syncPositionEdit(
+                        store.tradeBook, code, name, 0.0, quantity, cost, date,
+                    )
+                }
                 if (syncToWatchlist(context, code, name)) {
                     Toast.makeText(context, "已同时加入自选股（顶栏不显示）", Toast.LENGTH_SHORT).show()
                 }
@@ -738,26 +776,51 @@ object Dialogs {
             .setTitle("编辑持仓")
             .setItems(labels) { _, index ->
                 val target = portfolio.positions[index]
+                // 手工加过数量但没记批次的残股：T+1 一直按锁定算，提示补记入口。
+                val residual = target.quantity - store.tradeBook.lots
+                    .filter { it.code == target.code }.sumOf { it.quantity }
+                val residualNote = if (residual > 0.000001) {
+                    "当前有 ${formatNumber(residual)} 股没有买入批次记录，T+1 按锁定算、不会自动解锁；" +
+                        "在「记录交易」里用「仅登记买入批次」补记买入日期即可恢复。"
+                } else {
+                    ""
+                }
                 input(
                     context,
                     "编辑 ${target.name}",
-                    "数量和成本都可以填 0；数量为 0 时仍会继续提醒买入信号。",
+                    "数量和成本都可以填 0；数量为 0 时仍会继续提醒买入信号。" +
+                        "数量增加时，新增部分按「加仓日期」记 T+1 批次。$residualNote",
                     listOf(
                         Field("持仓数量（股）", formatNumber(target.quantity), numeric = true),
                         Field("持仓成本（元）", formatNumber(target.cost), numeric = true),
+                        Field("加仓日期（数量增加时记批次）", TimeUtils.todayText()),
                     ),
                 ) { values ->
                     val quantity = values.getOrElse(0) { "0" }.toDoubleOrNull()
                     val cost = values.getOrElse(1) { "0" }.toDoubleOrNull()
+                    val date = values.getOrElse(2) { "" }.trim()
                     if (quantity == null || cost == null || quantity < 0 || cost < 0) {
                         Toast.makeText(context, "数量和成本必须是大于等于 0 的数字", Toast.LENGTH_SHORT).show()
                         return@input
                     }
+                    if (quantity > target.quantity && !isTradeDate(date)) {
+                        Toast.makeText(context, "加仓日期必须是不晚于今天的 yyyy-MM-dd", Toast.LENGTH_LONG).show()
+                        return@input
+                    }
                     store.portfolio = portfolio.updatePosition(target.code, quantity, cost)
+                    store.tradeBook = TradeLotLedger.syncPositionEdit(
+                        store.tradeBook, target.code, target.name, target.quantity, quantity, cost, date,
+                    )
                     onSaved()
                 }
             }
             .show()
+    }
+
+    /** 交易日期校验：yyyy-MM-dd 且不晚于今天。 */
+    private fun isTradeDate(date: String): Boolean {
+        val today = TimeUtils.todayText()
+        return date.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) && date <= today
     }
 
     /** 自选股（菜单栏显示项）管理。 */
