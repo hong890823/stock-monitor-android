@@ -150,6 +150,19 @@ object HighPositionPolicy {
         }
     }
 
+    fun evaluateIntraday(
+        evidence: HighPositionEvidence,
+        price: Double,
+        volumeRatio: Double?,
+        dualTimeframeAllowed: Boolean,
+    ): HighPositionDecision = evaluate(
+        evidence.copy(
+            price = price,
+            volumeRatio = volumeRatio,
+            dualTimeframeAllowed = dualTimeframeAllowed,
+        ),
+    )
+
     private fun valid(evidence: HighPositionEvidence): Boolean {
         val finitePositive = listOf(
             evidence.price,

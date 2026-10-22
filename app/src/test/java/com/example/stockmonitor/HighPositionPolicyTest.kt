@@ -9,6 +9,7 @@ import com.example.stockmonitor.analysis.ShortTermTrend
 import com.example.stockmonitor.analysis.TrendAssessment
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -133,5 +134,32 @@ class HighPositionPolicyTest {
 
         assertEquals(HighPositionPhase.UNCERTAIN, result.phase)
         assertFalse(result.allowSecondWaveEntry)
+    }
+
+    @Test
+    fun intradayEvaluationUsesLivePriceVolumeAndRealDualTimeframeGate() {
+        val staleEvidence = evidence(
+            price = 95.0,
+            volumeRatio = 0.8,
+            dualTimeframeAllowed = true,
+        )
+
+        val confirmed = HighPositionPolicy.evaluateIntraday(
+            evidence = staleEvidence,
+            price = 101.0,
+            volumeRatio = 1.5,
+            dualTimeframeAllowed = true,
+        )
+        val waiting = HighPositionPolicy.evaluateIntraday(
+            evidence = staleEvidence,
+            price = 101.0,
+            volumeRatio = 1.5,
+            dualTimeframeAllowed = false,
+        )
+
+        assertEquals(HighPositionPhase.SECOND_WAVE_CONFIRMED, confirmed.phase)
+        assertTrue(confirmed.allowSecondWaveEntry)
+        assertNotEquals(HighPositionPhase.SECOND_WAVE_CONFIRMED, waiting.phase)
+        assertFalse(waiting.allowSecondWaveEntry)
     }
 }

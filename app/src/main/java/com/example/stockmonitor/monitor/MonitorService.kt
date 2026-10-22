@@ -28,6 +28,7 @@ import com.example.stockmonitor.analysis.IndicatorScreener
 import com.example.stockmonitor.analysis.Indicators
 import com.example.stockmonitor.analysis.IntradaySignal
 import com.example.stockmonitor.analysis.IntradaySignalType
+import com.example.stockmonitor.analysis.IntradaySignalState
 import com.example.stockmonitor.analysis.IntradayTactics
 import com.example.stockmonitor.analysis.LimitSealTracker
 import com.example.stockmonitor.analysis.MarketAlertEngine
@@ -183,13 +184,11 @@ class MonitorService : Service() {
     private val limitSealTracker = LimitSealTracker()
     private val portfolioSignals = mutableMapOf<String, String>()
 
-    /** 盘中提醒的当前形态：只有形态变化（含从无到有）才提醒，见 checkIntradaySignals。 */
-    private val signalAlertActive = mutableMapOf<String, String>()
-
-    /** 尚未完成连续确认的候选信号；条件消失或类型变化时重新计数。 */
-    private val signalAlertPending = mutableMapOf<String, PendingIntradaySignal>()
-    private val signalAlertLastAt = mutableMapOf<String, Long>()
-    private val signalAlertCount = mutableMapOf<String, Int>()
+    private val intradaySignalState =
+        IntradaySignalState(
+            cooldownMs = SIGNAL_COOLDOWN_MS,
+            maxPerDay = SIGNAL_MAX_PER_DAY,
+        )
 
     /**
      * 龙头强度状态机：炸板守住高位线的转弱确认计时。
@@ -227,11 +226,6 @@ class MonitorService : Service() {
     private var volumeBaselineRetryAt = 0L
     private var lastPortfolioSlot: String? = null
     private var portfolioSlotInFlight: String? = null
-
-    private data class PendingIntradaySignal(
-        val type: IntradaySignalType,
-        val rounds: Int,
-    )
 
     private var lastLimitHour: Int = -1
 
@@ -908,10 +902,7 @@ class MonitorService : Service() {
         quotes: Map<String, Quote>,
         calendar: Calendar,
     ) {
-        if (!store.alertsEnabled || !TradingCalendar.inMarketHoursForAlert(calendar)) {
-            marketAlertEngine.reset()
-            return
-        }
+        if (!store.alertsEnabled || !TradingCalendar.inMarketHoursForAlert(calendar)) return
         val timestamp = System.currentTimeMillis()
         val turnoverRatio = marketTurnoverRatio(quotes, calendar)
         val snapshots =
@@ -945,10 +936,7 @@ class MonitorService : Service() {
         quotes: Map<String, Quote>,
         calendar: Calendar,
     ) {
-        if (!store.alertsEnabled || !TradingCalendar.inMarketHoursForAlert(calendar)) {
-            dipReboundEngine.reset()
-            return
-        }
+        if (!store.alertsEnabled || !TradingCalendar.inMarketHoursForAlert(calendar)) return
         val today = TimeUtils.todayText()
         val timestamp = System.currentTimeMillis()
         val turnoverRatio = marketTurnoverRatio(quotes, calendar)
@@ -1014,10 +1002,7 @@ class MonitorService : Service() {
         calendar: Calendar,
         currentQuotes: Map<String, Quote>,
     ) {
-        if (!store.alertsEnabled || !TradingCalendar.inMarketHoursForAlert(calendar)) {
-            reboundTracker.reset()
-            return
-        }
+        if (!store.alertsEnabled || !TradingCalendar.inMarketHoursForAlert(calendar)) return
         if (!store.intradaySignalEnabled) return
         val heldCodes = StockAlertScope.heldCodes(store.portfolio.positions)
         val watchCodes = store.watchlist
@@ -1068,11 +1053,7 @@ class MonitorService : Service() {
         calendar: Calendar,
         currentQuotes: Map<String, Quote>,
     ) {
-        if (!store.alertsEnabled || !TradingCalendar.inMarketHoursForAlert(calendar)) {
-            sealSprintTracker.reset()
-            limitSealTracker.reset()
-            return
-        }
+        if (!store.alertsEnabled || !TradingCalendar.inMarketHoursForAlert(calendar)) return
         val heldCodes = StockAlertScope.heldCodes(store.portfolio.positions)
         val watchCodes = store.watchlist
             .map { it.code }
@@ -1236,16 +1217,12 @@ class MonitorService : Service() {
         calendar: Calendar,
         currentQuotes: Map<String, Quote> = Repo.quotes,
     ) {
-        if (!store.alertsEnabled) {
-            HoldingAnalyzer.holdingBreakTracker.clear()
-            return
-        }
+        if (!store.alertsEnabled) return
         val portfolio = store.portfolio
         val heldCodes = StockAlertScope.heldCodes(portfolio.positions)
         HoldingAnalyzer.holdingTTracker.retainCodes(heldCodes)
         HoldingAnalyzer.holdingBreakTracker.retainCodes(heldCodes)
-        signalAlertActive.keys.retainAll(heldCodes)
-        signalAlertPending.keys.retainAll(heldCodes)
+        intradaySignalState.retainCodes(heldCodes)
         supportBreakStates.keys.retainAll(heldCodes)
         if (heldCodes.isEmpty()) return
         if (!TradingCalendar.inMarketHoursForAlert(calendar)) return
@@ -1257,10 +1234,7 @@ class MonitorService : Service() {
             .associateBy { it.code }
         if (signalAlertDay != today) {
             signalAlertDay = today
-            signalAlertActive.clear()
-            signalAlertPending.clear()
-            signalAlertLastAt.clear()
-            signalAlertCount.clear()
+            intradaySignalState.clear()
             supportBreakStates.clear()
             HoldingAnalyzer.holdingTTracker.clear()
             HoldingAnalyzer.holdingBreakTracker.clear()
@@ -1275,7 +1249,7 @@ class MonitorService : Service() {
             val quote = currentQuotes[position.code] ?: continue
             val tObservation = HoldingAnalyzer.holdingTTracker.observe(quote, today, now)
             if (quote.quoteDate != today) {
-                signalAlertPending.remove(position.code)
+                intradaySignalState.clearPending(position.code)
                 continue
             }
             updateStrongContinuationEventCurrentPrice(position.code, quote.price)
@@ -1345,13 +1319,20 @@ class MonitorService : Service() {
             val sectorHealthy = sectorContext?.state?.regime?.let {
                 it != MarketRegime.WEAK && it != MarketRegime.COLLAPSE
             } == true
+            val dualTimeframeDecision = DualTimeframePolicy.decide(
+                riskSignal = false,
+                execution = intraday15ByCode[position.code] ?: IntradayBarWindow(emptyList()),
+                direction = intraday30ByCode[position.code] ?: IntradayBarWindow(emptyList()),
+            )
             val highPositionDecision = level?.highPositionEvidence?.let {
-                HighPositionPolicy.evaluate(
-                    it.copy(
+                HighPositionPolicy.evaluateIntraday(
+                    evidence = it.copy(
                         marketHealthy = marketHealthy,
                         sectorHealthy = sectorHealthy,
-                        dualTimeframeAllowed = true,
                     ),
+                    price = quote.price,
+                    volumeRatio = Repo.volumeRatios[position.code],
+                    dualTimeframeAllowed = dualTimeframeDecision.allowed,
                 )
             } ?: level?.highPosition
             val tacticsInput =
@@ -1424,44 +1405,27 @@ class MonitorService : Service() {
             )
             if (evaluatedSignal == null) {
                 // 条件不再成立：清掉形态和未完成的确认，下次再触发才会重新提醒。
-                signalAlertActive.remove(position.code)
-                signalAlertPending.remove(position.code)
+                intradaySignalState.clearCode(position.code)
                 continue
             }
             var signal: IntradaySignal = evaluatedSignal
             var timeframeReason: String? = null
             if (signal.type.requiresDualTimeframe) {
-                val decision = DualTimeframePolicy.decide(
-                    riskSignal = signal.type.isRisk,
-                    execution = intraday15ByCode[position.code] ?: IntradayBarWindow(emptyList()),
-                    direction = intraday30ByCode[position.code] ?: IntradayBarWindow(emptyList()),
-                )
-                if (!decision.allowed) {
-                    timeframeReason = decision.reason
-                    signal = IntradayTactics.watchOnly(signal, decision)
+                if (!dualTimeframeDecision.allowed) {
+                    timeframeReason = dualTimeframeDecision.reason
+                    signal = IntradayTactics.watchOnly(signal, dualTimeframeDecision)
                 }
             }
             if (!signal.type.isRisk && !store.intradaySignalEnabled) {
-                signalAlertPending.remove(position.code)
+                intradaySignalState.clearPending(position.code)
                 continue
             }
 
-            val pending = signalAlertPending[position.code]
-            val rounds = if (pending?.type == signal.type) pending.rounds + 1 else 1
             val requiredRounds = IntradayTactics.confirmationRounds(signal.type)
-            if (rounds < requiredRounds) {
-                signalAlertPending[position.code] = PendingIntradaySignal(signal.type, rounds)
-                continue
-            }
-            signalAlertPending.remove(position.code)
-            if (signalAlertActive[position.code] == signal.type.name) continue
+            if (!intradaySignalState.confirmed(position.code, signal.type, requiredRounds)) continue
             val key = position.code + "|" + signal.type.name
-            if (!signal.type.isRisk && now - (signalAlertLastAt[key] ?: 0L) < SIGNAL_COOLDOWN_MS) continue
-            val fired = signalAlertCount[position.code] ?: 0
-            if (!signal.type.isRisk && fired >= SIGNAL_MAX_PER_DAY) continue
-            signalAlertActive[position.code] = signal.type.name
-            signalAlertLastAt[key] = now
-            if (!signal.type.isRisk) signalAlertCount[position.code] = fired + 1
+            val riskSignal = signal.type.isRisk
+            if (!intradaySignalState.canEmit(position.code, signal.type, now, riskSignal)) continue
             if (signal.type == IntradaySignalType.T_HOLD || signal.type == IntradaySignalType.T_HOLD_CAUTION) {
                 val fallbackTurnover = MarketTurnoverFallbackPolicy.evaluate(
                     predictedTurnoverYi = turnoverSnapshot?.predictedFullDay?.div(100_000_000.0),
@@ -1493,9 +1457,9 @@ class MonitorService : Service() {
                 )
             }
             // 风险提醒（破位）永远发、不占预算：预算只挡机会类提示，绝不能把风险提示吞掉。
-            val riskSignal = signal.type.isRisk
             if (riskSignal || (store.intradaySignalEnabled && consumePushBudget(position.code))) {
                 if (position.code !in StockAlertScope.heldCodes(store.portfolio.positions)) continue
+                intradaySignalState.commit(position.code, signal.type, now, riskSignal)
                 val body = TradeNotification.intraday(tacticsInput, signal, timeframeReason)
                 if (riskSignal) {
                     Notifier.riskSell(this, ALERT_ID_SIGNAL + key.hashCode(), signal.title, body)
