@@ -149,7 +149,6 @@ class MonitorService : Service() {
     private val indicatorScanBusy = AtomicBoolean(false)
     private val patternScanBusy = AtomicBoolean(false)
     private val portfolioBusy = AtomicBoolean(false)
-    private val dailyReviewBusy = AtomicBoolean(false)
     private val summaryBusy = AtomicBoolean(false)
     private val observationRefreshBusy = AtomicBoolean(false)
     private var lastObservationIntradayRefreshAtMs = 0L
@@ -191,8 +190,6 @@ class MonitorService : Service() {
     private val signalAlertPending = mutableMapOf<String, PendingIntradaySignal>()
     private val signalAlertLastAt = mutableMapOf<String, Long>()
     private val signalAlertCount = mutableMapOf<String, Int>()
-    private val holdingTTracker = HoldingTTracker()
-    private val holdingBreakTracker = HoldingBreakTracker()
 
     /**
      * 龙头强度状态机：炸板守住高位线的转弱确认计时。
@@ -220,11 +217,6 @@ class MonitorService : Service() {
         java.util.concurrent.ConcurrentHashMap
             .newKeySet<String>()
 
-    /** 公告清单按需补拉（事件后蓄势识别用）：比基本面轻，12 小时一份足够。 */
-    private val announcementLastFetchAt = mutableMapOf<String, Long>()
-    private val announcementInFlight =
-        java.util.concurrent.ConcurrentHashMap
-            .newKeySet<String>()
     private var signalAlertDay: String? = null
     private val volumeBaseline = LinkedHashMap<String, Double>()
 
@@ -349,10 +341,7 @@ class MonitorService : Service() {
                 scope.launch { generateSummary() }
             }
 
-            // 手动重跑复盘：不写日期戳，否则下午手动跑一次会把 16 点的自动档顶掉。
-            ACTION_DAILY_REVIEW -> {
-                scope.launch { generateDailyReview() }
-            }
+            // 手动重跑复盘走 AnalysisService.enqueueDailyReview（临时前台服务，不再拉起监控）。
 
             // 手动触发：不受盘中 30 分钟槽位限制，随时可以重新分析一次。
             ACTION_PORTFOLIO -> {
@@ -1248,13 +1237,13 @@ class MonitorService : Service() {
         currentQuotes: Map<String, Quote> = Repo.quotes,
     ) {
         if (!store.alertsEnabled) {
-            holdingBreakTracker.clear()
+            HoldingAnalyzer.holdingBreakTracker.clear()
             return
         }
         val portfolio = store.portfolio
         val heldCodes = StockAlertScope.heldCodes(portfolio.positions)
-        holdingTTracker.retainCodes(heldCodes)
-        holdingBreakTracker.retainCodes(heldCodes)
+        HoldingAnalyzer.holdingTTracker.retainCodes(heldCodes)
+        HoldingAnalyzer.holdingBreakTracker.retainCodes(heldCodes)
         signalAlertActive.keys.retainAll(heldCodes)
         signalAlertPending.keys.retainAll(heldCodes)
         supportBreakStates.keys.retainAll(heldCodes)
@@ -1273,8 +1262,8 @@ class MonitorService : Service() {
             signalAlertLastAt.clear()
             signalAlertCount.clear()
             supportBreakStates.clear()
-            holdingTTracker.clear()
-            holdingBreakTracker.clear()
+            HoldingAnalyzer.holdingTTracker.clear()
+            HoldingAnalyzer.holdingBreakTracker.clear()
             leaderStrengthTracker.clear()
         }
         val levels = Repo.portfolioResults.associateBy { it.code }
@@ -1284,7 +1273,7 @@ class MonitorService : Service() {
         for (position in portfolio.positions) {
             if (position.code !in heldCodes || !position.quantity.isFinite() || position.quantity <= 0) continue
             val quote = currentQuotes[position.code] ?: continue
-            val tObservation = holdingTTracker.observe(quote, today, now)
+            val tObservation = HoldingAnalyzer.holdingTTracker.observe(quote, today, now)
             if (quote.quoteDate != today) {
                 signalAlertPending.remove(position.code)
                 continue
@@ -1292,7 +1281,7 @@ class MonitorService : Service() {
             updateStrongContinuationEventCurrentPrice(position.code, quote.price)
             val level = levels[position.code]
             val breakObservation =
-                holdingBreakTracker.observe(
+                HoldingAnalyzer.holdingBreakTracker.observe(
                     quote,
                     level?.support ?: 0.0,
                     level?.volatility?.atrPct,
@@ -2364,7 +2353,7 @@ class MonitorService : Service() {
             holdingTContexts = emptyMap()
             Repo.notifyChanged()
             // 板块上下文要先就位，否则这一轮的应对里没有板块修饰。
-            refreshSectorContexts(portfolio.positions)
+            HoldingAnalyzer.refreshSectorContexts(store, portfolio.positions)
             val results = mutableListOf<com.example.stockmonitor.analysis.PositionResult>()
             // 本轮取到的实时行情，用来算报告里的「今日盈亏」；取不到的股票会由 DayPnl 标成缺行情。
             val liveQuotes = mutableMapOf<String, Quote>()
@@ -2375,14 +2364,16 @@ class MonitorService : Service() {
             // 存下来给 UI 的「今日要点」用，别让界面层再去拉一次沪指日线重算 MA20/MA60。
             Repo.marketState = market
             val marketRisk =
-                refreshMarketRiskContext(
+                HoldingAnalyzer.refreshMarketRiskContext(
+                    store = store,
+                    turnoverTracker = turnoverTracker,
                     tradingDates = benchmark.orEmpty().map { it.date },
                 )
             portfolio.positions.forEachIndexed { index, position ->
                 runCatching {
                     val live = sina.quote(position.code) ?: throw IllegalStateException("实时行情获取失败")
                     liveQuotes[position.code] = live
-                    val result = analyzePosition(position, portfolio, live, benchmark, market, marketRisk)
+                    val result = HoldingAnalyzer.analyzePosition(position, portfolio, live, benchmark, market, marketRisk)
                     results.add(result)
                     notifyPortfolioSignal(result)
                     maybeRefreshFundamentalHealth(
@@ -2458,8 +2449,8 @@ class MonitorService : Service() {
                                 marketChangePct = Repo.quotes["sh000001"]?.changePct,
                                 marketPrice = Repo.quotes["sh000001"]?.price,
                                 marketHighPrice = Repo.quotes["sh000001"]?.high,
-                                industryBreadth = marketBreadth().first,
-                                conceptBreadth = marketBreadth().second,
+                                industryBreadth = HoldingAnalyzer.marketBreadth().first,
+                                conceptBreadth = HoldingAnalyzer.marketBreadth().second,
                             )
                         },
                 )
@@ -2621,181 +2612,6 @@ class MonitorService : Service() {
     }
 
     /**
-     * 刷新各持仓的板块上下文（归属 + 板块状态），写进 [Repo.sectorContexts]。
-     *
-     * 归属走东财 F10、**长缓存**（[BoardTagCache.TTL_MS]）——归属变化极慢，
-     * 别让每 30 分钟的持仓分析都去打一遍 F10；板块日线按板块码去重后各拉一次。
-     * 任一步失败只影响那一只，其余照常：报告写「板块归属暂缺」，不猜。
-     */
-    private suspend fun refreshSectorContexts(positions: List<Position>) {
-        if (positions.isEmpty()) return
-        val boardBars = mutableMapOf<String, List<DayBar>>()
-        val industryBoards = runCatching { eastMoney.industryBoardChanges() }.getOrDefault(emptyMap())
-        Repo.sectorContexts =
-            positions.associate { position ->
-                position.code to
-                    BoardTagCache.loadContext(
-                        store = store,
-                        eastMoney = eastMoney,
-                        code = position.code,
-                        boardBars = boardBars,
-                        boardChangeFallback = { names ->
-                            BoardTagCache.matchBoardChange(industryBoards, names) { name ->
-                                Repo.sectorChangeByName(name) { runCatching { sina.sectors() }.getOrNull() }
-                            }
-                        },
-                    )
-            }
-    }
-
-    /**
-     * 单只持仓的「行情 + 技术分析 + 信号判定」。持仓分析与复盘共用这一份，
-     * 免得两条链路各写一遍、数字对不上。
-     *
-     * **副作用留给调用方**：盘中信号推送（[notifyPortfolioSignal]）与基本面按需补拉
-     * （[maybeRefreshFundamentalHealth]）只属于盘中持仓分析，收盘后复盘不该触发。
-     */
-    private suspend fun analyzePosition(
-        position: Position,
-        portfolio: Portfolio,
-        live: Quote,
-        benchmark: List<DayBar>?,
-        market: MarketState,
-        marketRisk: MarketRiskContext? = Repo.marketRiskContext,
-    ): com.example.stockmonitor.analysis.PositionResult {
-        val history: List<DayBar> = sina.kline(position.code, 240)
-        val technical =
-            StockAnalysis.analyze(
-                history = history,
-                code = position.code,
-                name = position.name,
-                live = live,
-                benchmark = if (position.code == "sh000001") null else benchmark,
-                // 盘中按已过交易时间折算量比，收盘后自动退回纯日线口径。
-                elapsedTradingMinutes = TradingCalendar.tradingMinutesElapsed(),
-            )
-        val today = TimeUtils.todayText()
-        val now = System.currentTimeMillis()
-        val tContext =
-            HoldingTContext.from(
-                history,
-                MultiTimeframeTrend.evaluate(history, today, benchmark.orEmpty().map { it.date }),
-                today,
-                now,
-                benchmark.orEmpty().map { it.date },
-            )
-        val tObservation = holdingTTracker.snapshot(live, today, now) ?: holdingTTracker.observe(live, today, now)
-        // 事件后蓄势：公告（基本面抓取顺带缓存，缺了按需轻量补拉）+ 含今日实时段的日线。
-        maybeRefreshAnnouncements(position.code)
-        val eventCoil = Repo.recentAnnouncements[position.code]?.let { announcements ->
-            val bars = ObservationEntryPolicy.withLiveBar(history, live).takeIf { it.isNotEmpty() } ?: history
-            EventCoil.evaluate(announcements, bars, today)
-        }
-        return PortfolioAnalysis.evaluate(
-            position,
-            technical,
-            live,
-            portfolio,
-            Repo.fundamentalHealth[position.code]
-                ?.takeIf {
-                    System.currentTimeMillis() - it.fetchedAtMs in 0..FundamentalHealthPolicy.CACHE_TTL_MS
-                }?.health,
-            // 环境是「同一根 K 线该怎么读」的依据：大盘/板块塌陷时建议会整个改写，
-            // 昨日快照用来写「较昨日」。
-            envContext =
-                marketBreadth().let { breadth ->
-                    EnvContext(
-                        market = market,
-                        sector = Repo.sectorContexts[position.code],
-                        prev = Repo.portfolioSnapshot?.prevRows?.get(position.code),
-                        marketRisk = marketRisk,
-                        industryBreadth = breadth.first,
-                        conceptBreadth = breadth.second,
-                    )
-                },
-            breakObservation = holdingBreakTracker.snapshot(position.code, live, TimeUtils.todayText(), System.currentTimeMillis()),
-            holdingTContext = tContext,
-            holdingTObservation = tObservation,
-            eventCoil = eventCoil,
-        )
-    }
-
-    private fun marketBreadth(): Pair<Double?, Double?> {
-        val sectors = Repo.sectors?.all.orEmpty()
-        val industryBreadth = MarketBreadthFreshnessPolicy.freshRatio(
-            sectors.takeIf { it.isNotEmpty() }?.let {
-                MarketBreadthSnapshot(
-                    rising = it.count { sector -> sector.change > 0 },
-                    total = it.size,
-                    updatedAtMs = Repo.sectorsUpdatedAtMs,
-                )
-            },
-            nowMs = System.currentTimeMillis(),
-        )
-        val concept = Repo.conceptSummary
-        val conceptTotal = concept?.let {
-            if (it.sectors.isNotEmpty()) it.sectors.size else it.rising + it.falling
-        } ?: 0
-        val conceptBreadth = MarketBreadthFreshnessPolicy.freshRatio(
-            concept?.takeIf { conceptTotal > 0 }?.let {
-                MarketBreadthSnapshot(
-                    rising = if (it.sectors.isNotEmpty()) {
-                        it.sectors.count { item -> item.change > 0 }
-                    } else {
-                        it.rising
-                    },
-                    total = conceptTotal,
-                    updatedAtMs = Repo.conceptSummaryUpdatedAtMs,
-                )
-            },
-            nowMs = System.currentTimeMillis(),
-        )
-        return industryBreadth to conceptBreadth
-    }
-
-    private fun refreshMarketRiskContext(
-        calendar: Calendar = TimeUtils.nowCalendar(),
-        tradingDates: List<String> = emptyList(),
-    ): MarketRiskContext {
-        val snapshot = Repo.turnoverSnapshot
-        val gaps = mutableListOf<String>()
-        val cached = Repo.marketRiskContext
-        val northbound =
-            cached?.northbound?.takeIf { cached.isFresh() }
-                ?: runCatching { eastMoney.northboundDailyFlow() }.getOrNull()
-                ?: run {
-                    gaps.add("北向资金数据暂缺")
-                    null
-                }
-        val sameTimeRatio =
-            snapshot?.let {
-                turnoverTracker?.sameTimeRatio(TimeUtils.todayText(), it.sampleMinute, it.today)
-            }
-        val turnover =
-            TurnoverContext(
-                today = (snapshot?.today ?: Repo.turnoverToday).takeIf { it > 0 },
-                previousSameTime = snapshot?.previousSameTime,
-                predictedFullDay = snapshot?.predictedFullDay,
-                sameTimeRatio = sameTimeRatio,
-            ).takeIf { it.today != null || it.previousSameTime != null || it.predictedFullDay != null }
-                ?: run {
-                    gaps.add("成交额快照暂缺")
-                    null
-                }
-        val context =
-            MarketRiskContext(
-                timing = MarketTimingContext.from(calendar, tradingDates),
-                northbound = northbound,
-                turnover = turnover,
-                recentMarketText = Repo.summaryText ?: store.lastSummaryText,
-                dataGaps = gaps,
-                generatedAtMs = System.currentTimeMillis(),
-            )
-        Repo.marketRiskContext = context
-        return context
-    }
-
-    /**
      * 每天收盘后自动生成「持仓复盘」，**只缓存不弹窗**（与盘面总结同一约定：
      * 生成的文档不是可操作事件，不推送通知）。
      *
@@ -2808,116 +2624,8 @@ class MonitorService : Service() {
         val today = TimeUtils.todayText()
         if (store.lastDailyReviewDate == today) return
         store.lastDailyReviewDate = today
-        scope.launch { generateDailyReview() }
-    }
-
-    private suspend fun generateDailyReview() {
-        if (!dailyReviewBusy.compareAndSet(false, true)) return
-        try {
-            val portfolio = store.portfolio
-            if (portfolio.positions.isEmpty()) {
-                Repo.dailyReviewTask =
-                    BackgroundTaskState.failure(
-                        "持仓复盘",
-                        "没有配置监控股票",
-                        TimeUtils.nowText(),
-                    )
-                Repo.notifyChanged()
-                return
-            }
-            Repo.dailyReviewTask =
-                BackgroundTaskState.running(
-                    "持仓复盘",
-                    total = portfolio.positions.size,
-                    message = "正在获取行情并计算…",
-                )
-            Repo.notifyChanged()
-
-            // 一次批量取价，保证复盘里所有数字是同一时点的快照（逐只取会有先后差）。
-            val codes = (portfolio.positions.map { it.code } + "sh000001").distinct()
-            val quotes = sina.quotes(codes)
-            val indexQuote = quotes["sh000001"]
-            val today = TimeUtils.todayText()
-            // 节假日没有行情日期表，靠指数行情标注的交易日期判：不是今天就不生成，
-            // 也不覆盖旧报告——否则会伪造一份「今日」。
-            if (!DailyReview.isTradingDay(indexQuote, today)) {
-                Repo.dailyReviewTask =
-                    BackgroundTaskState.failure(
-                        "持仓复盘",
-                        "今日非交易日，不生成复盘",
-                        TimeUtils.nowText(),
-                    )
-                Repo.notifyChanged()
-                return
-            }
-
-            val benchmark = runCatching { sina.kline("sh000001", 240) }.getOrNull()
-            val market = MarketRegime.evaluate(benchmark.orEmpty(), indexQuote?.changePct)
-            Repo.marketState = market
-            val marketRisk =
-                refreshMarketRiskContext(
-                    tradingDates = benchmark.orEmpty().map { it.date },
-                )
-            refreshSectorContexts(portfolio.positions)
-            val results = mutableListOf<com.example.stockmonitor.analysis.PositionResult>()
-            val liveQuotes = mutableMapOf<String, Quote>()
-            portfolio.positions.forEach { position ->
-                val live = quotes[position.code]
-                // 取不到行情的留给 DayPnl 标「未计入」，不拿 0 填成没亏没赚。
-                if (live == null) return@forEach
-                liveQuotes[position.code] = live
-                Repo.dailyReviewTask =
-                    BackgroundTaskState.running(
-                        "持仓复盘",
-                        total = portfolio.positions.size,
-                        message = "正在分析 ${position.name}…",
-                    )
-                Repo.notifyChanged()
-                // 复盘不发盘中信号、不补拉基本面，所以只取分析结果。
-                runCatching { results.add(analyzePosition(position, portfolio, live, benchmark, market, marketRisk)) }
-                    .onFailure { Log.e(TAG, "复盘分析失败 ${position.name}", it) }
-            }
-
-            val text =
-                DailyReview.generate(
-                    DailyReview.Inputs(
-                        positions = portfolio.positions,
-                        quotes = liveQuotes,
-                        results = results,
-                        portfolio = portfolio,
-                        indexQuote = indexQuote,
-                        analyzedAt = TimeUtils.nowText(),
-                        market = market,
-                        sectorContexts = Repo.sectorContexts,
-                        strongContinuationEvents = Repo.strongContinuationEvents.filter { it.date == today },
-                        // 近两日重大利好一节的原料；analyzePosition 已顺带刷新（maybeRefreshAnnouncements）。
-                        recentAnnouncements = Repo.recentAnnouncements,
-                        // 利好窗口要回溯到上一交易日（周一复盘才收得进周五盘后与周末的公告）。
-                        tradingDates = benchmark.orEmpty().map { it.date },
-                    ),
-                )
-            Repo.dailyReviewText = text
-            store.lastDailyReviewText = text
-            Repo.dailyReviewTask =
-                BackgroundTaskState.success(
-                    "持仓复盘",
-                    TimeUtils.nowText(),
-                    if (results.size == portfolio.positions.size) "复盘已生成" else "复盘已生成，但有股票分析失败",
-                )
-            Repo.notifyChanged()
-        } catch (error: Exception) {
-            Log.e(TAG, "持仓复盘失败", error)
-            Repo.dailyReviewTask =
-                BackgroundTaskState.failure(
-                    "持仓复盘",
-                    error.message ?: "请稍后重试",
-                    TimeUtils.nowText(),
-                )
-            Repo.lastError = "持仓复盘：${error.message}"
-            Repo.notifyChanged()
-        } finally {
-            dailyReviewBusy.set(false)
-        }
+        // 生成机器在 HoldingAnalyzer（与手动重跑、持仓分析共用一份）；自动档只负责调度与日期戳。
+        scope.launch { HoldingAnalyzer.generateDailyReview(store, turnoverTracker) }
     }
 
     /**
@@ -2956,27 +2664,6 @@ class MonitorService : Service() {
                 Log.w(TAG, "基本面补拉失败 $name", error)
             } finally {
                 healthInFlight.remove(code)
-            }
-        }
-    }
-
-    /**
-     * 事件后蓄势（[EventCoil]）只缺公告清单：单独轻量补拉，不必等基本面按需补拉
-     * （那条只在破位/深亏时触发，平时根本轮不到）。失败不重试轰炸，[ANNOUNCEMENT_REFRESH_MS] 后再试。
-     */
-    private fun maybeRefreshAnnouncements(code: String) {
-        val now = System.currentTimeMillis()
-        if (now - (announcementLastFetchAt[code] ?: 0L) < ANNOUNCEMENT_REFRESH_MS) return
-        if (!announcementInFlight.add(code)) return
-        announcementLastFetchAt[code] = now
-        scope.launch {
-            try {
-                Repo.publishAnnouncements(code, FundamentalsClient().announcements(code))
-                Repo.notifyChanged()
-            } catch (error: Exception) {
-                Log.w(TAG, "公告补拉失败 $code", error)
-            } finally {
-                announcementInFlight.remove(code)
             }
         }
     }
@@ -3193,7 +2880,6 @@ class MonitorService : Service() {
         const val ACTION_SCREEN_FULL = "com.example.stockmonitor.action.SCREEN_FULL"
         const val ACTION_OBSERVE_SCREEN = "com.example.stockmonitor.action.OBSERVE_SCREEN"
         const val ACTION_SUMMARY = "com.example.stockmonitor.action.SUMMARY"
-        const val ACTION_DAILY_REVIEW = "com.example.stockmonitor.action.DAILY_REVIEW"
         const val ACTION_PORTFOLIO = "com.example.stockmonitor.action.PORTFOLIO"
 
         /** 复盘的自动档：每天这个点（含）之后生成一次。15:05 数据可能未定，16 点更稳。 */
@@ -3256,8 +2942,6 @@ class MonitorService : Service() {
         private const val ALERT_ID_SEAL_SPRINT = 7400
         private const val ALERT_ID_SEAL = 7600
 
-        /** 公告清单的补拉周期（事件后蓄势识别用）。 */
-        private const val ANNOUNCEMENT_REFRESH_MS = 12 * 60 * 60 * 1000L
         private const val ALERT_ID_OBSERVATION_BUY = 8000
         private const val ALERT_ID_OBSERVATION_RISK = 8001
         private val MARKET_INDEX_CODES = listOf("sh000001", "sz399001", "sz399006")

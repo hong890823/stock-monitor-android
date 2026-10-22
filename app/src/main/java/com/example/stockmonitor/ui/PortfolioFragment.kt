@@ -206,7 +206,8 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                         row.addView(
                             actionButton(context, if (Repo.dailyReviewTask.isActive) "正在生成…" else "重跑复盘") {
                                 if (!Repo.dailyReviewTask.isActive) {
-                                    MonitorService.send(context, MonitorService.ACTION_DAILY_REVIEW)
+                                    // 走临时前台服务（与工具页报告同款），不再为一份复盘拉起整个后台监控。
+                                    com.example.stockmonitor.monitor.AnalysisService.enqueueDailyReview(context)
                                 }
                             },
                         )

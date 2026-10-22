@@ -56,8 +56,10 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * 工具页分析任务的临时前台服务：串行执行技术/基本面/港美股/AI 四条分析流水线。
- * 与 MonitorService 完全独立——队列空即自停，不受「后台监控」开关影响。
+ * 分析/报告任务的临时前台服务：串行执行技术/基本面/港美股/AI 四条分析流水线，
+ * 外加「持仓复盘」（生成机器在 [HoldingAnalyzer]，与监控服务共用一份）。
+ * 与 MonitorService 完全独立——队列空即自停，不受「后台监控」开关影响；
+ * 手动重跑复盘从这里走，不再为一份复盘把整个后台监控拉起来。
  */
 class AnalysisService : Service() {
     enum class Kind {
@@ -65,6 +67,7 @@ class AnalysisService : Service() {
         FUNDAMENTAL,
         GLOBAL,
         AI,
+        DAILY_REVIEW,
     }
 
     data class Task(
@@ -158,6 +161,24 @@ class AnalysisService : Service() {
     }
 
     private suspend fun runTask(task: Task) {
+        // 持仓复盘的状态由任务自己写（非交易日 / 没配置持仓等语义状态），不套通用成功/失败壳；
+        // 也遵守「只缓存不弹窗」约定，不走 deliver 自动打开报告。
+        if (task.kind == Kind.DAILY_REVIEW) {
+            try {
+                val store = Store(this)
+                withContext(Dispatchers.IO) { HoldingAnalyzer.generateDailyReview(store) }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                Log.e(TAG, "持仓复盘失败", error)
+                Repo.dailyReviewTask =
+                    BackgroundTaskState.failure("持仓复盘", error.message ?: "复盘生成失败", TimeUtils.nowText())
+                Repo.notifyChanged()
+            } finally {
+                pending.decrementAndGet()
+            }
+            return
+        }
         try {
             setState(task.kind, BackgroundTaskState.running(titleOf(task.kind), message = busyMessageOf(task.kind)))
             Repo.notifyChanged()
@@ -216,6 +237,8 @@ class AnalysisService : Service() {
             Kind.FUNDAMENTAL -> executeFundamental(task, store)
             Kind.GLOBAL -> executeGlobal(task, store)
             Kind.AI -> executeAi(task, store)
+            // 复盘走 runTask 的独立分支（状态自管、不弹窗），不会走到 execute。
+            Kind.DAILY_REVIEW -> throw IllegalStateException("持仓复盘不走通用流水线")
         }
 
     private fun executeTechnical(
@@ -613,6 +636,7 @@ class AnalysisService : Service() {
                 Kind.FUNDAMENTAL -> "个股基本面分析"
                 Kind.GLOBAL -> "港美股基本面分析"
                 Kind.AI -> "AI 综合分析"
+                Kind.DAILY_REVIEW -> "持仓复盘"
             }
 
         fun busyMessageOf(kind: Kind): String =
@@ -621,6 +645,7 @@ class AnalysisService : Service() {
                 Kind.FUNDAMENTAL -> "正在拉财报、估值与公告…"
                 Kind.GLOBAL -> "正在拉取港美股财务数据…"
                 Kind.AI -> "正在汇总数据并请求 AI…"
+                Kind.DAILY_REVIEW -> "正在生成复盘…"
             }
 
         fun failureLabelOf(kind: Kind): String =
@@ -629,6 +654,7 @@ class AnalysisService : Service() {
                 Kind.FUNDAMENTAL -> "基本面分析失败"
                 Kind.GLOBAL -> "港美股基本面分析失败"
                 Kind.AI -> "AI 综合分析失败"
+                Kind.DAILY_REVIEW -> "复盘生成失败"
             }
 
         fun stateOf(kind: Kind): BackgroundTaskState =
@@ -637,6 +663,7 @@ class AnalysisService : Service() {
                 Kind.FUNDAMENTAL -> Repo.fundamentalTask
                 Kind.GLOBAL -> Repo.globalTask
                 Kind.AI -> Repo.aiTask
+                Kind.DAILY_REVIEW -> Repo.dailyReviewTask
             }
 
         fun setState(
@@ -648,7 +675,13 @@ class AnalysisService : Service() {
                 Kind.FUNDAMENTAL -> Repo.fundamentalTask = state
                 Kind.GLOBAL -> Repo.globalTask = state
                 Kind.AI -> Repo.aiTask = state
+                Kind.DAILY_REVIEW -> Repo.dailyReviewTask = state
             }
+        }
+
+        /** 手动重跑持仓复盘：走临时前台服务，不再 startForegroundService(MonitorService)。 */
+        fun enqueueDailyReview(context: Context) {
+            enqueue(context, Task(Kind.DAILY_REVIEW, keyword = ""))
         }
 
         fun enqueue(
