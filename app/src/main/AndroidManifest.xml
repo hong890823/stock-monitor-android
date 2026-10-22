@@ -54,6 +54,17 @@
                 android:value="continuous_market_data_monitoring_and_user_requested_alerts" />
         </service>
 
+        <!-- 工具页用户主动发起的分析任务：临时前台服务，队列空自停 -->
+        <service
+            android:name=".monitor.AnalysisService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync|specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="user_requested_analysis_report_generation" />
+        </service>
+
         <receiver
             android:name=".monitor.BootReceiver"
             android:enabled="true"

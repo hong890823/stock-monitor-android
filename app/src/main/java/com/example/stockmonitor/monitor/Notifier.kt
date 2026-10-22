@@ -22,7 +22,13 @@ object Notifier {
     const val CHANNEL_MONITOR = "monitor"
     const val CHANNEL_ALERT = "alert_v2"
     const val CHANNEL_SIGNAL = "signal_v2"
+
+    /** 工具页分析任务的完成/失败通知。独立渠道，不受「行情提醒」开关拦截。 */
+    const val CHANNEL_ANALYSIS = "analysis_v1"
     const val NOTIFICATION_ID_MONITOR = 1001
+
+    /** AnalysisService 常驻通知 id，避开 1001 与告警区间 3000-8009。 */
+    const val NOTIFICATION_ID_ANALYSIS_FGS = 1101
 
     /** 买卖点提醒的震动：两下短震，和普通通知的默认震动区分开。 */
     private val SIGNAL_VIBRATION = longArrayOf(0, 250, 120, 250)
@@ -40,14 +46,14 @@ object Notifier {
                 CHANNEL_MONITOR,
                 context.getString(R.string.channel_monitor_name),
                 NotificationManager.IMPORTANCE_LOW,
-            ).apply { description = context.getString(R.string.channel_monitor_desc) }
+            ).apply { description = context.getString(R.string.channel_monitor_desc) },
         )
         manager.createNotificationChannel(
             NotificationChannel(
                 CHANNEL_ALERT,
                 context.getString(R.string.channel_alert_name),
                 NotificationManager.IMPORTANCE_HIGH,
-            ).apply { description = context.getString(R.string.channel_alert_desc) }
+            ).apply { description = context.getString(R.string.channel_alert_desc) },
         )
         // 独立通道：震动与横幅都在通道上配置（Android 8 起 Builder 里的设置会被忽略），
         // 通道 id 独立还让用户可以单独静音买卖点提醒、保留跌幅预警。
@@ -61,15 +67,23 @@ object Notifier {
                 // 震动由 Vibrator 直接执行，避免部分厂商只显示通知、不执行通道震动。
                 enableVibration(false)
                 enableLights(true)
-            }
+            },
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(
+                CHANNEL_ANALYSIS,
+                context.getString(R.string.channel_analysis_name),
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply { description = context.getString(R.string.channel_analysis_desc) },
         )
     }
 
-    fun signalStatus(context: Context): SignalStatus {
-        return reminderStatus(context, CHANNEL_SIGNAL)
-    }
+    fun signalStatus(context: Context): SignalStatus = reminderStatus(context, CHANNEL_SIGNAL)
 
-    private fun reminderStatus(context: Context, channelId: String): SignalStatus {
+    private fun reminderStatus(
+        context: Context,
+        channelId: String,
+    ): SignalStatus {
         ensureChannels(context)
         val manager = context.getSystemService(NotificationManager::class.java)
         val channel = manager?.getNotificationChannel(channelId)
@@ -81,35 +95,43 @@ object Notifier {
         )
     }
 
-    fun shouldUseDirectVibration(status: SignalStatus): Boolean =
-        shouldVibrateReminder(status)
+    fun shouldUseDirectVibration(status: SignalStatus): Boolean = shouldVibrateReminder(status)
 
     fun shouldVibrateReminder(status: SignalStatus): Boolean =
         status.notificationsEnabled && status.channelEnabled && status.deviceHasVibrator
 
-    fun signalStatusMessage(status: SignalStatus): String = when {
-        !status.notificationsEnabled -> "通知权限未开启，请打开系统通知设置。"
-        !status.channelEnabled -> "买卖点提醒通知已关闭，请打开系统通知设置。"
-        !status.deviceHasVibrator -> "买卖点提醒的应用震动不可用，通知仍会显示。"
-        else -> "已发出，几秒内应弹出通知并震动"
-    }
+    fun signalStatusMessage(status: SignalStatus): String =
+        when {
+            !status.notificationsEnabled -> "通知权限未开启，请打开系统通知设置。"
+            !status.channelEnabled -> "买卖点提醒通知已关闭，请打开系统通知设置。"
+            !status.deviceHasVibrator -> "买卖点提醒的应用震动不可用，通知仍会显示。"
+            else -> "已发出，几秒内应弹出通知并震动"
+        }
 
     fun openAppNotificationSettings(context: Context) {
-        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-        }
+        val intent =
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+            }
         context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
-    fun buildMonitorNotification(context: Context, title: String, text: String, bigText: String?): Notification {
+    fun buildMonitorNotification(
+        context: Context,
+        title: String,
+        text: String,
+        bigText: String?,
+    ): Notification {
         val intent = Intent(context, MainActivity::class.java)
-        val pending = PendingIntent.getActivity(
-            context,
-            0,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        return NotificationCompat.Builder(context, CHANNEL_MONITOR)
+        val pending =
+            PendingIntent.getActivity(
+                context,
+                0,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        return NotificationCompat
+            .Builder(context, CHANNEL_MONITOR)
             .setSmallIcon(R.drawable.ic_stat_monitor)
             .setContentTitle(title)
             .setContentText(text)
@@ -121,98 +143,192 @@ object Notifier {
             .build()
     }
 
-    fun alert(context: Context, id: Int, title: String, text: String) {
-        val store = com.example.stockmonitor.core.Store(context)
+    /** 分析完成通知：点击直达报告页。不受「行情提醒」开关拦截。 */
+    fun analysisComplete(
+        context: Context,
+        id: Int,
+        title: String,
+        text: String,
+        reportTitle: String,
+        report: String,
+    ) {
+        ensureChannels(context)
+        val pending =
+            PendingIntent.getActivity(
+                context,
+                id,
+                com.example.stockmonitor.ui.ReportActivity
+                    .createIntent(context, reportTitle, report),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        val notification =
+            NotificationCompat
+                .Builder(context, CHANNEL_ANALYSIS)
+                .setSmallIcon(R.drawable.ic_stat_monitor)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+                .setContentIntent(pending)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .build()
+        runCatching { NotificationManagerCompat.from(context).notify(id, notification) }
+    }
+
+    /** 分析失败通知：点击回到主界面重试。不受「行情提醒」开关拦截。 */
+    fun analysisFailed(
+        context: Context,
+        id: Int,
+        title: String,
+        text: String,
+    ) {
+        ensureChannels(context)
+        val pending =
+            PendingIntent.getActivity(
+                context,
+                id,
+                Intent(context, MainActivity::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        val notification =
+            NotificationCompat
+                .Builder(context, CHANNEL_ANALYSIS)
+                .setSmallIcon(R.drawable.ic_stat_monitor)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+                .setContentIntent(pending)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .build()
+        runCatching { NotificationManagerCompat.from(context).notify(id, notification) }
+    }
+
+    fun alert(
+        context: Context,
+        id: Int,
+        title: String,
+        text: String,
+    ) {
+        val store =
+            com.example.stockmonitor.core
+                .Store(context)
         if (!store.alertsEnabled) return
         ensureChannels(context)
         val intent = Intent(context, MainActivity::class.java)
-        val pending = PendingIntent.getActivity(
-            context,
-            id,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val notification = NotificationCompat.Builder(context, CHANNEL_ALERT)
-            .setSmallIcon(R.drawable.ic_stat_monitor)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-            .setAutoCancel(true)
-            .setContentIntent(pending)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-            .build()
+        val pending =
+            PendingIntent.getActivity(
+                context,
+                id,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        val notification =
+            NotificationCompat
+                .Builder(context, CHANNEL_ALERT)
+                .setSmallIcon(R.drawable.ic_stat_monitor)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+                .setContentIntent(pending)
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .build()
         val status = reminderStatus(context, CHANNEL_ALERT)
-        val posted = runCatching {
-            NotificationManagerCompat.from(context).notify(id, notification)
-            true
-        }.onFailure { error ->
-            Log.e(TAG, "普通提醒发送失败: id=$id title=$title", error)
-        }.getOrDefault(false)
+        val posted =
+            runCatching {
+                NotificationManagerCompat.from(context).notify(id, notification)
+                true
+            }.onFailure { error ->
+                Log.e(TAG, "普通提醒发送失败: id=$id title=$title", error)
+            }.getOrDefault(false)
         if (posted && shouldVibrateReminder(status)) vibrateSignal(context)
     }
 
     /** 大盘风险预警：高优先级通知，并使用应用直接震动避免厂商通道差异。 */
-    fun marketRisk(context: Context, id: Int, title: String, text: String) {
-        val store = com.example.stockmonitor.core.Store(context)
+    fun marketRisk(
+        context: Context,
+        id: Int,
+        title: String,
+        text: String,
+    ) {
+        val store =
+            com.example.stockmonitor.core
+                .Store(context)
         if (!store.alertsEnabled) return
         ensureChannels(context)
         val intent = Intent(context, MainActivity::class.java)
-        val pending = PendingIntent.getActivity(
-            context,
-            id,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val notification = NotificationCompat.Builder(context, CHANNEL_ALERT)
-            .setSmallIcon(R.drawable.ic_stat_monitor)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-            .setAutoCancel(true)
-            .setContentIntent(pending)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .build()
+        val pending =
+            PendingIntent.getActivity(
+                context,
+                id,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        val notification =
+            NotificationCompat
+                .Builder(context, CHANNEL_ALERT)
+                .setSmallIcon(R.drawable.ic_stat_monitor)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+                .setContentIntent(pending)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .build()
         val status = reminderStatus(context, CHANNEL_ALERT)
         val manager = NotificationManagerCompat.from(context)
-        val posted = runCatching {
-            manager.notify(id, notification)
-            true
-        }.onFailure { error ->
-            Log.e(TAG, "大盘提醒发送失败: id=$id title=$title", error)
-        }.getOrDefault(false)
+        val posted =
+            runCatching {
+                manager.notify(id, notification)
+                true
+            }.onFailure { error ->
+                Log.e(TAG, "大盘提醒发送失败: id=$id title=$title", error)
+            }.getOrDefault(false)
         if (posted && shouldVibrateReminder(status)) vibrateSignal(context)
     }
 
     /** 个股风险卖出：优先于买卖点开关和普通冷却，必须及时送达。 */
-    fun riskSell(context: Context, id: Int, title: String, text: String) {
-        val store = com.example.stockmonitor.core.Store(context)
+    fun riskSell(
+        context: Context,
+        id: Int,
+        title: String,
+        text: String,
+    ) {
+        val store =
+            com.example.stockmonitor.core
+                .Store(context)
         if (!store.alertsEnabled) return
         ensureChannels(context)
         val intent = Intent(context, MainActivity::class.java)
-        val pending = PendingIntent.getActivity(
-            context,
-            id,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val notification = NotificationCompat.Builder(context, CHANNEL_ALERT)
-            .setSmallIcon(R.drawable.ic_stat_monitor)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-            .setAutoCancel(true)
-            .setContentIntent(pending)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .build()
+        val pending =
+            PendingIntent.getActivity(
+                context,
+                id,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        val notification =
+            NotificationCompat
+                .Builder(context, CHANNEL_ALERT)
+                .setSmallIcon(R.drawable.ic_stat_monitor)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+                .setContentIntent(pending)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .build()
         val status = reminderStatus(context, CHANNEL_ALERT)
-        val posted = runCatching {
-            NotificationManagerCompat.from(context).notify(id, notification)
-            true
-        }.onFailure { error ->
-            Log.e(TAG, "个股风险卖出提醒发送失败: id=$id title=$title", error)
-        }.getOrDefault(false)
+        val posted =
+            runCatching {
+                NotificationManagerCompat.from(context).notify(id, notification)
+                true
+            }.onFailure { error ->
+                Log.e(TAG, "个股风险卖出提醒发送失败: id=$id title=$title", error)
+            }.getOrDefault(false)
         if (posted && shouldVibrateReminder(status)) vibrateSignal(context)
     }
 
@@ -222,34 +338,45 @@ object Notifier {
      * 与 [alert] 分开是因为开关独立（[com.example.stockmonitor.core.Store.intradaySignalEnabled]），
      * 而且它更频繁、更需要被看见。应用直接调用 Vibrator，避免厂商通知通道只显示不震动。
      */
-    fun signal(context: Context, id: Int, title: String, text: String) {
-        val store = com.example.stockmonitor.core.Store(context)
+    fun signal(
+        context: Context,
+        id: Int,
+        title: String,
+        text: String,
+    ) {
+        val store =
+            com.example.stockmonitor.core
+                .Store(context)
         if (!store.alertsEnabled || !store.intradaySignalEnabled) return
         ensureChannels(context)
         val intent = Intent(context, MainActivity::class.java)
-        val pending = PendingIntent.getActivity(
-            context,
-            id,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val notification = NotificationCompat.Builder(context, CHANNEL_SIGNAL)
-            .setSmallIcon(R.drawable.ic_stat_monitor)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-            .setAutoCancel(true)
-            .setContentIntent(pending)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .build()
+        val pending =
+            PendingIntent.getActivity(
+                context,
+                id,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        val notification =
+            NotificationCompat
+                .Builder(context, CHANNEL_SIGNAL)
+                .setSmallIcon(R.drawable.ic_stat_monitor)
+                .setContentTitle(title)
+                .setContentText(text)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
+                .setAutoCancel(true)
+                .setContentIntent(pending)
+                .setCategory(NotificationCompat.CATEGORY_ALARM)
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .build()
         val status = signalStatus(context)
-        val posted = runCatching {
-            NotificationManagerCompat.from(context).notify(id, notification)
-            true
-        }.onFailure { error ->
-            Log.e(TAG, "盘中信号发送失败: id=$id title=$title", error)
-        }.getOrDefault(false)
+        val posted =
+            runCatching {
+                NotificationManagerCompat.from(context).notify(id, notification)
+                true
+            }.onFailure { error ->
+                Log.e(TAG, "盘中信号发送失败: id=$id title=$title", error)
+            }.getOrDefault(false)
         if (posted && shouldVibrateReminder(status)) vibrateSignal(context)
     }
 
@@ -269,7 +396,8 @@ object Notifier {
             } else {
                 vibrator.vibrate(
                     effect,
-                    AudioAttributes.Builder()
+                    AudioAttributes
+                        .Builder()
                         .setUsage(AudioAttributes.USAGE_NOTIFICATION)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                         .build(),

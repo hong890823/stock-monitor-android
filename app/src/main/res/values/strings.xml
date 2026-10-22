@@ -13,6 +13,8 @@
     <string name="channel_alert_desc">持仓股跌幅预警、持仓信号变化与大盘提醒</string>
     <string name="channel_signal_name">买卖点提醒</string>
     <string name="channel_signal_desc">持仓信号或选股观察池买点已确认时发送通知</string>
+    <string name="channel_analysis_name">分析报告</string>
+    <string name="channel_analysis_desc">工具页分析任务的进度与完成提醒</string>
 
     <string name="disclaimer">本应用只做行情与技术面计算，不提供自动下单；所有信号均为条件式参考，不构成投资建议。</string>
 

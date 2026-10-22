@@ -18,7 +18,6 @@ import com.google.android.material.appbar.MaterialToolbar
 
 /** 长报告查看页：等宽字体、可复制、可分享。 */
 class ReportActivity : AppCompatActivity() {
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_report)
@@ -38,11 +37,12 @@ class ReportActivity : AppCompatActivity() {
             Toast.makeText(this, R.string.copied, Toast.LENGTH_SHORT).show()
         }
         findViewById<android.view.View>(R.id.action_share).setOnClickListener {
-            val share = Intent(Intent.ACTION_SEND).apply {
-                type = "text/plain"
-                putExtra(Intent.EXTRA_SUBJECT, title)
-                putExtra(Intent.EXTRA_TEXT, plain)
-            }
+            val share =
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, title)
+                    putExtra(Intent.EXTRA_TEXT, plain)
+                }
             startActivity(Intent.createChooser(share, title))
         }
     }
@@ -70,12 +70,24 @@ class ReportActivity : AppCompatActivity() {
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_TEXT = "text"
 
-        fun open(context: Context, title: String, text: String) {
-            context.startActivity(
-                Intent(context, ReportActivity::class.java)
-                    .putExtra(EXTRA_TITLE, title)
-                    .putExtra(EXTRA_TEXT, text)
-            )
+        fun createIntent(
+            context: Context,
+            title: String,
+            text: String,
+        ): Intent =
+            Intent(context, ReportActivity::class.java)
+                .putExtra(EXTRA_TITLE, title)
+                .putExtra(EXTRA_TEXT, text)
+
+        fun open(
+            context: Context,
+            title: String,
+            text: String,
+        ) {
+            val intent = createIntent(context, title, text)
+            // Service 等非 Activity context 启动必须带 NEW_TASK，Activity 调用行为不变。
+            if (context !is android.app.Activity) intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            context.startActivity(intent)
         }
     }
 }

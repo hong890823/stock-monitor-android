@@ -2,8 +2,11 @@ package com.example.stockmonitor.monitor
 
 import android.os.Handler
 import android.os.Looper
+import com.example.stockmonitor.analysis.AiCard
+import com.example.stockmonitor.analysis.FundamentalCard
 import com.example.stockmonitor.analysis.FundamentalHealth
 import com.example.stockmonitor.analysis.FundamentalHealthSnapshot
+import com.example.stockmonitor.analysis.GlobalCard
 import com.example.stockmonitor.analysis.MarketRiskContext
 import com.example.stockmonitor.analysis.MarketState
 import com.example.stockmonitor.analysis.PaperTradeRecord
@@ -12,6 +15,7 @@ import com.example.stockmonitor.analysis.PriceContext
 import com.example.stockmonitor.analysis.SectorContext
 import com.example.stockmonitor.analysis.StrongContinuationEvent
 import com.example.stockmonitor.analysis.SwingPlan
+import com.example.stockmonitor.analysis.TechnicalCard
 import com.example.stockmonitor.analysis.TurnoverTracker
 import com.example.stockmonitor.core.BoardMember
 import com.example.stockmonitor.core.ConceptBoards
@@ -40,6 +44,7 @@ object Repo {
      */
     @Volatile
     var quotes: Map<String, Quote> = emptyMap()
+
     @Volatile
     var sectorsUpdatedAtMs: Long = 0L
         private set
@@ -282,6 +287,25 @@ object Repo {
     var dailyReviewText: String? = null
     var dailyReviewTask: BackgroundTaskState = BackgroundTaskState.idle("持仓复盘")
     var summaryTask: BackgroundTaskState = BackgroundTaskState.idle("盘面总结")
+
+    // ── 工具页分析任务（AnalysisService 写、ToolsFragment 读）。与后台监控开关无关，
+    // 所以不进 reset()：停止监控不应清掉用户主动发起的分析任务与结果。──
+    var technicalTask: BackgroundTaskState = BackgroundTaskState.idle("个股技术分析")
+    var fundamentalTask: BackgroundTaskState = BackgroundTaskState.idle("个股基本面分析")
+    var globalTask: BackgroundTaskState = BackgroundTaskState.idle("港美股基本面分析")
+    var aiTask: BackgroundTaskState = BackgroundTaskState.idle("AI 综合分析")
+
+    @Volatile
+    var toolTechnicalCard: TechnicalCard? = null
+
+    @Volatile
+    var toolFundamentalCard: FundamentalCard? = null
+
+    @Volatile
+    var toolGlobalCard: GlobalCard? = null
+
+    @Volatile
+    var toolAiCard: AiCard? = null
 
     /** 今日两市累计成交额（元），每轮行情刷新更新。 */
     var turnoverToday: Double = 0.0

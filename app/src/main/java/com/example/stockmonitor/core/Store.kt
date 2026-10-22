@@ -2,15 +2,17 @@ package com.example.stockmonitor.core
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.example.stockmonitor.analysis.PaperTradeRecord
 import org.json.JSONArray
 import org.json.JSONObject
-import com.example.stockmonitor.analysis.PaperTradeRecord
 
 /**
  * 本地持久化。自选股和持仓使用与 macOS 版 watchlist.json / portfolio.json 相同的字段名，
  * 方便两边互相导入导出。
  */
-class Store(context: Context) {
+class Store(
+    context: Context,
+) {
     private val prefs: SharedPreferences =
         context.applicationContext.getSharedPreferences("stock_monitor", Context.MODE_PRIVATE)
 
@@ -21,12 +23,15 @@ class Store(context: Context) {
     var portfolio: Portfolio
         get() = parsePortfolio(prefs.getString(KEY_PORTFOLIO, null))
         set(value) {
-            val sanitized = value.copy(
-                availableCapital = value.availableCapital
-                    .takeIf { it.isFinite() && it >= 0 } ?: 0.0,
-                availableCapitalOverride = value.availableCapitalOverride
-                    ?.takeIf { it.isFinite() && it >= 0 },
-            )
+            val sanitized =
+                value.copy(
+                    availableCapital =
+                        value.availableCapital
+                            .takeIf { it.isFinite() && it >= 0 } ?: 0.0,
+                    availableCapitalOverride =
+                        value.availableCapitalOverride
+                            ?.takeIf { it.isFinite() && it >= 0 },
+                )
             prefs.edit().putString(KEY_PORTFOLIO, toPortfolioJson(sanitized).toString()).apply()
         }
 
@@ -36,14 +41,16 @@ class Store(context: Context) {
      * 这样次日才能按同一钟表时刻取「昨日同期」；只保留最近几个交易日。
      */
     var turnoverSamples: JSONObject
-        get() = runCatching { JSONObject(prefs.getString(KEY_TURNOVER_SAMPLES, "{}") ?: "{}") }
-            .getOrDefault(JSONObject())
+        get() =
+            runCatching { JSONObject(prefs.getString(KEY_TURNOVER_SAMPLES, "{}") ?: "{}") }
+                .getOrDefault(JSONObject())
         set(value) = prefs.edit().putString(KEY_TURNOVER_SAMPLES, value.toString()).apply()
 
     /** 指标选股夜间调度状态。 */
     var indicatorState: JSONObject
-        get() = runCatching { JSONObject(prefs.getString(KEY_INDICATOR_STATE, "{}") ?: "{}") }
-            .getOrDefault(JSONObject())
+        get() =
+            runCatching { JSONObject(prefs.getString(KEY_INDICATOR_STATE, "{}") ?: "{}") }
+                .getOrDefault(JSONObject())
         set(value) = prefs.edit().putString(KEY_INDICATOR_STATE, value.toString()).apply()
 
     var portfolioSlot: String?
@@ -93,21 +100,25 @@ class Store(context: Context) {
      * 自动排名只是候选，最终以你在「板块龙头」里的勾选为准。
      */
     var sectorLeaderOverrides: Map<String, LeaderOverrides>
-        get() = runCatching {
-            LeaderOverrides.decodeAll(JSONObject(prefs.getString(KEY_SECTOR_LEADER_OVERRIDES, "{}") ?: "{}"))
-        }.getOrDefault(emptyMap())
-        set(value) = prefs.edit()
-            .putString(KEY_SECTOR_LEADER_OVERRIDES, LeaderOverrides.encodeAll(value).toString())
-            .apply()
+        get() =
+            runCatching {
+                LeaderOverrides.decodeAll(JSONObject(prefs.getString(KEY_SECTOR_LEADER_OVERRIDES, "{}") ?: "{}"))
+            }.getOrDefault(emptyMap())
+        set(value) =
+            prefs
+                .edit()
+                .putString(KEY_SECTOR_LEADER_OVERRIDES, LeaderOverrides.encodeAll(value).toString())
+                .apply()
 
     /**
      * 板块归类的人工修正（[BoardGroupBook] 编解码）：归类内个股增删、持仓挂靠、自定义归类。
      * 只存动过的部分，没动过的自动归类跟着东财刷新走。
      */
     var boardGroups: BoardGroupBook
-        get() = runCatching {
-            BoardGroupBook.decode(prefs.getString(KEY_BOARD_GROUPS, "{}") ?: "{}")
-        }.getOrDefault(BoardGroupBook())
+        get() =
+            runCatching {
+                BoardGroupBook.decode(prefs.getString(KEY_BOARD_GROUPS, "{}") ?: "{}")
+            }.getOrDefault(BoardGroupBook())
         set(value) = prefs.edit().putString(KEY_BOARD_GROUPS, BoardGroupBook.encode(value).toString()).apply()
 
     /**
@@ -170,14 +181,29 @@ class Store(context: Context) {
      * 两者每天只变一次，落盘后重启不用重拉日线。
      */
     var volumeBaseline: JSONObject
-        get() = runCatching { JSONObject(prefs.getString(KEY_VOLUME_BASELINE, "{}") ?: "{}") }
-            .getOrDefault(JSONObject())
+        get() =
+            runCatching { JSONObject(prefs.getString(KEY_VOLUME_BASELINE, "{}") ?: "{}") }
+                .getOrDefault(JSONObject())
         set(value) = prefs.edit().putString(KEY_VOLUME_BASELINE, value.toString()).apply()
 
     /** 技术面、基本面和港美股报告缓存，供 AI 综合分析跨页面复用。 */
     var analysisReports: String
         get() = prefs.getString(KEY_ANALYSIS_REPORTS, "{}") ?: "{}"
         set(value) = prefs.edit().putString(KEY_ANALYSIS_REPORTS, value).apply()
+
+    /** 最近一次 AI 综合分析报告正文（落盘，重启后仍可查看）。 */
+    var lastAiReportText: String?
+        get() = prefs.getString(KEY_AI_REPORT_TEXT, null)
+        set(value) = prefs.edit().putString(KEY_AI_REPORT_TEXT, value).apply()
+
+    var lastAiReportTitle: String?
+        get() = prefs.getString(KEY_AI_REPORT_TITLE, null)
+        set(value) = prefs.edit().putString(KEY_AI_REPORT_TITLE, value).apply()
+
+    /** 最近一次 AI 综合分析成功生成的实际时间。 */
+    var lastAiReportAt: String?
+        get() = prefs.getString(KEY_AI_REPORT_AT, null)
+        set(value) = prefs.edit().putString(KEY_AI_REPORT_AT, value).apply()
 
     /** 交易流水与未平批次的完整账本；旧版本为空时由当前持仓生成 legacy 批次。 */
     var tradeBook: TradeBook
@@ -249,7 +275,7 @@ class Store(context: Context) {
                         code = code,
                         name = item.optString("name", code),
                         showInBar = item.optBoolean("show_in_bar", false),
-                    )
+                    ),
                 )
             }
         }
@@ -263,7 +289,7 @@ class Store(context: Context) {
                 JSONObject()
                     .put("code", item.code)
                     .put("name", item.name)
-                    .put("show_in_bar", item.showInBar)
+                    .put("show_in_bar", item.showInBar),
             )
         }
         return array
@@ -278,8 +304,9 @@ class Store(context: Context) {
         return ConceptBoards(
             top = top,
             bottom = bottom,
-            source = runCatching { ConceptSource.valueOf(json.optString("source")) }
-                .getOrDefault(ConceptSource.EASTMONEY),
+            source =
+                runCatching { ConceptSource.valueOf(json.optString("source")) }
+                    .getOrDefault(ConceptSource.EASTMONEY),
             stamp = json.optString("stamp"),
         )
     }
@@ -299,17 +326,18 @@ class Store(context: Context) {
                     volume = item.optDouble("volume", 0.0),
                     lead = item.optString("lead"),
                     leadPct = item.optString("lead_pct"),
-                )
+                ),
             )
         }
         return items
     }
 
-    private fun toConceptBoardsJson(boards: ConceptBoards): JSONObject = JSONObject()
-        .put("source", boards.source.name)
-        .put("stamp", boards.stamp)
-        .put("top", toConceptItemsJson(boards.top))
-        .put("bottom", toConceptItemsJson(boards.bottom))
+    private fun toConceptBoardsJson(boards: ConceptBoards): JSONObject =
+        JSONObject()
+            .put("source", boards.source.name)
+            .put("stamp", boards.stamp)
+            .put("top", toConceptItemsJson(boards.top))
+            .put("bottom", toConceptItemsJson(boards.bottom))
 
     private fun toConceptItemsJson(items: List<ConceptItem>): JSONArray {
         val array = JSONArray()
@@ -321,7 +349,7 @@ class Store(context: Context) {
                     .put("change", item.change)
                     .put("volume", item.volume)
                     .put("lead", item.lead)
-                    .put("lead_pct", item.leadPct)
+                    .put("lead_pct", item.leadPct),
             )
         }
         return array
@@ -344,7 +372,7 @@ class Store(context: Context) {
                         name = item.optString("name", code),
                         quantity = item.optDouble("quantity", 0.0),
                         cost = item.optDouble("cost", 0.0),
-                    )
+                    ),
                 )
             }
             Portfolio(
@@ -353,9 +381,12 @@ class Store(context: Context) {
                 initialEntryPct = json.optDouble("initial_entry_pct", 5.0),
                 maxPositionPct = json.optDouble("max_position_pct", 20.0),
                 positions = positions,
-                availableCapitalOverride = if (json.has("available_capital_override"))
-                    json.optDouble("available_capital_override").takeIf { it.isFinite() && it >= 0 }
-                else null,
+                availableCapitalOverride =
+                    if (json.has("available_capital_override")) {
+                        json.optDouble("available_capital_override").takeIf { it.isFinite() && it >= 0 }
+                    } else {
+                        null
+                    },
             )
         }.getOrDefault(fallback)
     }
@@ -368,7 +399,7 @@ class Store(context: Context) {
                     .put("code", position.code)
                     .put("name", position.name)
                     .put("quantity", position.quantity)
-                    .put("cost", position.cost)
+                    .put("cost", position.cost),
             )
         }
         return JSONObject()
@@ -376,19 +407,19 @@ class Store(context: Context) {
             .put("available_capital", portfolio.availableCapital)
             .apply {
                 portfolio.availableCapitalOverride?.let { put("available_capital_override", it) }
-            }
-            .put("initial_entry_pct", portfolio.initialEntryPct)
+            }.put("initial_entry_pct", portfolio.initialEntryPct)
             .put("max_position_pct", portfolio.maxPositionPct)
             .put("positions", positions)
     }
 
-    private fun defaultWatchlist(): MutableList<WatchItem> = mutableListOf(
-        WatchItem("sh000001", "上证", true),
-        WatchItem("sz399006", "创业", false),
-        WatchItem("sh000688", "科创", false),
-        WatchItem("sh600522", "中天", true),
-        WatchItem("sh600884", "杉杉", true),
-    )
+    private fun defaultWatchlist(): MutableList<WatchItem> =
+        mutableListOf(
+            WatchItem("sh000001", "上证", true),
+            WatchItem("sz399006", "创业", false),
+            WatchItem("sh000688", "科创", false),
+            WatchItem("sh600522", "中天", true),
+            WatchItem("sh600884", "杉杉", true),
+        )
 
     companion object {
         private const val KEY_WATCHLIST = "watchlist"
@@ -425,6 +456,9 @@ class Store(context: Context) {
         private const val KEY_CONCEPT_BOARDS = "concept_boards"
         private const val KEY_VOLUME_BASELINE = "volume_baseline"
         private const val KEY_ANALYSIS_REPORTS = "analysis_reports"
+        private const val KEY_AI_REPORT_TEXT = "ai_report_text"
+        private const val KEY_AI_REPORT_TITLE = "ai_report_title"
+        private const val KEY_AI_REPORT_AT = "ai_report_at"
         private const val KEY_TRADE_BOOK = "trade_book"
     }
 }
