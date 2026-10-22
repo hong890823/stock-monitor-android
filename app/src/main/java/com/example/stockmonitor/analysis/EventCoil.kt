@@ -53,7 +53,7 @@ object EventCoil {
         val event = announcements
             .asSequence()
             .filter { it.date.isNotBlank() && it.date <= today }
-            .mapNotNull { announcement -> positiveEventKind(announcement.title)?.let { announcement to it } }
+            .mapNotNull { announcement -> positiveEventKind(announcement.title, announcement.content)?.let { announcement to it } }
             .filter { (announcement, _) -> sorted.any { it.date >= announcement.date } }
             .maxByOrNull { it.first.date } ?: return null
         val (announcement, _) = event
@@ -73,7 +73,7 @@ object EventCoil {
         if (middles.any { it.volume > avgVolume * COIL_VOLUME_RATIO || it.close < holdLine }) return null
         val latest = sorted.last()
         if (latest.close < holdLine) return null
-        val kind = positiveEventKind(announcement.title) ?: return null
+        val kind = positiveEventKind(announcement.title, announcement.content) ?: return null
         return Signal(
             eventDate = eventBar.date,
             eventTitle = announcement.title,
@@ -86,30 +86,79 @@ object EventCoil {
     }
 
     /**
-     * 公告标题里的利好落地类型；不是利好返回 null。
-     * 利空词一票否决——「业绩预增」的标题里混着「减持」也别当利好看。
+     * 公告标题里的**真利好**类型；不是利好返回 null。
+     *
+     * 只收股价级别的硬催化：重组并购落地获批、业绩爆发、中标/重大合同、大股东/实控人增持、
+     * **占比够大的**回购注销。分红/送转/股权激励、象征性回购与泛泛的增持计划这些**不收**——
+     * 不算真利好。「实施完成」也不单用，必须带重组/收购语境，否则「回购实施完成」
+     * 「权益分派实施完成」都会被误判成重组落地。利空词一票否决——
+     * 「业绩预增」的标题里混着「减持」也别当利好看。
+     *
+     * 回购注销看**占股本/市值的比例**（[BUYBACK_CANCEL_MIN_PCT]）不看绝对金额——
+     * 同样 5000 万，对 50 亿和 5000 亿的公司是两回事。占比一般在正文里披露，
+     * [content] 解析不出占比时宁缺勿滥、不算利好。
      */
-    fun positiveEventKind(title: String): String? {
+    fun positiveEventKind(title: String, content: String? = null): String? {
         if (NEGATIVE_MARKERS.any { title.contains(it) }) return null
+        val majorHolder = title.contains("控股股东") || title.contains("大股东") || title.contains("实际控制人")
         return when {
             title.contains("过户完成") || title.contains("交割完成") ||
-                title.contains("实施完成") || title.contains("注册批复") ||
-                title.contains("同意注册") -> "重组落地"
-            title.contains("业绩预增") || title.contains("大幅增长") || title.contains("扭亏为盈") -> "业绩预增"
+                title.contains("注册批复") || title.contains("同意注册") ||
+                ((title.contains("重组") || title.contains("收购") || title.contains("购买资产")) &&
+                    title.contains("实施完成")) -> "重组落地"
+            title.contains("业绩预增") || title.contains("大幅增长") ||
+                title.contains("扭亏为盈") || title.contains("业绩预盈") -> "业绩预增"
             title.contains("中标") -> "中标"
-            title.contains("增持") -> "股东增持"
-            title.contains("回购") -> "回购"
+            title.contains("重大合同") -> "重大合同"
+            // 大股东/实控人真金白银表态；董监高/员工的小额「增持计划」不算硬催化。
+            majorHolder && title.contains("增持") -> "大股东增持"
+            // 高占比回购注销：永久缩股本，算真利好；占比太小的注销摊到股价上没水花，不算。
+            isBuybackCancellation(title) -> {
+                val pct = ratioPct(title, content)
+                if (pct != null && pct >= BUYBACK_CANCEL_MIN_PCT) "回购注销" else null
+            }
             else -> null
         }
     }
 
-    private val NEGATIVE_MARKERS = listOf(
-        "减持", "处罚", "立案", "诉讼", "仲裁", "终止", "失败", "问询", "警示",
-        "退市", "冻结", "质押", "违规", "亏损", "下滑",
+    /** 回购注销的占比下限（占总股本/总市值的百分点）：低于这个数摊到股价上没水花。 */
+    const val BUYBACK_CANCEL_MIN_PCT = 0.5
+
+    /**
+     * 「回购注销」候选：标题里既有回购又有注销。股权激励的限制性股票注销是例行公事，
+     * 不是真利好，先排掉。
+     */
+    private fun isBuybackCancellation(title: String): Boolean {
+        val incentive = title.contains("股权激励") || title.contains("限制性股票") || title.contains("激励计划")
+        return !incentive && title.contains("回购") && title.contains("注销")
+    }
+
+    /** 回购注销的占比只在正文里，这类公告要单独拉详情（FundamentalsClient 的选择性拉取用）。 */
+    fun wantsBuybackContent(title: String): Boolean = isBuybackCancellation(title)
+
+    /** 「占总股本/市值……X%」的披露口径；只认股本与市值做分母，净资产/总资产的比例不是这个口径。 */
+    private val RATIO = Regex(
+        "占[^。；%]{0,24}(?:总股本|流通股本|股本|股份总数|总市值|流通市值|市值)[^。；%]{0,12}?([0-9]+(?:\\.[0-9]+)?)\\s*%"
     )
 
-    /** 公告全名常带「公司:」前缀和「的公告」后缀；关键短语在结尾（「…过户完成」），截断保尾。 */
-    private fun trimTitle(title: String): String {
+    /**
+     * 公告里披露的占股本/市值比例（百分点），取最大；解析不出返回 null。
+     *
+     * 回购注销公告按惯例披露「占公司总股本的 X%」；按市价折算它与「占市值」同量级，
+     * 两者共用一个门槛。占比不明就当没有——宁缺勿滥。
+     */
+    fun ratioPct(title: String, content: String? = null): Double? =
+        RATIO.findAll("$title ${content.orEmpty()}")
+            .mapNotNull { it.groupValues[1].toDoubleOrNull() }
+            .maxOrNull()
+
+    private val NEGATIVE_MARKERS = listOf(
+        "减持", "处罚", "立案", "诉讼", "仲裁", "终止", "失败", "问询", "警示",
+        "退市", "冻结", "质押", "违规", "亏损", "下滑", "未中标",
+    )
+
+    /** 公告全名常带「公司:」前缀和「的公告」后缀；关键短语在结尾（「…过户完成」），截断保尾。持仓复盘的利好清单也用这份口径。 */
+    fun trimTitle(title: String): String {
         val body = title.substringAfter(":").substringAfter("：").trim()
         val trimmed = body.removePrefix("关于").removeSuffix("的公告").removeSuffix("公告")
         return if (trimmed.length > 24) "…" + trimmed.takeLast(24) else trimmed

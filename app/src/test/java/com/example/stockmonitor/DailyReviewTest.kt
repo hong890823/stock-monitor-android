@@ -1,5 +1,6 @@
 package com.example.stockmonitor
 
+import com.example.stockmonitor.analysis.Announcement
 import com.example.stockmonitor.analysis.DayPnl
 import com.example.stockmonitor.analysis.DailyReview
 import com.example.stockmonitor.analysis.BoardTag
@@ -140,6 +141,7 @@ class DailyReviewTest {
         market: MarketState? = null,
         sectorContexts: Map<String, SectorContext> = emptyMap(),
         strongContinuationEvents: List<StrongContinuationEvent> = emptyList(),
+        recentAnnouncements: Map<String, List<Announcement>> = emptyMap(),
     ): String = DailyReview.generate(
         DailyReview.Inputs(
             positions = positions,
@@ -151,6 +153,7 @@ class DailyReviewTest {
             market = market,
             sectorContexts = sectorContexts,
             strongContinuationEvents = strongContinuationEvents,
+            recentAnnouncements = recentAnnouncements,
         ),
     )
 
@@ -174,9 +177,144 @@ class DailyReviewTest {
             strongContinuationEvents = listOf(event),
         )
 
-        assertEquals(listOf("一", "二", "三"), Regex("(?m)^([一二三四五六七八九十]+)、")
+        // 利好一节固定占「三」，强势暂缓做T记录顺延为「四」——章节号不随条件跳号。
+        assertEquals(listOf("一", "二", "三", "四"), Regex("(?m)^([一二三四五六七八九十]+)、")
             .findAll(text).map { it.groupValues[1] }.toList())
         assertTrue(text.contains("较触发 +2.27%"))
+    }
+
+    // ── 三、近两日个股重大利好 ────────────────────────────────────────────────
+
+    @Test
+    fun recentPositiveSectionOnlyListsLastTwoDays() {
+        val text = report(
+            positions = listOf(Position("sh600000", "甲", 1_000.0, 8.5)),
+            quotes = mapOf("sh600000" to quote("sh600000", 8.8, 8.6, "甲")),
+            results = listOf(result()),
+            recentAnnouncements = mapOf(
+                "sh600000" to listOf(
+                    Announcement("2026-10-12", "甲:2026年前三季度业绩预增公告"),
+                    Announcement("2026-10-11", "甲:关于发行股份购买资产标的资产过户完成的公告"),
+                    // 再往前的利好可能已兑现进股价，不进复盘（无交易日表时窗口 = 10-11 起）。
+                    Announcement("2026-10-10", "甲:重大项目中标公告"),
+                    Announcement("2026-09-20", "甲:关于签订重大合同的公告"),
+                ),
+            ),
+        )
+        val body = sectionBody(text, "三、")
+
+        assertTrue(body.contains("2026-10-11 以来"))
+        assertTrue(body.contains("业绩预增"))
+        assertTrue(body.contains("重组落地"))
+        assertTrue(body.contains("过户完成"))
+        assertFalse(body.contains("中标"))
+        assertFalse(body.contains("重大合同"))
+    }
+
+    @Test
+    fun recentPositiveSectionRejectsTitlesMixedWithBadNews() {
+        val text = report(
+            positions = listOf(Position("sh600000", "甲", 1_000.0, 8.5)),
+            quotes = mapOf("sh600000" to quote("sh600000", 8.8, 8.6, "甲")),
+            results = listOf(result()),
+            recentAnnouncements = mapOf(
+                // 利空词一票否决：混着减持的「利好」不算利好（与 EventCoil 同一口径）。
+                "sh600000" to listOf(Announcement("2026-10-12", "甲:业绩预增及股东减持计划的公告")),
+            ),
+        )
+        val body = sectionBody(text, "三、")
+
+        assertTrue(body.contains("近两日没有命中重大利好的公告"))
+        assertTrue(body.contains("结论：近两日无重大利好"))
+    }
+
+    @Test
+    fun recentPositiveSectionSaysMissingAnnouncementDataInsteadOfNone() {
+        val text = report(
+            positions = listOf(Position("sh600000", "甲", 1_000.0, 8.5)),
+            quotes = mapOf("sh600000" to quote("sh600000", 8.8, 8.6, "甲")),
+            results = listOf(result()),
+        )
+        val body = sectionBody(text, "三、")
+
+        // 没拉到公告 ≠ 没有利好：空清单不落库（Repo.publishAnnouncements），没数据就写暂缺。
+        assertTrue(body.contains("公告数据暂缺"))
+        assertTrue(body.contains("不等于没有利好"))
+        assertFalse(body.contains("近两日没有命中"))
+    }
+
+    @Test
+    fun recentPositivesKeepHoldingsOnlyAndDropOlderThanTwoDays() {
+        val positives = DailyReview.recentPositives(
+            positions = listOf(
+                Position("sh600000", "甲", 1_000.0, 8.5),
+                Position("sh600001", "观察乙", 0.0, 0.0),
+            ),
+            announcements = mapOf(
+                "sh600000" to listOf(Announcement("2026-10-11", "甲:过户完成的公告")),
+                "sh600001" to listOf(Announcement("2026-10-12", "观察乙:中标公告")),
+            ),
+            today = "2026-10-12",
+        )
+
+        // 观察股（数量 0）不进持仓复盘的利好清单；窗口只留今天与昨天。
+        assertEquals(listOf("甲"), positives.map { it.name })
+        assertEquals("重组落地", positives.single().kind)
+        assertEquals("2026-10-11", positives.single().date)
+    }
+
+    @Test
+    fun recentPositivesGoBackToPreviousTradingDayAcrossWeekend() {
+        val positives = DailyReview.recentPositives(
+            positions = listOf(Position("sh600000", "甲", 1_000.0, 8.5)),
+            announcements = mapOf(
+                "sh600000" to listOf(
+                    // 周五盘后挂出的利好，周一复盘时只经历了一个交易日，仍要收进来。
+                    Announcement("2026-10-09", "甲:重大项目中标公告"),
+                    Announcement("2026-10-08", "甲:2026年前三季度业绩预增公告"),
+                ),
+            ),
+            today = "2026-10-12",
+            tradingDates = listOf("2026-10-08", "2026-10-09", "2026-10-12"),
+        )
+
+        // 窗口回溯到上一交易日（周五 10-09）；周四的公告已隔两个交易日，不收。
+        assertEquals(listOf("2026-10-09"), positives.map { it.date })
+    }
+
+    @Test
+    fun recentPositiveSectionTakesOnlyRealCatalysts() {
+        val text = report(
+            positions = listOf(Position("sh600000", "甲", 1_000.0, 8.5)),
+            quotes = mapOf("sh600000" to quote("sh600000", 8.8, 8.6, "甲")),
+            results = listOf(result()),
+            recentAnnouncements = mapOf(
+                "sh600000" to listOf(
+                    Announcement("2026-10-12", "甲:2025年年度权益分派实施完成的公告"),
+                    Announcement("2026-10-12", "甲:关于回购股份实施完成的公告"),
+                    Announcement("2026-10-12", "甲:关于部分董事增持公司股份计划的公告"),
+                    Announcement("2026-10-12", "甲:关于控股股东增持公司股份计划的公告"),
+                    Announcement(
+                        "2026-10-12",
+                        "甲:关于回购股份注销完成的公告",
+                        content = "本次注销回购股份800万股，占总股本1%，累计支付总金额人民币2.5亿元。",
+                    ),
+                    Announcement("2026-10-11", "甲:2026年前三季度业绩预增公告"),
+                ),
+            ),
+        )
+        val body = sectionBody(text, "三、")
+
+        // 真利好只收：业绩爆发、大股东增持、大额回购注销（以及重组落地/中标/重大合同）。
+        assertTrue(body.contains("业绩预增"))
+        assertTrue(body.contains("大股东增持"))
+        assertTrue(body.contains("回购注销"))
+        // 分红与「回购实施完成」不算；「实施完成」也不能被误判成重组落地。
+        assertFalse(body.contains("权益分派"))
+        assertFalse(body.contains("实施完成"))
+        assertFalse(body.contains("重组落地"))
+        // 董监高小额增持计划不算硬催化。
+        assertFalse(body.contains("董事增持"))
     }
 
     private fun market(regime: MarketRegime) = MarketState(
@@ -202,14 +340,14 @@ class DailyReviewTest {
     // ── 结构 ────────────────────────────────────────────────────────────────
 
     @Test
-    fun reportHasTwoEvidenceSectionsAndOneSharedAdviceAtTop() {
+    fun reportHasEvidenceSectionsAndOneSharedAdviceAtTop() {
         val text = report(
             positions = listOf(Position("sh600000", "甲", 1_000.0, 8.5)),
             quotes = mapOf("sh600000" to quote("sh600000", 8.8, 8.6, "甲")),
             results = listOf(result()),
         )
 
-        ReportSectionAssertions.assertEverySectionHasConclusion(text, leastSections = 2)
+        ReportSectionAssertions.assertEverySectionHasConclusion(text, leastSections = 3)
         assertFalse(text.contains("个股技术面"))
         assertFalse(text.contains("操作优先级"))
         assertTrue(text.indexOf("持仓整体操作建议") in 0 until text.indexOf("一、"))
@@ -228,7 +366,7 @@ class DailyReviewTest {
 
         val titles = ReportSectionAssertions.sections(text).keys
         // 标题前面放 emoji（如「📊 一、」）会让正则切不出章节，这里锁住写法。
-        assertEquals(2, titles.size)
+        assertEquals(3, titles.size)
         titles.forEach { title ->
             assertTrue("章节标题必须以中文数字开头：$title", Regex("^[一二三四五六七八九十]+、").containsMatchIn(title))
         }

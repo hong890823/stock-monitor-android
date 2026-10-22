@@ -2,6 +2,7 @@ package com.example.stockmonitor.core
 
 import com.example.stockmonitor.analysis.BalanceSheetSnapshot
 import com.example.stockmonitor.analysis.Announcement
+import com.example.stockmonitor.analysis.EventCoil
 import com.example.stockmonitor.analysis.FinancialPeriod
 import com.example.stockmonitor.analysis.Governance
 import com.example.stockmonitor.analysis.MainBusinessItem
@@ -230,7 +231,9 @@ class FundamentalsClient {
         val referenceDate = unique.maxOfOrNull { it.date }.orEmpty()
         val detailKeys = Governance.scan(unique, referenceDate)
             .map { it.date to it.title }
-            .toSet()
+            .toSet() +
+            // 回购注销的占股本比例只在正文里（利好判定看占比不看绝对金额），也选择性拉详情。
+            unique.filter { EventCoil.wantsBuybackContent(it.title) }.map { it.date to it.title }
         return unique.map { item ->
             if ((item.date to item.title) in detailKeys) {
                 item.copy(content = fetchAnnouncementContent(item))

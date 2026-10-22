@@ -2890,6 +2890,10 @@ class MonitorService : Service() {
                         market = market,
                         sectorContexts = Repo.sectorContexts,
                         strongContinuationEvents = Repo.strongContinuationEvents.filter { it.date == today },
+                        // 近两日重大利好一节的原料；analyzePosition 已顺带刷新（maybeRefreshAnnouncements）。
+                        recentAnnouncements = Repo.recentAnnouncements,
+                        // 利好窗口要回溯到上一交易日（周一复盘才收得进周五盘后与周末的公告）。
+                        tradingDates = benchmark.orEmpty().map { it.date },
                     ),
                 )
             Repo.dailyReviewText = text
