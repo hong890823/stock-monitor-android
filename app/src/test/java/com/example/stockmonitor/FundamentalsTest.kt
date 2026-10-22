@@ -4,7 +4,9 @@ import com.example.stockmonitor.analysis.Announcement
 import com.example.stockmonitor.analysis.BalanceSheetSnapshot
 import com.example.stockmonitor.analysis.FinancialPeriod
 import com.example.stockmonitor.analysis.Fundamentals
+import com.example.stockmonitor.analysis.FundamentalHealthPolicy
 import com.example.stockmonitor.analysis.FundamentalsReport
+import com.example.stockmonitor.analysis.HealthLevel
 import com.example.stockmonitor.analysis.Governance
 import com.example.stockmonitor.analysis.MainBusinessItem
 import com.example.stockmonitor.analysis.RiskLevel
@@ -81,6 +83,7 @@ class FundamentalsTest {
         today: String = "2026-09-24",
         price: Double = 20.0,
         shares: Double = 100.0,
+        orgType: String? = null,
     ) = Fundamentals.Input(
         periods = periods,
         balance = balance,
@@ -91,6 +94,7 @@ class FundamentalsTest {
         mainBusiness = mainBusiness,
         announcements = announcements,
         today = today,
+        orgType = orgType,
     )
 
     // ── 单季差分 ─────────────────────────────────────────────────────────────
@@ -235,6 +239,37 @@ class FundamentalsTest {
         )
 
         assertTrue(result.risks.any { it.level == RiskLevel.ALERT && it.text.contains("存贷双高") })
+    }
+
+    @Test
+    fun financialOrgSkipsIndustrialCashDebtChecks() {
+        // 券商/银行的「货币资金高 + 发债多」是行业常态，不是存贷双高；金融企业整块跳过工业口径检查。
+        val result = Fundamentals.analyze(
+            input(
+                listOf(p("2026-06-30", 100.0)),
+                balance = sheet(monetaryFunds = 300.0, shortLoan = 250.0),
+                orgType = "证券",
+            )
+        )
+
+        assertFalse(result.risks.any { it.text.contains("存贷双高") })
+        assertNull(result.ocfToProfit)
+        assertNull(result.cashToRevenue)
+        assertNull(result.netCashRatio)
+    }
+
+    @Test
+    fun brokerageStyleMissingCashflowIsNotGradedRed() {
+        // 券商股只有利润表（现金流量表/资产负债表在 F10 上为空）：缺表把评分压到 55 以下，
+        // 也不能判亮红灯——低分是「缺表压分」，不是恶化证据（扣非/变脸/公告这类实锤仍会红）。
+        val single = p("2026-06-30", 100.0, net = 10.0, deduct = 7.2)
+            .copy(operatingCashFlow = null, salesCash = null, capex = null)
+        val result = Fundamentals.analyze(input(listOf(single), balance = null, orgType = "证券"))
+
+        assertTrue(result.score < 55)
+        val health = FundamentalHealthPolicy.grade(result)
+        assertEquals(HealthLevel.NEUTRAL, health.level)
+        assertTrue(health.reasons.any { it.contains("口径不全") })
     }
 
     @Test

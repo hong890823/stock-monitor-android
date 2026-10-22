@@ -5,13 +5,16 @@ import java.util.Locale
 
 enum class HoldingExitStage(val label: String) {
     WATCH("破位待确认"), REDUCE("确认破位·分批减仓"), HIGH_REDUCE("高位转弱·优先减仓"),
-    EXIT("退出优先"), DEEP_T("深套风险观察")
+    EXIT("退出优先"), DEEP_T("深套风险观察"), NOTICE("破位风险提示")
 }
 
 data class HoldingExitDecision(val stage: HoldingExitStage, val action: String)
 
 object HoldingExitPolicy {
     const val BREAK_TOLERANCE = 0.005
+
+    /** 仓位占总资金低于这个比例算「轻仓」：亏了也伤不到账户，破位不必给命令式卖出。 */
+    const val LIGHT_POSITION_PCT = 5.0
 
     data class Input(
         val price: Double,
@@ -30,6 +33,8 @@ object HoldingExitPolicy {
         val changePct: Double? = null,
         val holdingTContext: HoldingTContext? = null,
         val holdingTObservation: HoldingTObservation? = null,
+        /** 持仓市值占总资金的百分比；总资金没填时为 null，缓释不生效（行为同旧口径）。 */
+        val positionPct: Double? = null,
     )
 
     fun exitReference(support: Double, atrPct: Double?): Double = support *
@@ -47,11 +52,18 @@ object HoldingExitPolicy {
         val reference = (input.exitPrice ?: exitReference(input.support, input.atrPct))
             .takeIf { it.isFinite() && it > 0 && it < input.support }
         val structureFailed = input.trendWeak && reference != null && input.price < reference
+        // 三项缓释：基本面没亮红灯 + 价格在区间低位 + 仓位轻——破位事实照报，
+        // 但命令式卖出（减仓/清仓）换成「风险提示、去留自定」。基本面红灯、高位、重仓不缓释。
+        val mitigated = broken && !input.fundamentalAlert &&
+            input.priceContext?.location == PriceLocation.LOW &&
+            input.positionPct != null && input.positionPct.isFinite() &&
+            input.positionPct >= 0.0 && input.positionPct < LIGHT_POSITION_PCT
         val stage = when {
-            confirmed && (structureFailed || input.fundamentalAlert) -> HoldingExitStage.EXIT
+            !mitigated && confirmed && (structureFailed || input.fundamentalAlert) -> HoldingExitStage.EXIT
             broken && input.fundamentalAlert -> HoldingExitStage.WATCH
             (confirmed && high) || highWeakness != null -> HoldingExitStage.HIGH_REDUCE
             DeepLossPolicy.isDeepLoss(input.cost, input.price, input.atrPct) -> HoldingExitStage.DEEP_T
+            confirmed && mitigated -> HoldingExitStage.NOTICE
             confirmed -> HoldingExitStage.REDUCE
             else -> HoldingExitStage.WATCH
         }
@@ -76,6 +88,8 @@ object HoldingExitPolicy {
                 "，退出优先：核对证据后以清仓退出为目标，可按流动性分笔执行，不再只减1/3或等反弹做T。"
             HoldingExitStage.DEEP_T -> "当前优先：$evidence；深套先不补仓，未触发退出条件前只评估机动仓滚动做T，反弹减出、企稳接回，尝试降低成本但不保证解套；" +
                 "若持续破位叠加结构失效或基本面风险，优先退出，不因深套无限等待。$referenceText。"
+            HoldingExitStage.NOTICE -> "$evidence；但基本面未亮红灯、价格处低位、仓位也轻——去留按你的风险偏好决定，不强制卖出。" +
+                "若减，首次可评估减出约1/3可卖仓位；若留，盯${referenceText}，再失守且趋势转弱才按退出评估。"
         }
         return HoldingExitDecision(stage, action + "卖出以实际可卖数量为准，受T+1、跌停及流动性限制，不保证成交。")
     }

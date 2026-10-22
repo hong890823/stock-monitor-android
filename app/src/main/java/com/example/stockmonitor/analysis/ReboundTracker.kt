@@ -2,7 +2,7 @@ package com.example.stockmonitor.analysis
 
 import java.util.Locale
 
-/** 反弹质量跟踪的阈值。下探/回升的主口径复用 [DipReboundPolicy]，这里只定跟踪与判定。 */
+/** 反弹质量跟踪的阈值。下探/回升的主口径复用 [DipReboundPolicy]，这里定跟踪、判定与一档补布防。 */
 object ReboundTrackPolicy {
 
     /**
@@ -16,6 +16,14 @@ object ReboundTrackPolicy {
 
     /** 自日内低点起至少站稳这么久（分钟）才谈「企稳」。 */
     const val STABILIZE_MINUTES = 10.0
+
+    /**
+     * 「够深日内坑」的布防线：跌到这个幅度即便不到恐慌坑（[DipReboundPolicy] 的 1.2×ATR
+     * 口径）也进跟踪。高波动票的 ATR 阈值会被钳到 -5%，3 个点级别的 V 型收复
+     * （如 2026-10-22 中天科技 -3.4% 坑收复约 3 个点）会整段漏掉；布防松这一档，
+     * 定性仍靠站稳时间 + 量价配合压噪。「深跌回升」提醒不走这条路，深跌口径保持严格。
+     */
+    const val ARM_DIP_PCT = -3.0
 
     /** 回升段成交节奏不低于下跌段的这个倍数才叫「承接有力」，与 [DipReboundPolicy.LEG_PACE_RATIO] 同口径。 */
     const val LEG_PACE_RATIO = DipReboundPolicy.LEG_PACE_RATIO
@@ -68,7 +76,8 @@ object ReboundTrackPolicy {
  * 反弹质量跟踪：把「下探回升」从一次性提醒变成闭环。
  *
  * 日内深砸后价格回升时，及时性与防诱多天然冲突——报早了是追高被套，报晚了错过窗口。
- * 这里的做法是**先跟踪再定性**：布防（砸出恐慌坑）后持续观察回升段，最后只给三种结论：
+ * 这里的做法是**先跟踪再定性**：布防（恐慌坑，或够深的日内坑——见 [ReboundTrackPolicy.ARM_DIP_PCT]）
+ * 后持续观察回升段，最后只给三种结论：
  *
  * - [Kind.CONFIRMED] 真反弹：站稳足够久 + 保住回升果实 + **价量配合**（价格推进不拖沓
  *   且量能不缩），给出**失效线**（日内低点）再谈小仓评估——有失效线的提示才叫「抓住」；
@@ -201,9 +210,11 @@ class ReboundTracker {
             leg.lastHighTs = sample.timestamp
         }
         rememberPrice(leg, sample)
-        // 没砸出恐慌坑的日常波动不进跟踪（个股阈值按 ATR 缩放，与下探回升同口径）。
+        // 布防两条路：恐慌坑（与下探回升同口径的 ATR 阈值），或够深的日内坑
+        // （[ReboundTrackPolicy.ARM_DIP_PCT]，兜住高波票被 -5% 钳位挡住的浅坑深 V）。
+        // 日常小波动两条路都不进，跟踪照旧不刷屏。
         val dipThreshold = DipReboundPolicy.dipThresholdPct(sample.code, stock = true, atrPct = sample.atrPct)
-        if (leg.dayLowPct > dipThreshold) return null
+        if (leg.dayLowPct > dipThreshold && leg.dayLowPct > ReboundTrackPolicy.ARM_DIP_PCT) return null
 
         val recoveredNeed = ReboundTrackPolicy.recoverNeedPct(leg.dayLowPct)
         val peakRecovered = leg.legHighPct - leg.dayLowPct

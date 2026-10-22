@@ -27,6 +27,7 @@ enum class IntradaySignalType(val label: String) {
     SECOND_WAVE_CANDIDATE("二波候选·等待突破"),
     SECOND_WAVE("二波突破确认"),
     BREAKOUT_REVERSAL_RISK("突破延续下杀风险"),
+    BREAK_NOTICE("破位风险提示"),
     TREND_WATCH("趋势条件待确认"),
     TIMEFRAME_WATCH("周期条件待确认");
 
@@ -37,6 +38,7 @@ enum class IntradaySignalType(val label: String) {
             HIGH_REDUCE_POSITION,
             EXIT_POSITION,
             BREAKOUT_REVERSAL_RISK,
+            BREAK_NOTICE,
         )
 
     /** 只有会直接形成买入、普通止盈/减仓或做T动作的信号需要15/30分钟确认。 */
@@ -249,6 +251,11 @@ object IntradayTactics {
                 input.sectorRegime in setOf(MarketRegime.WEAK, MarketRegime.COLLAPSE),
             gapDown = input.openPrice?.let { it.isFinite() && it > 0 && it < support * (1 - BREAK_TOLERANCE) } == true &&
                 input.previousClose?.let { it.isFinite() && it >= support } == true,
+            positionPct = if (input.totalCapital.isFinite() && input.totalCapital > 0) {
+                input.quantity * input.price / input.totalCapital * 100
+            } else {
+                null
+            },
         ))
         if (exitDecision != null) return breakSupport(input, support, exitDecision)
         val breakoutRisk = BreakoutRiskPolicy.evaluate(
@@ -578,6 +585,7 @@ object IntradayTactics {
             HoldingExitStage.REDUCE -> IntradaySignalType.REDUCE_POSITION
             HoldingExitStage.HIGH_REDUCE -> IntradaySignalType.HIGH_REDUCE_POSITION
             HoldingExitStage.EXIT -> IntradaySignalType.EXIT_POSITION
+            HoldingExitStage.NOTICE -> IntradaySignalType.BREAK_NOTICE
             else -> IntradaySignalType.BREAK_SUPPORT
         }
         return IntradaySignal(

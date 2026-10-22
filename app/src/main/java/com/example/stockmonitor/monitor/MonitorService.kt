@@ -16,6 +16,7 @@ import com.example.stockmonitor.analysis.BreakoutRiskPolicy
 import com.example.stockmonitor.analysis.DipReboundEngine
 import com.example.stockmonitor.analysis.EntrySetupType
 import com.example.stockmonitor.analysis.EnvContext
+import com.example.stockmonitor.analysis.EventCoil
 import com.example.stockmonitor.analysis.FundamentalHealthPolicy
 import com.example.stockmonitor.analysis.Fundamentals
 import com.example.stockmonitor.analysis.HighPositionPolicy
@@ -28,6 +29,7 @@ import com.example.stockmonitor.analysis.Indicators
 import com.example.stockmonitor.analysis.IntradaySignal
 import com.example.stockmonitor.analysis.IntradaySignalType
 import com.example.stockmonitor.analysis.IntradayTactics
+import com.example.stockmonitor.analysis.LimitSealTracker
 import com.example.stockmonitor.analysis.MarketAlertEngine
 import com.example.stockmonitor.analysis.MarketBreadthFreshnessPolicy
 import com.example.stockmonitor.analysis.MarketBreadthSnapshot
@@ -53,6 +55,7 @@ import com.example.stockmonitor.analysis.PriceContext
 import com.example.stockmonitor.analysis.PricePosition
 import com.example.stockmonitor.analysis.PriceWindow
 import com.example.stockmonitor.analysis.ReboundTracker
+import com.example.stockmonitor.analysis.SealSprintTracker
 import com.example.stockmonitor.analysis.RelaxedScreenSelection
 import com.example.stockmonitor.analysis.SectorContext
 import com.example.stockmonitor.analysis.SectorTurnoverTracker
@@ -177,6 +180,8 @@ class MonitorService : Service() {
     private val marketAlertEngine = MarketAlertEngine()
     private val dipReboundEngine = DipReboundEngine()
     private val reboundTracker = ReboundTracker()
+    private val sealSprintTracker = SealSprintTracker()
+    private val limitSealTracker = LimitSealTracker()
     private val portfolioSignals = mutableMapOf<String, String>()
 
     /** 盘中提醒的当前形态：只有形态变化（含从无到有）才提醒，见 checkIntradaySignals。 */
@@ -212,6 +217,12 @@ class MonitorService : Service() {
     /** 基本面按需补拉：上次尝试时间，配合 [FundamentalHealthPolicy.needsFetch] 做失败重试节流。 */
     private val healthLastAttemptAt = mutableMapOf<String, Long>()
     private val healthInFlight =
+        java.util.concurrent.ConcurrentHashMap
+            .newKeySet<String>()
+
+    /** 公告清单按需补拉（事件后蓄势识别用）：比基本面轻，12 小时一份足够。 */
+    private val announcementLastFetchAt = mutableMapOf<String, Long>()
+    private val announcementInFlight =
         java.util.concurrent.ConcurrentHashMap
             .newKeySet<String>()
     private var signalAlertDay: String? = null
@@ -473,6 +484,7 @@ class MonitorService : Service() {
                 checkDipReboundAlerts(freshQuotes, calendar)
                 // 反弹跟踪先于信号链跑：同一 tick 的接回/站回支撑要读它刚判出的「已企稳」。
                 checkReboundTracking(calendar, freshQuotes)
+                checkSealAlerts(calendar, freshQuotes)
                 checkIntradaySignals(calendar, freshQuotes)
                 // 风险卖出必须先于分钟K线网络请求送达；数据不全只降级普通操作，绝不延迟风险处置。
                 refreshIntradayBars(freshQuotes, calendar)
@@ -1048,6 +1060,78 @@ class MonitorService : Service() {
         reboundTracker.update(samples, today).forEach { event ->
             if (!consumePushBudget(event.code)) return@forEach
             val id = ALERT_ID_REBOUND_TRACK + event.code.hashCode()
+            if (event.vibrate) {
+                Notifier.signal(this, id, event.title, event.body)
+            } else {
+                Notifier.alert(this, id, event.title, event.body)
+            }
+        }
+    }
+
+    /**
+     * 封板冲刺预警 + 封板/炸板提醒（见 [SealSprintTracker] / [LimitSealTracker]）。
+     *
+     * 覆盖持仓 + 自选股 + 观察池。封板是持仓事实级事件——此前封板/炸板只给板块龙头的
+     * 做T闸门和页面展示用，持仓封板本身从不推送，只能靠盯盘发现。按跌预警同口径
+     * 只看 alertsEnabled，不占共享推送预算：事实不能被机会类预算吞掉。
+     */
+    private fun checkSealAlerts(
+        calendar: Calendar,
+        currentQuotes: Map<String, Quote>,
+    ) {
+        if (!store.alertsEnabled || !TradingCalendar.inMarketHoursForAlert(calendar)) {
+            sealSprintTracker.reset()
+            limitSealTracker.reset()
+            return
+        }
+        val heldCodes = StockAlertScope.heldCodes(store.portfolio.positions)
+        val watchCodes = store.watchlist
+            .map { it.code }
+            .filter { !it.startsWith("sh000") && !it.startsWith("sz399") }
+        val observationCodes = store.observationPool
+            .filter { it.stage != ObservationStage.ELIMINATED }
+            .map { it.code }
+        val codes = (heldCodes + watchCodes + observationCodes).distinct()
+        if (codes.isEmpty()) return
+        val today = TimeUtils.todayText()
+        val timestamp = System.currentTimeMillis()
+        val quotes = codes.mapNotNull { code -> currentQuotes[code]?.let { code to it } }
+
+        sealSprintTracker.update(
+            quotes.map { (code, quote) ->
+                SealSprintTracker.Sample(
+                    code = code,
+                    name = quote.name,
+                    price = quote.price,
+                    prevClose = quote.prevClose,
+                    high = quote.high,
+                    volume = quote.volume,
+                    limitPct = SinaClient.limitPctFor(code, quote.name),
+                    timestamp = timestamp,
+                    held = code in heldCodes,
+                )
+            },
+            today,
+        ).forEach { event ->
+            Notifier.signal(this, ALERT_ID_SEAL_SPRINT + event.code.hashCode(), event.title, event.body)
+        }
+
+        limitSealTracker.update(
+            quotes.map { (code, quote) ->
+                LimitSealTracker.Sample(
+                    code = code,
+                    name = quote.name,
+                    price = quote.price,
+                    prevClose = quote.prevClose,
+                    limitPct = SinaClient.limitPctFor(code, quote.name),
+                    buy1Volume = quote.buy1Volume,
+                    timestamp = timestamp,
+                    held = code in heldCodes,
+                )
+            },
+            today,
+        ).forEach { event ->
+            val id = ALERT_ID_SEAL + event.code.hashCode()
             if (event.vibrate) {
                 Notifier.signal(this, id, event.title, event.body)
             } else {
@@ -2529,9 +2613,11 @@ class MonitorService : Service() {
                     announcements = payload.announcements,
                     shareholder = payload.shareholder,
                     today = TimeUtils.todayText(),
+                    orgType = payload.orgType,
                 ),
             )
         Repo.publishFundamentalHealth(code, FundamentalHealthPolicy.grade(result, TimeUtils.nowText()))
+        Repo.publishAnnouncements(code, payload.announcements)
     }
 
     /**
@@ -2599,6 +2685,12 @@ class MonitorService : Service() {
                 benchmark.orEmpty().map { it.date },
             )
         val tObservation = holdingTTracker.snapshot(live, today, now) ?: holdingTTracker.observe(live, today, now)
+        // 事件后蓄势：公告（基本面抓取顺带缓存，缺了按需轻量补拉）+ 含今日实时段的日线。
+        maybeRefreshAnnouncements(position.code)
+        val eventCoil = Repo.recentAnnouncements[position.code]?.let { announcements ->
+            val bars = ObservationEntryPolicy.withLiveBar(history, live).takeIf { it.isNotEmpty() } ?: history
+            EventCoil.evaluate(announcements, bars, today)
+        }
         return PortfolioAnalysis.evaluate(
             position,
             technical,
@@ -2624,6 +2716,7 @@ class MonitorService : Service() {
             breakObservation = holdingBreakTracker.snapshot(position.code, live, TimeUtils.todayText(), System.currentTimeMillis()),
             holdingTContext = tContext,
             holdingTObservation = tObservation,
+            eventCoil = eventCoil,
         )
     }
 
@@ -2859,6 +2952,27 @@ class MonitorService : Service() {
                 Log.w(TAG, "基本面补拉失败 $name", error)
             } finally {
                 healthInFlight.remove(code)
+            }
+        }
+    }
+
+    /**
+     * 事件后蓄势（[EventCoil]）只缺公告清单：单独轻量补拉，不必等基本面按需补拉
+     * （那条只在破位/深亏时触发，平时根本轮不到）。失败不重试轰炸，[ANNOUNCEMENT_REFRESH_MS] 后再试。
+     */
+    private fun maybeRefreshAnnouncements(code: String) {
+        val now = System.currentTimeMillis()
+        if (now - (announcementLastFetchAt[code] ?: 0L) < ANNOUNCEMENT_REFRESH_MS) return
+        if (!announcementInFlight.add(code)) return
+        announcementLastFetchAt[code] = now
+        scope.launch {
+            try {
+                Repo.publishAnnouncements(code, FundamentalsClient().announcements(code))
+                Repo.notifyChanged()
+            } catch (error: Exception) {
+                Log.w(TAG, "公告补拉失败 $code", error)
+            } finally {
+                announcementInFlight.remove(code)
             }
         }
     }
@@ -3133,6 +3247,13 @@ class MonitorService : Service() {
 
         /** 反弹质量跟踪（企稳确认 / 诱多警示）的提醒 ID 基址，与下探回升的通知并存。 */
         private const val ALERT_ID_REBOUND_TRACK = 7200
+
+        /** 封板冲刺预警 / 封板炸板提醒的 ID 基址。 */
+        private const val ALERT_ID_SEAL_SPRINT = 7400
+        private const val ALERT_ID_SEAL = 7600
+
+        /** 公告清单的补拉周期（事件后蓄势识别用）。 */
+        private const val ANNOUNCEMENT_REFRESH_MS = 12 * 60 * 60 * 1000L
         private const val ALERT_ID_OBSERVATION_BUY = 8000
         private const val ALERT_ID_OBSERVATION_RISK = 8001
         private val MARKET_INDEX_CODES = listOf("sh000001", "sz399001", "sz399006")

@@ -117,6 +117,18 @@ object Repo {
         fundamentalHealth = fundamentalHealth + (code to FundamentalHealthSnapshot(health, fetchedAtMs))
     }
 
+    /**
+     * 各代码最近一次拉到的公告列表（与基本面健康同一次抓取）。事件后蓄势识别
+     * （见 EventCoil）要用公告标题，与基本面打分工不同，单独留一份原始清单。
+     */
+    @Volatile
+    var recentAnnouncements: Map<String, List<com.example.stockmonitor.analysis.Announcement>> = emptyMap()
+
+    fun publishAnnouncements(code: String, announcements: List<com.example.stockmonitor.analysis.Announcement>) {
+        if (announcements.isEmpty()) return
+        recentAnnouncements = recentAnnouncements + (code to announcements)
+    }
+
     var portfolioReport: String? = null
     var portfolioTask: BackgroundTaskState = BackgroundTaskState.idle("持仓分析")
 

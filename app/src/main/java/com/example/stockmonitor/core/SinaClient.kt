@@ -55,6 +55,7 @@ class SinaClient {
                     volume = parts[8].finiteDoubleOrNull()?.takeIf { it >= 0 } ?: 0.0,
                     turnover = parts[9].finiteDoubleOrNull()?.takeIf { it >= 0 } ?: 0.0,
                     quoteDate = parts.getOrNull(30)?.takeIf { it.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) },
+                    buy1Volume = parts.getOrNull(10)?.finiteDoubleOrNull()?.takeIf { it >= 0 },
                 )
             }
         }

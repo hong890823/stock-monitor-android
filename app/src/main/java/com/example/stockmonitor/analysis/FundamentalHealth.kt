@@ -75,6 +75,7 @@ object FundamentalHealthPolicy {
             quarters = result.quarters,
             notes = result.notes,
             analyzedAt = analyzedAt,
+            dataComplete = (result.ocfToProfit != null || result.cashToRevenue != null) && result.balance != null,
         ).copy(intradayEvidence = buildList {
             result.risks.filter { it.level == RiskLevel.ALERT && it.evidenceDate != null }.forEach {
                 add(FundamentalEvidence(it.evidenceDate!!, it.text, financial = !it.announcement))
@@ -118,12 +119,20 @@ object FundamentalHealthPolicy {
         quarters: List<QuarterPoint>,
         notes: List<String> = emptyList(),
         analyzedAt: String = "",
+        /** 现金流/资产负债表维度是否参与了评分；缺表或金融口径时为 false，低分不作恶化判定。 */
+        dataComplete: Boolean = true,
     ): FundamentalHealth {
         val reasons = mutableListOf<String>()
         var red = false
         if (score < WEAK_SCORE) {
-            red = true
-            reasons.add("评分 $score（$verdict）")
+            if (dataComplete) {
+                red = true
+                reasons.add("评分 $score（$verdict）")
+            } else {
+                // 缺表会把评分系统性压低（中性分补齐后满分也只有 70 上下），
+                // 「没数据」不能判成「报表差」——恶化判定留给业绩变脸与公告这类实锤。
+                reasons.add("报表口径不全（现金流或资产负债表缺失/不适用），评分 $score 仅含可得维度，不按低分判恶化")
+            }
         }
         val alerts = risks.filter { it.level == RiskLevel.ALERT }
         if (alerts.isNotEmpty()) {

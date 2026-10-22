@@ -48,6 +48,8 @@ data class PositionResult(
      * 不猜——「贵州板块跌了」不代表你这只股的行业在跌。
      */
     val sectorNote: String? = null,
+    /** 事件后蓄势线索（见 EventCoil）：利好落地 + 缩量回踩的观察提示，属概率线索。 */
+    val eventCoil: EventCoil.Signal? = null,
     val exitDecision: HoldingExitDecision? = null,
     val notificationExitDecision: HoldingExitDecision? = null,
     val trendAssessment: TrendAssessment? = null,
@@ -74,6 +76,7 @@ object PortfolioAnalysis {
         breakObservation: HoldingBreakObservation? = null,
         holdingTContext: HoldingTContext? = null,
         holdingTObservation: HoldingTObservation? = null,
+        eventCoil: EventCoil.Signal? = null,
     ): PositionResult {
         val quantity = position.quantity
         val cost = position.cost
@@ -170,6 +173,7 @@ object PortfolioAnalysis {
                 envContext.sector?.state?.regime in setOf(MarketRegime.WEAK, MarketRegime.COLLAPSE),
             gapDown = live?.let { it.open.isFinite() && it.open > 0 && it.open < exitSupport * (1 - HoldingExitPolicy.BREAK_TOLERANCE) &&
                 it.prevClose.isFinite() && it.prevClose >= exitSupport } == true,
+            positionPct = positionPct,
         )
         val exitDecision = HoldingExitPolicy.evaluate(exitInput)
         val notificationExitDecision = HoldingExitPolicy.evaluate(exitInput.copy(
@@ -319,6 +323,7 @@ object PortfolioAnalysis {
                 volumeSignal = volumeSignal,
             ),
             sectorNote = sectorNoteOf(envContext.sector),
+            eventCoil = eventCoil,
             trendAssessment = technical.trendAssessment,
             boxRange = technical.boxRange,
             highPositionEvidence = technical.highPositionEvidence,
@@ -534,6 +539,14 @@ object PortfolioAnalysis {
     }
 
     /**
+     * 持仓 Tab 今日要点的**高亮行**：事件后蓄势（见 [EventCoil]）单独用醒目样式渲染在卡片顶部。
+     * 这类线索埋在个股报告里等于没给——高亮位才谈得上「重点关注这只票」。
+     */
+    fun todayBriefHighlights(results: List<PositionResult>): List<String> =
+        results.filter { it.quantity.isFinite() && it.quantity > 0 && it.eventCoil != null }
+            .map { result -> "🔥 事件后蓄势｜${result.name}：${result.eventCoil!!.brief}" }
+
+    /**
      * 持仓 Tab 的精简今日要点。它和 [brief] 分开，避免把账户快照带进完整持仓报告。
      * 仓位只参与后台排序和整体建议，不在这里逐只展示。
      */
@@ -623,6 +636,7 @@ object PortfolioAnalysis {
                 HoldingExitStage.HIGH_REDUCE -> "涨到高处后开始走弱，优先分批卖出一部分"
                 HoldingExitStage.REDUCE -> "跌破关键价位后未能站回，优先分批卖出一部分"
                 HoldingExitStage.WATCH -> "刚跌破关键价位，先别加仓，看能否站回"
+                HoldingExitStage.NOTICE -> "跌破关键价位，但基本面未亮红灯、位置低、仓位轻，去留按自己的风险偏好决定"
                 HoldingExitStage.DEEP_T -> "亏损较深，别再补钱；等反弹时评估卖出一小部分，再等回落稳住后考虑接回"
                 else -> when {
                     candidate.fundamentalHealth?.level == HealthLevel.ALERT -> {
@@ -651,6 +665,8 @@ object PortfolioAnalysis {
         result.exitDecision?.stage == HoldingExitStage.WATCH -> 80
         result.fundamentalHealth?.level == HealthLevel.ALERT -> 75
         result.signal == "趋势转弱观察" -> 70
+        // 破位但三项缓释（基本面没红灯/低位/轻仓）：提一句即可，不该抢「最值得操作」的头条。
+        result.exitDecision?.stage == HoldingExitStage.NOTICE -> 65
         result.exitDecision?.stage == HoldingExitStage.DEEP_T -> 60
         result.signal == "持有/止盈观察" -> 40
         else -> 0
@@ -674,7 +690,7 @@ object PortfolioAnalysis {
                 "买入的股票较多，或钱集中在少数股票上；先减少已确认走弱的持仓，别继续买。"
             results.any { it.exitDecision?.stage in setOf(HoldingExitStage.HIGH_REDUCE, HoldingExitStage.REDUCE) } ->
                 "先分批卖出一部分已确认走弱的股票，其他持仓先观察，别追着买。"
-            results.any { it.exitDecision?.stage == HoldingExitStage.WATCH } ->
+            results.any { it.exitDecision?.stage in setOf(HoldingExitStage.WATCH, HoldingExitStage.NOTICE) } ->
                 "先别继续买入，看能否站回关键价位；不能只因刚跌破就急着卖。"
             totalPositionPct != null && totalPositionPct >= 80 ->
                 "较多资金已经买了股票，先别继续买，留些现金应对波动。"
@@ -694,6 +710,7 @@ object PortfolioAnalysis {
                 result.exitDecision?.stage == HoldingExitStage.HIGH_REDUCE -> "highReduce"
                 result.exitDecision?.stage == HoldingExitStage.REDUCE -> "reduce"
                 result.fundamentalHealth?.level == HealthLevel.ALERT -> "fundamental"
+                result.exitDecision?.stage == HoldingExitStage.NOTICE -> "notice"
                 result.exitDecision?.stage == HoldingExitStage.WATCH -> "watchBreak"
                 DeepLossPolicy.isDeepLoss(result.cost, result.price, result.volatility.atrPct) -> "deep"
                 result.signal == "减仓风险" -> "broken"
@@ -710,6 +727,7 @@ object PortfolioAnalysis {
             groups["exit"]?.let { add("${names(it)}退出优先，核对依据后以清仓退出为目标，不再等待反弹做T") }
             groups["highReduce"]?.let { add("${names(it)}高位转弱，优先分批减仓，暂停加仓和做T接回；不因高位直接清仓") }
             groups["reduce"]?.let { add("${names(it)}确认破位，优先分批减仓；失守风险参考且趋势转弱时升级退出") }
+            groups["notice"]?.let { add("${names(it)}已破位，但基本面未亮红灯、位置低、仓位轻，去留自定；若减仓可分批约1/3") }
             groups["watchBreak"]?.let { add("${names(it)}破位待确认，暂不加仓；持续未收回则减仓") }
             groups["fundamental"]?.let { add("${names(it)}基本面亮红灯，先核实风险，暂停加仓和机械做T接回") }
             groups["broken"]?.let { add("${names(it)}已破位，确认未收回则减仓；持有依据失效时退出") }
@@ -863,6 +881,7 @@ object PortfolioAnalysis {
             lines.add(
                 "${result.sectorNote ?: "板块归属暂缺"}｜入场：${swing?.status?.label ?: result.entrySetup.conciseText()}"
             )
+            result.eventCoil?.let { lines.add(it.note) }
             result.rhythm?.let {
                 lines.add("市场节奏：${it.phase.label}｜${it.reason}")
             }

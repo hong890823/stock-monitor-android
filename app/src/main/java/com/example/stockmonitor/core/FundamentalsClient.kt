@@ -33,6 +33,8 @@ data class FundamentalPayload(
     val mainBusiness: List<MainBusinessItem>,
     val announcements: List<Announcement>,
     val shareholder: ShareholderAnalysis?,
+    /** 东财 F10 的企业类型（如 证券 / 银行 / 保险）：金融企业报表结构不同，评分要换口径。 */
+    val orgType: String? = null,
 )
 
 /**
@@ -97,6 +99,7 @@ class FundamentalsClient {
             mainBusiness = mainBusiness,
             announcements = announcements,
             shareholder = shareholder,
+            orgType = parseOrgType(income),
         )
     }
 
@@ -104,6 +107,10 @@ class FundamentalsClient {
         if (marketCap == null || marketCap <= 0 || price <= 0) return 0.0
         return marketCap / price
     }
+
+    /** 只拉公告清单（事件后蓄势识别用）：比完整基本面轻一个量级，按需补拉走这里。 */
+    fun announcements(code: String): List<Announcement> =
+        runCatching { fetchAnnouncements(code.takeLast(6)) }.getOrDefault(emptyList())
 
     data class Snapshot(val name: String, val price: Double, val totalShares: Double)
 
@@ -269,7 +276,7 @@ class FundamentalsClient {
         private const val REPORT_MAINOP = "RPT_F10_FN_MAINOP"
 
         private const val INCOME_COLUMNS =
-            "SECUCODE,REPORT_DATE,TOTAL_OPERATE_INCOME,OPERATE_COST,PARENT_NETPROFIT,DEDUCT_PARENT_NETPROFIT"
+            "SECUCODE,REPORT_DATE,ORG_TYPE,TOTAL_OPERATE_INCOME,OPERATE_COST,PARENT_NETPROFIT,DEDUCT_PARENT_NETPROFIT"
         private const val CASHFLOW_COLUMNS =
             "SECUCODE,REPORT_DATE,NETCASH_OPERATE,SALES_SERVICES,CONSTRUCT_LONG_ASSET"
         private const val BALANCE_COLUMNS = "SECUCODE,REPORT_DATE,MONETARYFUNDS,NOTE_ACCOUNTS_RECE," +
@@ -317,8 +324,9 @@ class FundamentalsClient {
         /**
          * 利润表和现金流量表按报告期对齐拼成一条记录。
          *
-         * 两边都有的报告期才保留：只有利润表没有现金流量表的报告期如果留着，
-         * 现金流就会被记成 0，把「利润含金量」这条直接算成最差。
+         * 现金流缺失的报告期也保留，现金三项记 null 而不是 0——金融企业（银行/券商/保险）
+         * 的现金流量表在 F10 接口上就是空的，整表缺失时利润表照样能出营收/利润口径；
+         * 「缺表」不能记成「现金流为 0」，否则「利润含金量」会被算成最差，把没数据说成报表烂。
          */
         fun parsePeriods(income: String, cash: String): List<FinancialPeriod> {
             val incomeRows = dataArray(income) ?: return emptyList()
@@ -335,7 +343,7 @@ class FundamentalsClient {
                 val row = incomeRows.optJSONObject(i) ?: continue
                 val date = shortDate(row.optString("REPORT_DATE"))
                 if (date.length != 10) continue
-                val cashRow = cashByDate[date] ?: continue
+                val cashRow = cashByDate[date]
                 periods.add(
                     FinancialPeriod(
                         date = date,
@@ -343,14 +351,18 @@ class FundamentalsClient {
                         operateCost = row.optDouble("OPERATE_COST", 0.0),
                         netProfit = row.optDouble("PARENT_NETPROFIT", 0.0),
                         deductNetProfit = row.optDouble("DEDUCT_PARENT_NETPROFIT", 0.0),
-                        operatingCashFlow = cashRow.optDouble("NETCASH_OPERATE", 0.0),
-                        salesCash = cashRow.optDouble("SALES_SERVICES", 0.0),
-                        capex = cashRow.optDouble("CONSTRUCT_LONG_ASSET", 0.0),
+                        operatingCashFlow = cashRow?.optDouble("NETCASH_OPERATE", 0.0),
+                        salesCash = cashRow?.optDouble("SALES_SERVICES", 0.0),
+                        capex = cashRow?.optDouble("CONSTRUCT_LONG_ASSET", 0.0),
                     )
                 )
             }
             return periods.sortedBy { it.date }
         }
+
+        /** 企业类型（证券/银行/保险…）；金融企业的报表结构不同，评分口径要区分。 */
+        fun parseOrgType(income: String): String? =
+            dataArray(income)?.optJSONObject(0)?.optString("ORG_TYPE")?.takeIf { it.isNotBlank() }
 
         fun parseBalance(text: String): BalanceSheetSnapshot? {
             val row = dataArray(text)?.optJSONObject(0) ?: return null

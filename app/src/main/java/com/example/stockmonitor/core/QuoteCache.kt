@@ -76,7 +76,10 @@ object QuoteCache {
             .put("low", quote.low)
             .put("volume", quote.volume)
             .put("turnover", quote.turnover)
-            .apply { quote.quoteDate?.let { put("date", it) } }
+            .apply {
+                quote.quoteDate?.let { put("date", it) }
+                quote.buy1Volume?.let { put("buy1_volume", it) }
+            }
 
     private fun quoteFromJson(code: String, item: JSONObject): Quote? {
         val name = item.optString("name")
@@ -95,6 +98,7 @@ object QuoteCache {
             volume = item.optDouble("volume", 0.0).takeIf { it.isFinite() && it > 0 } ?: 0.0,
             turnover = item.optDouble("turnover", 0.0).takeIf { it.isFinite() && it > 0 } ?: 0.0,
             quoteDate = item.optString("date").takeIf { it.isNotBlank() },
+            buy1Volume = item.optDouble("buy1_volume", Double.NaN).takeIf { it.isFinite() && it >= 0 },
         )
     }
 }

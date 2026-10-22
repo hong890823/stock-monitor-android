@@ -93,6 +93,12 @@ object TradeNotification {
             HoldingExitStage.HIGH_REDUCE -> "高位转弱，${sale(totalQuantity, sellableQuantity, lockedToday, untrackedQuantity)}暂停接回。"
             HoldingExitStage.EXIT -> "退出优先，${sale(totalQuantity, sellableQuantity, lockedToday, untrackedQuantity, exit = true)}"
             HoldingExitStage.DEEP_T -> "先不补仓，等反弹再评估做T；持续走弱需重新评估退出。"
+            HoldingExitStage.NOTICE -> {
+                val shares = sellQuantity(totalQuantity, sellableQuantity, exit = false)
+                val sizing = if (shares > 0) "；若减可先减约${shares.toLong()}股" else ""
+                // 短信口径不带基本面长文（见 TradeNotificationTest）：三项缓释的完整理由在持仓报告里。
+                "破位风险提示：价格处低位、仓位较轻，去留自定$sizing。"
+            }
         }
         return "$action 现价${price(price)}，支撑${price(support)}。"
     }
@@ -121,6 +127,7 @@ object TradeNotification {
             IntradaySignalType.REDUCE_POSITION -> HoldingExitStage.REDUCE
             IntradaySignalType.HIGH_REDUCE_POSITION -> HoldingExitStage.HIGH_REDUCE
             IntradaySignalType.EXIT_POSITION -> HoldingExitStage.EXIT
+            IntradaySignalType.BREAK_NOTICE -> HoldingExitStage.NOTICE
             IntradaySignalType.BREAK_SUPPORT -> if (DeepLossPolicy.isDeepLoss(input.cost, input.price, input.atrPct) &&
                 input.fundamentalHealth?.level != HealthLevel.ALERT) HoldingExitStage.DEEP_T else HoldingExitStage.WATCH
             else -> null

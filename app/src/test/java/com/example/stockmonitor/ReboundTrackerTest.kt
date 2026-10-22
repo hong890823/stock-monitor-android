@@ -9,9 +9,10 @@ import org.junit.Test
 /**
  * 反弹质量跟踪：深砸回升后区分「有效反弹」与两类风险——诱多、抛压过大。
  *
- * 锁住四件事：站稳 + 量价配合才给确认（并带失效线）；缩量回升只给观察、别追；
+ * 锁住五件事：站稳 + 量价配合才给确认（并带失效线）；缩量回升只给观察、别追；
  * 放量滞涨（量强价弱 = 抛压/换手出货）判风险、拦截确认并在途也报；
- * 回落走弱 / 吐回果实给诱多警示，且确认之后失效或抛压都要撤回「已企稳」状态。
+ * 回落走弱 / 吐回果实给诱多警示，且确认之后失效或抛压都要撤回「已企稳」状态；
+ * 布防两路——恐慌坑或 -3% 日内坑，高波票浅坑深 V 不漏、坑不够深仍静默。
  */
 class ReboundTrackerTest {
 
@@ -345,6 +346,52 @@ class ReboundTrackerTest {
         assertEquals(ReboundTracker.Kind.CAUTIOUS, event.kind)
         assertTrue(event.title.contains("乏力"))
         assertTrue(event.body.contains("推不动"))
+        assertFalse(tracker.isConfirmed("sz000001"))
+    }
+
+    @Test
+    fun shallowPitOnHighVolNameStillTracksRebound() {
+        // 2026-10-22 中天科技：ATR% ≈ 5.3 把恐慌坑布防线钳到 -5%，-3.4% 的坑够不着；
+        // 走「日内坑 ≤ -3%」这条路布防，收复 1.7pp + 站稳后照常给确认。
+        val tracker = ReboundTracker()
+        val events = run(
+            tracker,
+            listOf(
+                sample(-0.5, at(-30.0), cum = 50e6, atrPct = 5.3),
+                sample(-3.39, at(0.0), cum = 100e6, atrPct = 5.3),
+                sample(-2.9, at(2.0), cum = 110e6, atrPct = 5.3),
+                sample(-2.4, at(5.0), cum = 122e6, atrPct = 5.3),
+                sample(-1.9, at(10.0), cum = 136e6, atrPct = 5.3),
+                sample(-1.6, at(12.0), cum = 150e6, atrPct = 5.3),
+            ),
+        )
+
+        assertEquals(1, events.size)
+        val event = events.single()
+        assertEquals(ReboundTracker.Kind.CONFIRMED, event.kind)
+        assertTrue(event.vibrate)
+        assertTrue(event.body.contains("失效线"))
+        assertTrue(event.body.contains("9.66"))
+        assertTrue(tracker.isConfirmed("sz000001"))
+    }
+
+    @Test
+    fun dipAboveArmLineOnHighVolNameStaysSilent() {
+        // 噪声底线：高波票 -2.5% 的坑两条布防路都不够（恐慌坑要 -5%，日内坑要 -3%），
+        // 回升形态再漂亮也不进跟踪——松的是布防，不是定性。
+        val tracker = ReboundTracker()
+        val events = run(
+            tracker,
+            listOf(
+                sample(-0.5, at(-30.0), cum = 50e6, atrPct = 5.3),
+                sample(-2.5, at(0.0), cum = 100e6, atrPct = 5.3),
+                sample(-2.0, at(5.0), cum = 130e6, atrPct = 5.3),
+                sample(-1.5, at(10.0), cum = 160e6, atrPct = 5.3),
+                sample(-1.1, at(12.0), cum = 178e6, atrPct = 5.3),
+            ),
+        )
+
+        assertTrue(events.isEmpty())
         assertFalse(tracker.isConfirmed("sz000001"))
     }
 }

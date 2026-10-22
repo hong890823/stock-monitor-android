@@ -80,6 +80,37 @@ class HoldingExitPolicyTest {
         assertNull(HoldingExitPolicy.evaluate(input.copy(support = Double.POSITIVE_INFINITY)))
     }
 
+    @Test fun lightLowPositionWithoutRedFlagIsNoticeNotCommandedExit() {
+        // 2026-10-22 招商证券：基本面没红灯、价格处 60 日区间低位、仓位轻，
+        // 破位事实照报，但不再给「退出优先/清仓」的命令式动作。
+        val mitigated = input.copy(
+            confirmed = true, trendWeak = true, price = 19.3,
+            priceContext = PriceContext(PriceLocation.LOW, 0.0), positionPct = 2.0,
+        )
+        val decision = HoldingExitPolicy.evaluate(mitigated)!!
+        assertEquals(HoldingExitStage.NOTICE, decision.stage)
+        assertTrue(decision.action.contains("去留"))
+        assertFalse(decision.action.contains("清仓退出"))
+    }
+
+    @Test fun mitigationOnlyForLightLowUnflaggedPositions() {
+        val lowLight = input.copy(confirmed = true, trendWeak = true, price = 19.3,
+            priceContext = PriceContext(PriceLocation.LOW, 0.0), positionPct = 2.0)
+        // 重仓不缓释：同样的破位形态，仓位占总资金 20% 就该按退出处理。
+        assertEquals(HoldingExitStage.EXIT, HoldingExitPolicy.evaluate(lowLight.copy(positionPct = 20.0))?.stage)
+        // 基本面红灯不缓释。
+        assertEquals(HoldingExitStage.EXIT,
+            HoldingExitPolicy.evaluate(lowLight.copy(positionPct = 2.0, fundamentalAlert = true))?.stage)
+        // 中位/高位不缓释。
+        assertEquals(HoldingExitStage.EXIT,
+            HoldingExitPolicy.evaluate(lowLight.copy(priceContext = PriceContext(PriceLocation.MID, 0.3)))?.stage)
+        // 总资金没填（positionPct=null）按旧口径走，不擅自降级。
+        assertEquals(HoldingExitStage.EXIT, HoldingExitPolicy.evaluate(lowLight.copy(positionPct = null))?.stage)
+        // 缓释只拦命令式动作：未确认的首次破位本来就只是「待确认」，保持 WATCH。
+        assertEquals(HoldingExitStage.WATCH,
+            HoldingExitPolicy.evaluate(lowLight.copy(confirmed = false, trendWeak = false, price = 19.8))?.stage)
+    }
+
     private fun quote(price: Double = 19.8, volume: Double = 100.0, date: String = "2026-10-15") =
         Quote("sh600000", "测试", price, 20.1, 20.1, 20.2, 19.0, volume, 10000.0, date)
 

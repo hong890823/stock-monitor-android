@@ -21,6 +21,8 @@ data class Quote(
     val turnover: Double,
     /** 行情接口标注的交易日期；为空时不参与盘中新鲜度判断。 */
     val quoteDate: String? = null,
+    /** 买一挂单量（股）；封板时它就是封单，行情缓存恢复等场景可能没有。 */
+    val buy1Volume: Double? = null,
 ) {
     val changePct: Double
         get() = if (prevClose != 0.0) (price - prevClose) / prevClose * 100 else 0.0

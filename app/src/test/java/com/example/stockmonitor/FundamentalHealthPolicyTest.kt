@@ -37,6 +37,33 @@ class FundamentalHealthPolicyTest {
     }
 
     @Test
+    fun weakScoreIsNotRedWhenDataIncomplete() {
+        // 现金流/资产负债表缺失（券商股在 F10 上就是空表）时评分系统性偏低，
+        // 「没数据」不能判成「报表差」——否则招商证券这类票一破位就直接「退出优先」。
+        val health = FundamentalHealthPolicy.grade(
+            score = 45, verdict = "较差", risks = emptyList(), quarters = emptyList(),
+            dataComplete = false,
+        )
+        assertEquals(HealthLevel.NEUTRAL, health.level)
+        assertTrue(health.reasons.any { it.contains("口径不全") })
+    }
+
+    @Test
+    fun downturnStillRedEvenWhenDataIncomplete() {
+        // 业绩变脸是利润表实锤，缺现金流量表不影响这条恶化判定。
+        val health = FundamentalHealthPolicy.grade(
+            score = 45, verdict = "较差", risks = emptyList(),
+            quarters = listOf(
+                quarter("2025Q4", revenueYoy = -5.0, netProfitYoy = -3.0),
+                quarter("2026Q1", revenueYoy = -25.0, netProfitYoy = -30.0),
+                quarter("2026Q2", revenueYoy = -22.0, netProfitYoy = -40.0),
+            ),
+            dataComplete = false,
+        )
+        assertEquals(HealthLevel.ALERT, health.level)
+    }
+
+    @Test
     fun alertRiskIsRedEvenWithGoodScore() {
         val health = FundamentalHealthPolicy.grade(
             score = 80,

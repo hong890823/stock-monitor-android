@@ -400,6 +400,35 @@ class PortfolioAnalysisTest {
         assertFalse(advice.contains("割肉"))
     }
 
+    @Test fun eventCoilIsHighlightedInTodayBriefAndDetailedInReport() {
+        // 事件后蓄势要在持仓页「今日要点」置顶高亮（用户靠它决定重点盯哪只），报告里给完整注记。
+        val signal = com.example.stockmonitor.analysis.EventCoil.Signal(
+            eventDate = "2026-10-20",
+            eventTitle = "华天科技:…标的资产过户完成的公告",
+            kind = "重组落地",
+            note = "事件后蓄势：2026-10-20「…过户完成」（重组落地）后量缩价稳——放量突破时值得盯；属观察线索，不改趋势判断。",
+            brief = "放量突破时值得盯（2026-10-20 重组落地 后缩量回踩）",
+        )
+        val result = PortfolioAnalysis.evaluate(
+            Position("sh600522", "中天科技", 500.0, 32.0),
+            technical(price = 30.0, support = 29.0, trendWeak = false),
+            null,
+            portfolio(),
+            eventCoil = signal,
+        )
+
+        val highlights = PortfolioAnalysis.todayBriefHighlights(listOf(result))
+        assertEquals(1, highlights.size)
+        val line = highlights.single()
+        assertTrue(line, line.contains("事件后蓄势"))
+        assertTrue(line, line.contains("中天科技"))
+        assertTrue(line, line.contains("放量突破时值得盯"))
+        // 完整注记在个股报告行里，短句不重复。
+        val report = PortfolioAnalysis.formatReport(listOf(result), "2026-10-22 10:00")
+        assertTrue(report.contains("后量缩价稳"))
+        assertTrue(PortfolioAnalysis.todayBriefHighlights(emptyList()).isEmpty())
+    }
+
 
     private fun technical(
         price: Double,

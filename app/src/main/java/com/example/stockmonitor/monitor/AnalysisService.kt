@@ -16,6 +16,7 @@ import com.example.stockmonitor.R
 import com.example.stockmonitor.analysis.AiAnalysisReport
 import com.example.stockmonitor.analysis.AiCard
 import com.example.stockmonitor.analysis.EnvContext
+import com.example.stockmonitor.analysis.EventCoil
 import com.example.stockmonitor.analysis.FundamentalCard
 import com.example.stockmonitor.analysis.FundamentalHealthPolicy
 import com.example.stockmonitor.analysis.Fundamentals
@@ -23,6 +24,7 @@ import com.example.stockmonitor.analysis.FundamentalsReport
 import com.example.stockmonitor.analysis.GlobalCard
 import com.example.stockmonitor.analysis.GlobalFundamentalsReport
 import com.example.stockmonitor.analysis.MarketRegime
+import com.example.stockmonitor.analysis.ObservationEntryPolicy
 import com.example.stockmonitor.analysis.StockAnalysis
 import com.example.stockmonitor.analysis.TechnicalCard
 import com.example.stockmonitor.analysis.TechnicalReference
@@ -302,9 +304,10 @@ class AnalysisService : Service() {
             sina.search(keyword).firstOrNull()
                 ?: throw IllegalStateException("没有找到「$keyword」对应的股票")
         val data = FundamentalsClient().fetch(hit.first, hit.second)
+        val history = runCatching { sina.kline(hit.first, 240) }.getOrDefault(emptyList())
+        val live = runCatching { sina.quote(hit.first) }.getOrNull()
         val technicalResult =
             runCatching {
-                val history = sina.kline(hit.first, 240)
                 if (history.size < 60) {
                     null
                 } else {
@@ -313,7 +316,7 @@ class AnalysisService : Service() {
                         history = history,
                         code = hit.first,
                         name = hit.second,
-                        live = runCatching { sina.quote(hit.first) }.getOrNull(),
+                        live = live,
                         benchmark = benchmark,
                         elapsedTradingMinutes = TradingCalendar.tradingMinutesElapsed(),
                     )
@@ -332,8 +335,16 @@ class AnalysisService : Service() {
                     announcements = data.announcements,
                     shareholder = data.shareholder,
                     today = TimeUtils.todayText(),
+                    orgType = data.orgType,
                 ),
             )
+        // 事件后蓄势：利好落地公告 + 量价蓄势形态，属观察线索（见 EventCoil）。
+        val eventCoilNote = EventCoil.evaluate(
+            announcements = data.announcements,
+            bars = live?.let { ObservationEntryPolicy.withLiveBar(history, it).takeIf { bars -> bars.isNotEmpty() } }
+                ?: history,
+            today = TimeUtils.todayText(),
+        )?.note
         val card =
             FundamentalCard(
                 name = hit.second,
@@ -352,7 +363,7 @@ class AnalysisService : Service() {
                             technicalResult?.let {
                                 TechnicalReference(it.support, it.resistance, it.entrySetup)
                             },
-                    ),
+                    ) + (eventCoilNote?.let { "\n$it" } ?: ""),
             )
         // 手动分析的结果写进健康度缓存：盘中破位提醒立刻能用，
         // 监控链路在冷却内也不会把同样的数据再拉一遍。
@@ -360,6 +371,7 @@ class AnalysisService : Service() {
             card.code,
             FundamentalHealthPolicy.grade(card.result, TimeUtils.nowText()),
         )
+        Repo.publishAnnouncements(card.code, data.announcements)
         store.analysisReports =
             AnalysisReportCache.merge(
                 raw = store.analysisReports,

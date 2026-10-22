@@ -92,17 +92,38 @@ class FundamentalsClientTest {
             """],"count":82},"success":true}"""
 
     @Test
-    fun periodsJoinTheTwoStatementsByReportDateAndDropUnmatchedOnes() {
+    fun periodsJoinTheTwoStatementsByReportDateAndKeepCashMissingOnes() {
         val periods = FundamentalsClient.parsePeriods(incomeJson(), cashflowJson())
 
-        // 2025 年报在现金流量表里没有，直接丢掉：留着会被当成 0 现金流，把利润含金量算成最差。
-        assertEquals(2, periods.size)
-        assertEquals("2026-03-31", periods[0].date)
-        assertEquals(4799534766.23, periods[0].revenue, 1e-6)
-        assertEquals(-500.0, periods[0].operatingCashFlow, 1e-6)
-        assertEquals("2026-06-30", periods[1].date)
-        assertEquals(9876.5, periods[1].salesCash, 1e-6)
-        assertEquals(321.0, periods[1].capex, 1e-6)
+        // 2025 年报在现金流量表里没有：保留利润表口径，现金三项记 null——
+        // 「缺表」不能记成 0 现金流，也不能把整个报告期丢掉（金融企业现金流量表整表为空）。
+        assertEquals(3, periods.size)
+        assertEquals("2025-12-31", periods[0].date)
+        assertEquals(17213915293.79, periods[0].revenue, 1e-6)
+        assertNull(periods[0].operatingCashFlow)
+        assertNull(periods[0].salesCash)
+        assertEquals("2026-03-31", periods[1].date)
+        assertEquals(4799534766.23, periods[1].revenue, 1e-6)
+        assertEquals(-500.0, periods[1].operatingCashFlow!!, 1e-6)
+        assertEquals("2026-06-30", periods[2].date)
+        assertEquals(9876.5, periods[2].salesCash!!, 1e-6)
+        assertEquals(321.0, periods[2].capex!!, 1e-6)
+    }
+
+    @Test
+    fun periodsSurviveWhenCashflowTableIsEmptyAndOrgTypeIsReadable() {
+        // 券商股（ORG_TYPE=证券）在 F10 上没有现金流量表/资产负债表：利润表照出，现金流全 null。
+        val income = """{"result":{"data":[{"SECUCODE":"600999.SH","REPORT_DATE":"2026-06-30 00:00:00",""" +
+            """"ORG_TYPE":"证券","TOTAL_OPERATE_INCOME":21901578682.9,"OPERATE_COST":null,""" +
+            """"PARENT_NETPROFIT":10624328413.44,"DEDUCT_PARENT_NETPROFIT":10626293415.35}]},"success":true}"""
+
+        val periods = FundamentalsClient.parsePeriods(income, """{"result":null,"success":false,"code":9201}""")
+
+        assertEquals(1, periods.size)
+        assertEquals(21901578682.9, periods[0].revenue, 1e-6)
+        assertNull(periods[0].operatingCashFlow)
+        assertNull(periods[0].salesCash)
+        assertEquals("证券", FundamentalsClient.parseOrgType(income))
     }
 
     @Test

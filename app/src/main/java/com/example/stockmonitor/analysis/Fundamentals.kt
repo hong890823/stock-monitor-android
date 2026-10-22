@@ -12,9 +12,10 @@ data class FinancialPeriod(
     val operateCost: Double,
     val netProfit: Double,
     val deductNetProfit: Double,
-    val operatingCashFlow: Double,
-    val salesCash: Double,
-    val capex: Double,
+    /** 现金三项可能整表缺失（金融企业的现金流量表在 F10 接口上为空）：null = 没数据，不是 0。 */
+    val operatingCashFlow: Double? = null,
+    val salesCash: Double? = null,
+    val capex: Double? = null,
 )
 
 /** 资产负债表关键项（金额单位：元）。 */
@@ -357,7 +358,20 @@ object Fundamentals {
         val announcements: List<Announcement> = emptyList(),
         val shareholder: ShareholderAnalysis? = null,
         val today: String = "",
+        /** 东财 F10 企业类型（证券/银行/保险…）；金融企业换评分口径，见 [isFinancialOrg]。 */
+        val orgType: String? = null,
     )
+
+    /**
+     * 金融企业（银行/保险/券商/多元金融）：报表结构与工商企业完全不同——
+     * 发债与客户资金会让「存贷双高」「销售收现比」「净现金」这些工业口径检查全部误判红灯，
+     * 券商股的基本面必须换口径评（扣非、成长），不能拿工业尺子量。
+     */
+    fun isFinancialOrg(orgType: String?): Boolean {
+        val type = orgType ?: return false
+        return type.contains("银行") || type.contains("保险") ||
+            type.contains("证券") || type.contains("金融")
+    }
 
     fun analyze(input: Input): FundamentalResult {
         val notes = mutableListOf<String>()
@@ -365,13 +379,16 @@ object Fundamentals {
         val ttm = ttmOf(input.periods)
         val balance = input.balance
         val shares = input.totalShares.takeIf { it > 0 }
+        // 金融企业不参与工业口径的现金/负债检查：数据缺失时本就拿不到，
+        // 数据碰巧拿到时也会把「发债+客户资金」误判成存贷双高，直接置空走中性分。
+        val financial = isFinancialOrg(input.orgType)
 
         val deductRatio = ratio(ttm?.deductNetProfit, ttm?.netProfit)
         val grossMargin = ttm?.let { ratio(it.revenue - it.operateCost, it.revenue)?.times(100) }
         val netMargin = ttm?.let { ratio(it.netProfit, it.revenue)?.times(100) }
-        val ocfToProfit = ttm?.let { ratio(it.operatingCashFlow, it.netProfit) }
-        val cashToRevenue = ttm?.let { ratio(it.salesCash, it.revenue) }
-        val netCashRatio = if (balance != null && balance.parentEquity > 0) {
+        val ocfToProfit = if (financial) null else ttm?.let { ratio(it.operatingCashFlow, it.netProfit) }
+        val cashToRevenue = if (financial) null else ttm?.let { ratio(it.salesCash, it.revenue) }
+        val netCashRatio = if (!financial && balance != null && balance.parentEquity > 0) {
             balance.netCash / balance.parentEquity
         } else {
             null
@@ -387,7 +404,7 @@ object Fundamentals {
             referenceDate = input.today.ifBlank { input.valuations.lastOrNull()?.date.orEmpty() },
         )
         val financialDate = listOfNotNull(input.periods.maxByOrNull { it.date }?.date, balance?.date).minOrNull()
-        val risks = riskScan(input, deductRatio, ocfToProfit, cashToRevenue, netCashRatio, roe)
+        val risks = riskScan(input, deductRatio, ocfToProfit, cashToRevenue, netCashRatio, roe, financial)
             .map { it.copy(evidenceDate = financialDate) }.toMutableList()
         // 公告里的重大风险（立案、处罚、冻结）直接进风险清单；提示类只留在公告一节，避免刷屏。
         governance.filter { it.level == RiskLevel.ALERT }.forEach {
@@ -400,7 +417,7 @@ object Fundamentals {
                 risks.add(RiskItem(RiskLevel.WATCH, "股东结构风险：${shareholder.conclusion}"))
             }
         }
-        val score = scoreOf(quarters, deductRatio, ocfToProfit, cashToRevenue, netCashRatio, balance)
+        val score = scoreOf(quarters, deductRatio, ocfToProfit, cashToRevenue, netCashRatio, if (financial) null else balance)
 
         if (quarters.size < QUARTERS) {
             notes.add("可用单季只有 ${quarters.size} 个，同比点不足，成长性仅供参考")
@@ -562,15 +579,25 @@ object Fundamentals {
                 if (consecutiveQuarter(prev, period)) pick(period) - pick(prev!!) else pick(period)
             }.takeLast(count).sum()
 
+        // 现金三项整段缺失（金融企业）时返回 null，由评分侧按「缺数据」给中性分。
+        fun ttmNullable(pick: (FinancialPeriod) -> Double?): Double? {
+            val parts = sorted.mapIndexed { index, period ->
+                val prev = sorted.getOrNull(index - 1)
+                val value = pick(period) ?: return@mapIndexed null
+                if (consecutiveQuarter(prev, period)) value - (pick(prev!!) ?: return@mapIndexed null) else value
+            }.takeLast(count)
+            return if (parts.any { it == null }) null else parts.filterNotNull().sum()
+        }
+
         return FinancialPeriod(
             date = sorted.last().date,
             revenue = ttm { it.revenue },
             operateCost = ttm { it.operateCost },
             netProfit = ttm { it.netProfit },
             deductNetProfit = ttm { it.deductNetProfit },
-            operatingCashFlow = ttm { it.operatingCashFlow },
-            salesCash = ttm { it.salesCash },
-            capex = ttm { it.capex },
+            operatingCashFlow = ttmNullable { it.operatingCashFlow },
+            salesCash = ttmNullable { it.salesCash },
+            capex = ttmNullable { it.capex },
         )
     }
 
@@ -583,11 +610,13 @@ object Fundamentals {
         cashToRevenue: Double?,
         netCashRatio: Double?,
         roe: Double?,
+        financial: Boolean = false,
     ): List<RiskItem> {
         val items = mutableListOf<RiskItem>()
         val balance = input.balance
 
-        if (balance != null) {
+        // 金融企业的发债与客户资金天然「存贷双高」、收现比/净现金口径全不适用，整块跳过。
+        if (!financial && balance != null) {
             val equity = balance.parentEquity
             if (equity > 0) {
                 val goodwillRatio = balance.goodwill / equity
