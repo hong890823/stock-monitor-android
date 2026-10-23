@@ -47,6 +47,9 @@ data class TradeAvailability(
      * 不会到下一交易日自动解锁，所以提醒文案要分开说。
      */
     val untrackedQuantity: Double = 0.0,
+    val ledgerConsistent: Boolean = true,
+    val actionableSellableToday: Double = 0.0,
+    val actionableNextTradingDaySellable: Double = 0.0,
 )
 
 data class TradeApplicationResult(
@@ -174,9 +177,12 @@ object TradeLotLedger {
         portfolio: Portfolio,
         record: TradeRecord,
     ): TradeApplicationResult {
-        val updatedBook = sell(book, record)
-        val position = portfolio.positions.firstOrNull { it.code == record.code }
+        val positionBefore = portfolio.positions.firstOrNull { it.code == record.code }
             ?: throw IllegalStateException("交易股票不在持仓列表中")
+        val availability = availability(book, portfolio.positions, record.date, record.code)
+        check(availability.ledgerConsistent) { "持仓数量与交易批次不一致，暂不可卖出" }
+        val updatedBook = sell(book, record)
+        val position = positionBefore
         check(position.quantity + EPSILON >= record.quantity) { "卖出数量超过当前持仓" }
         return TradeApplicationResult(
             book = updatedBook,
@@ -204,6 +210,8 @@ object TradeLotLedger {
             val untracked = maxOf(0.0, position.quantity - lots.sumOf { it.quantity })
             val sellable = minOf(position.quantity, trackedSellable)
             val nextDay = minOf(position.quantity, trackedSellable + trackedLocked)
+            val ledgerConsistent = untracked <= EPSILON &&
+                kotlin.math.abs(position.quantity - lots.sumOf { it.quantity }) <= EPSILON
             TradeAvailability(
                 code = position.code,
                 totalQuantity = position.quantity,
@@ -211,6 +219,9 @@ object TradeLotLedger {
                 lockedToday = position.quantity - sellable,
                 nextTradingDaySellable = nextDay,
                 untrackedQuantity = untracked,
+                ledgerConsistent = ledgerConsistent,
+                actionableSellableToday = if (ledgerConsistent) sellable else 0.0,
+                actionableNextTradingDaySellable = if (ledgerConsistent) nextDay else 0.0,
             ).also {
                 check(untracked >= -EPSILON)
             }

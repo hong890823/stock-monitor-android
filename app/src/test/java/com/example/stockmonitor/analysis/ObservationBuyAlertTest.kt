@@ -3,6 +3,7 @@ package com.example.stockmonitor.analysis
 import com.example.stockmonitor.core.ObservationCandidate
 import com.example.stockmonitor.core.ObservationStage
 import com.example.stockmonitor.core.ObservationStrategy
+import com.example.stockmonitor.analysis.WatchlistBuyCandidatePool
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -84,5 +85,14 @@ class ObservationBuyAlertTest {
                 current = candidate(ObservationStage.BUY_CANDIDATE),
             ),
         )
+    }
+
+    @Test
+    fun watchlistBuyAlertUsesWatchlistSourceInsteadOfStrategyLabel() {
+        val confirmed = candidate(ObservationStage.BUY_CANDIDATE).copy(
+            source = WatchlistBuyCandidatePool.SOURCE,
+        )
+
+        assertEquals("自选股", ObservationBuyAlert.body(confirmed).substringAfter("｜").substringBefore("｜"))
     }
 }

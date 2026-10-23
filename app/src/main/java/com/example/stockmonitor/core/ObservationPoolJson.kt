@@ -37,6 +37,7 @@ object ObservationPoolJson {
                         put("breakout_risk", JSONObject().apply {
                             put("risk", risk.risk)
                             put("reason", risk.reason)
+                            risk.breakoutReference?.let { put("breakout_reference", it) }
                         })
                     }
                     ObservationEvidenceJson.put(this, "supporting", item.evidence.supporting)
@@ -102,6 +103,8 @@ object ObservationPoolJson {
                         BreakoutRiskDecision(
                             risk = risk.optBoolean("risk", false),
                             reason = risk.optString("reason"),
+                            breakoutReference = risk.optDouble("breakout_reference", Double.NaN)
+                                .takeUnless { it.isNaN() },
                         )
                     },
                 )

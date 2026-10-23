@@ -1305,6 +1305,24 @@ class IntradayTacticsTest {
         assertEquals(2, IntradayTactics.confirmationRounds(IntradaySignalType.PULLBACK))
     }
 
+    @Test
+    fun pureObservationSignalsSkipNotificationConfirmation() {
+        listOf(
+            IntradaySignalType.TREND_WATCH,
+            IntradaySignalType.TIMEFRAME_WATCH,
+            IntradaySignalType.RECLAIM_WATCH,
+            IntradaySignalType.T_SELL_DEFERRED,
+            IntradaySignalType.T_HOLD,
+            IntradaySignalType.T_HOLD_CAUTION,
+            IntradaySignalType.T_TREND_HOLD,
+            IntradaySignalType.HIGH_CONSOLIDATION,
+            IntradaySignalType.SECOND_WAVE_CANDIDATE,
+        ).forEach { type ->
+            assertTrue(type.name, type.isPureObservation)
+            assertEquals(type.name, 0, IntradayTactics.confirmationRounds(type))
+        }
+    }
+
     // ── 环境改写：塌陷期买入侧一律收紧，减仓侧不动 ───────────────────────────
 
     @Test

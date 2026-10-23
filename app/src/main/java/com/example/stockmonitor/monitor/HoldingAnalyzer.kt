@@ -25,6 +25,7 @@ import com.example.stockmonitor.analysis.TurnoverContext
 import com.example.stockmonitor.analysis.TurnoverTracker
 import com.example.stockmonitor.core.BoardTagCache
 import com.example.stockmonitor.core.DayBar
+import com.example.stockmonitor.core.DailyRiskMetrics
 import com.example.stockmonitor.core.EastMoneyClient
 import com.example.stockmonitor.core.FundamentalsClient
 import com.example.stockmonitor.core.Portfolio
@@ -116,7 +117,7 @@ object HoldingAnalyzer {
             val bars = ObservationEntryPolicy.withLiveBar(history, live).takeIf { it.isNotEmpty() } ?: history
             EventCoil.evaluate(announcements, bars, today)
         }
-        return PortfolioAnalysis.evaluate(
+        val result = PortfolioAnalysis.evaluate(
             position,
             technical,
             live,
@@ -142,6 +143,15 @@ object HoldingAnalyzer {
             holdingTContext = tContext,
             holdingTObservation = tObservation,
             eventCoil = eventCoil,
+        )
+        val dailyMetrics = DailyRiskMetrics.fromBars(
+            history,
+            history.lastOrNull()?.date ?: live.quoteDate?.substringBefore(' ') ?: today,
+        )
+        return result.copy(
+            analysisDate = live.quoteDate?.substringBefore(' ') ?: today,
+            fiveDayNoNewLow = dailyMetrics.fiveDayNoNewLow,
+            closesBelowMa20 = dailyMetrics.closesBelowMa20,
         )
     }
 

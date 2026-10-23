@@ -21,13 +21,39 @@ object ObservationBuyAlert {
     fun body(candidate: ObservationCandidate): String = buildString {
         append(candidate.code)
         append("｜")
-        append(candidate.strategy.label)
+        append(
+            if (candidate.source == WatchlistBuyCandidatePool.SOURCE) {
+                "自选股"
+            } else {
+                candidate.strategy.label
+            },
+        )
         append("｜现价")
         append(String.format(Locale.CHINA, "%.2f", candidate.lastPrice))
         append("｜")
         append(candidate.reason.ifBlank { "${ObservationStage.BUY_CANDIDATE.label}，请核对执行价格与仓位" })
         candidate.stopPrice?.let {
             append("｜止损参考")
+            append(String.format(Locale.CHINA, "%.2f", it))
+        }
+    }
+
+    fun body(candidate: ObservationCandidate, guardedText: String): String = buildString {
+        append(candidate.code)
+        append("｜")
+        append(
+            if (candidate.source == WatchlistBuyCandidatePool.SOURCE) {
+                "自选股"
+            } else {
+                candidate.strategy.label
+            },
+        )
+        append("｜现价")
+        append(String.format(Locale.CHINA, "%.2f", candidate.lastPrice))
+        append("｜")
+        append(guardedText)
+        candidate.stopPrice?.let {
+            append("｜失效参考")
             append(String.format(Locale.CHINA, "%.2f", it))
         }
     }

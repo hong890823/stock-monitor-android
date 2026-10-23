@@ -1,6 +1,8 @@
 package com.example.stockmonitor
 
+import com.example.stockmonitor.analysis.HoldingExitStage
 import com.example.stockmonitor.analysis.StockAlertScope
+import com.example.stockmonitor.analysis.StockAlertType
 import com.example.stockmonitor.core.Position
 import org.junit.Assert.*
 import org.junit.Test
@@ -25,5 +27,29 @@ class StockAlertScopeTest {
         assertTrue(position.code in StockAlertScope.heldCodes(listOf(position)))
         assertFalse(position.code in StockAlertScope.heldCodes(listOf(position.copy(quantity = 0.0))))
         assertTrue(StockAlertScope.heldCodes(emptyList()).isEmpty())
+    }
+
+    @Test
+    fun nonHeldStocksOnlyReceiveConfirmedBuyAlerts() {
+        StockAlertType.entries.filter { it != StockAlertType.CONFIRMED_BUY }.forEach { type ->
+            assertFalse(type.name, StockAlertScope.shouldNotify(type, held = false))
+        }
+        assertTrue(StockAlertScope.shouldNotify(StockAlertType.CONFIRMED_BUY, held = false))
+    }
+
+    @Test
+    fun heldStocksKeepAllAlertTypes() {
+        StockAlertType.entries.forEach { type ->
+            assertTrue(type.name, StockAlertScope.shouldNotify(type, held = true))
+        }
+    }
+
+    @Test
+    fun deepLossStateDoesNotCreateStandalonePortfolioNotification() {
+        assertTrue(StockAlertScope.shouldNotifyPortfolioSignal("减仓风险", HoldingExitStage.REDUCE))
+        assertTrue(StockAlertScope.shouldNotifyPortfolioSignal("减仓风险", HoldingExitStage.EXIT))
+        assertFalse(StockAlertScope.shouldNotifyPortfolioSignal("减仓风险", HoldingExitStage.NOTICE))
+        assertFalse(StockAlertScope.shouldNotifyPortfolioSignal("减仓风险", HoldingExitStage.DEEP_T))
+        assertFalse(StockAlertScope.shouldNotifyPortfolioSignal("趋势转弱观察", null))
     }
 }

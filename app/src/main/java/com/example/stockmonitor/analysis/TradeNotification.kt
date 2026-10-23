@@ -1,12 +1,19 @@
 package com.example.stockmonitor.analysis
 
+import com.example.stockmonitor.core.TradeActionEligibility
+import com.example.stockmonitor.core.TradeActionGuard
+import com.example.stockmonitor.core.TradeActionPermissions
+import com.example.stockmonitor.core.GuardedTradeAction
+import com.example.stockmonitor.core.GuardedActionLevel
+import com.example.stockmonitor.core.IntradayVolumeContext
+import com.example.stockmonitor.core.TimeframeEvidence
 import java.util.Locale
 import kotlin.math.floor
 
 object TradeNotification {
     fun sellQuantity(quantity: Double, exit: Boolean): Double {
         if (!quantity.isFinite() || quantity <= 0) return 0.0
-        return if (exit) floor(quantity) else floor(quantity / 3.0 / 100.0) * 100.0
+        return if (exit) floor(quantity / 100.0) * 100.0 else floor(quantity / 3.0 / 100.0) * 100.0
     }
 
     fun sellQuantity(totalQuantity: Double, sellableQuantity: Double, exit: Boolean): Double {
@@ -14,7 +21,7 @@ object TradeNotification {
             return 0.0
         }
         val capped = minOf(totalQuantity, sellableQuantity)
-        return if (exit) floor(capped) else floor(capped / 3.0 / 100.0) * 100.0
+        return if (exit) floor(capped / 100.0) * 100.0 else floor(capped / 3.0 / 100.0) * 100.0
     }
 
     /**
@@ -61,17 +68,22 @@ object TradeNotification {
             return lockBlocked(lockedToday, untrackedQuantity)
         }
         val shares = sellQuantity(quantity, sellableQuantity, exit)
-        if (shares <= 0) return if (quantity.isFinite() && quantity > 0 && !exit) {
-            "按1/3估算不足100股，不自动凑整卖出；请核对仓位后处理。"
-        } else {
-            "持仓数量无效，先核对持仓。"
+        if (shares <= 0) return when {
+            !quantity.isFinite() || quantity <= 0 -> "持仓数量无效，先核对持仓。"
+            exit -> "可卖不足100股，不生成零碎卖出；请核对持仓后处理。"
+            else -> "按1/3估算不足100股，不自动凑整卖出；请核对仓位后处理。"
         }
         if (lockedToday > 0.0) {
             val action = if (exit) "退出目标约${shares.toLong()}股" else "先卖约${shares.toLong()}股"
-            return "原有可卖${qty(sellableQuantity)}股，$action（可卖仓位1/3向下取整）；" +
+            val sizing = if (exit) "（按100股整手向下取整）" else "（可卖仓位1/3且按100股向下取整）"
+            return "原有可卖${qty(sellableQuantity)}股，$action$sizing；" +
                 lockTail(lockedToday, untrackedQuantity)
         }
-        val action = if (exit) "退出目标约${shares.toLong()}股，可分笔" else "先卖约${shares.toLong()}股（持仓1/3向下取整）"
+        val action = if (exit) {
+            "退出目标约${shares.toLong()}股，可分笔（按100股整手向下取整）"
+        } else {
+            "先卖约${shares.toLong()}股（可卖仓位1/3且按100股向下取整）"
+        }
         return "$action；按录入持仓估算，以实际可卖数量为限，T+1/跌停可能无法成交。"
     }
 
@@ -93,12 +105,10 @@ object TradeNotification {
             HoldingExitStage.HIGH_REDUCE -> "高位转弱，${sale(totalQuantity, sellableQuantity, lockedToday, untrackedQuantity)}暂停接回。"
             HoldingExitStage.EXIT -> "退出优先，${sale(totalQuantity, sellableQuantity, lockedToday, untrackedQuantity, exit = true)}"
             HoldingExitStage.DEEP_T -> "先不补仓，等反弹再评估做T；持续走弱需重新评估退出。"
-            HoldingExitStage.NOTICE -> {
-                val shares = sellQuantity(totalQuantity, sellableQuantity, exit = false)
-                val sizing = if (shares > 0) "；若减可先减约${shares.toLong()}股" else ""
-                // 短信口径不带基本面长文（见 TradeNotificationTest）：三项缓释的完整理由在持仓报告里。
-                "破位风险提示：价格处低位、仓位较轻，去留自定$sizing。"
-            }
+            // 短信口径不带基本面长文（见 TradeNotificationTest）：三项缓释的完整理由在持仓报告里。
+            // NOTICE 只报告风险事实，不生成确定性卖量。
+            HoldingExitStage.NOTICE ->
+                "破位风险提示：价格处低位、仓位较轻，去留自定。"
         }
         return "$action 现价${price(price)}，支撑${price(support)}。"
     }
@@ -108,98 +118,117 @@ object TradeNotification {
         sellableQuantity: Double = result.quantity,
         lockedToday: Double = 0.0,
         untrackedQuantity: Double = 0.0,
-    ): String? = result.notificationExitDecision?.let {
-        exit(it.stage, result.quantity, result.price, result.support, sellableQuantity, lockedToday, untrackedQuantity)
+        ledgerConsistent: Boolean,
+        tradeDate: String,
+        evidence: TimeframeEvidence? = null,
+        volume: IntradayVolumeContext? = null,
+    ): GuardedTradeAction? = result.notificationExitDecision?.let {
+        val guarded = TradeActionGuard.evaluate(
+            intent = when (it.stage) {
+                HoldingExitStage.EXIT -> "exit_position"
+                HoldingExitStage.HIGH_REDUCE -> "high_reduce"
+                HoldingExitStage.REDUCE,
+                -> "risk_reduce"
+                else -> "hold"
+            },
+            evidence = evidence,
+            volume = volume,
+            eligibility = TradeActionEligibility(
+                totalQuantity = result.quantity,
+                actionableSellableQuantity = sellableQuantity,
+                todayLockedQuantity = lockedToday,
+                untrackedQuantity = untrackedQuantity,
+                ledgerConsistent = ledgerConsistent,
+            ),
+            tradeDate = tradeDate,
+        )
+        guarded
     }
 
     fun intraday(
         input: IntradayTactics.Input,
         signal: IntradaySignal,
         timeframeReason: String? = null,
-    ): String {
-        val context = trendContext(input)
-        val prefix = if (context.isEmpty()) "" else "$context；"
-        if (signal.type == IntradaySignalType.TIMEFRAME_WATCH) {
+    ): String = intradayGuarded(input, signal, timeframeReason).text
+
+    fun intradayGuarded(
+        input: IntradayTactics.Input,
+        signal: IntradaySignal,
+        timeframeReason: String? = null,
+    ): GuardedTradeAction {
+        if (signal.type.isPureObservation) {
             val reason = timeframeReason?.trim()?.takeIf { it.isNotBlank() } ?: "15/30分钟条件待确认"
-            return "$prefix$reason。当前仅观察，不执行买入、做T或普通止盈/减仓。现价${price(input.price)}。"
-        }
-        val stage = when (signal.type) {
-            IntradaySignalType.REDUCE_POSITION -> HoldingExitStage.REDUCE
-            IntradaySignalType.HIGH_REDUCE_POSITION -> HoldingExitStage.HIGH_REDUCE
-            IntradaySignalType.EXIT_POSITION -> HoldingExitStage.EXIT
-            IntradaySignalType.BREAK_NOTICE -> HoldingExitStage.NOTICE
-            IntradaySignalType.BREAK_SUPPORT -> if (DeepLossPolicy.isDeepLoss(input.cost, input.price, input.atrPct) &&
-                input.fundamentalHealth?.level != HealthLevel.ALERT) HoldingExitStage.DEEP_T else HoldingExitStage.WATCH
-            else -> null
-        }
-        val support = input.breakObservation?.support ?: input.support
-        if (stage != null) {
-            return prefix + exit(
-                stage = stage,
-                totalQuantity = input.quantity,
-                price = input.price,
-                support = support,
-                sellableQuantity = input.sellableQuantity ?: input.quantity,
-                lockedToday = input.lockedQuantity,
-                untrackedQuantity = input.untrackedQuantity,
+            return GuardedTradeAction(
+                GuardedActionLevel.OBSERVATION,
+                com.example.stockmonitor.core.GuardedAction.HOLD,
+                "仅观察：$reason；当前不执行买入、做T或普通止盈/减仓。",
             )
         }
-        val action = when (signal.type) {
-            IntradaySignalType.BREAKOUT_REVERSAL_RISK ->
-                if (input.quantity > 0) {
-                    "突破延续后出现下杀风险，优先减仓或退出，暂停接回和做T。"
-                } else {
-                    "突破延续后出现下杀风险，禁止追买，等待重新站回并确认。"
-                }
-            IntradaySignalType.BOTTOM_REVERSAL ->
-                "底部反转观察，最多按初始仓位25%轻仓试错；禁止正常加仓和做T，跌破${price(support)}则窗口失效。"
-            IntradaySignalType.HIGH_CONSOLIDATION ->
-                "高位整理，只保留底仓或观察；突破并确认前不买入、接回或做T。"
-            IntradaySignalType.SECOND_WAVE_CANDIDATE ->
-                "二波候选只观察；突破${price(input.resistance)}并获量能确认前不买入、接回或做T。"
-            IntradaySignalType.SECOND_WAVE ->
-                "二波突破确认后才可评估试仓；不追高加仓，跌破${price(support)}则结构失效。"
-            IntradaySignalType.T_SELL -> {
-                val sizing = IntradayTactics.suggestedTSellQuantity(input)
-                val action = when {
-                    input.sellableQuantity == 0.0 && input.lockedQuantity > 0.0 ->
-                        lockBlocked(input.lockedQuantity, input.untrackedQuantity)
-                    sizing.quantity > 0 -> "冲高回落，做T先减约${sizing.quantity.toLong()}股（${sizing.note}），接回等企稳。"
-                    sizing.liquidityBlocked -> "冲高回落，但成交额不足以支持机动仓交易，先观察。"
-                    else -> "冲高回落，机动仓不足一手，先观察。"
-                }
-                "$action"
-            }
-            IntradaySignalType.EXIT_WINDOW -> "反弹至压力${price(input.resistance)}，${sale(
-                input.quantity,
-                input.sellableQuantity ?: input.quantity,
-                input.lockedQuantity,
-                input.untrackedQuantity,
-            )}暂不接回。"
-            IntradaySignalType.T_BUY, IntradaySignalType.RECLAIM_SUPPORT ->
-                if (input.trendAssessment?.allowsTBuy == false || input.trendAssessment?.major == MajorTrend.DOWN) {
-                    "大趋势不支持普通买入、加仓、接回或做T，当前只保留风险处置。"
-                } else {
-                    "可评估补仓或接回：须有真实卖出记录，不超过未接回股数及可用资金；计入费用，" +
-                        "若重新跌破 ${price(support)}，补仓窗口失效并停止执行。"
-                }
-            IntradaySignalType.RECLAIM_WATCH -> "先观察，不加仓、不接回；站回${price(support)}后仍待企稳确认。"
-            IntradaySignalType.T_TREND_HOLD, IntradaySignalType.T_HOLD -> "先持有，暂缓做T；尚未确认连续回落，不追高。"
-            IntradaySignalType.T_HOLD_CAUTION -> "先持有，不追高；上涨持续性待确认，回落后再评估做T。"
-            IntradaySignalType.BREAKOUT -> "先持有，不追高；回踩${price(input.entrySetup?.priorHigh ?: input.resistance)}站稳再评估。"
-            IntradaySignalType.PULLBACK -> "回踩${price(support)}，先等止跌确认，不直接追买。"
-            else -> "先观察，不追加仓位。"
+        if (signal.holdingExitStage in setOf(HoldingExitStage.WATCH, HoldingExitStage.DEEP_T)) {
+            return GuardedTradeAction(
+                GuardedActionLevel.OBSERVATION,
+                com.example.stockmonitor.core.GuardedAction.HOLD,
+                "仅观察：${signal.body}",
+            )
         }
-        return "$prefix$action 现价${price(input.price)}。"
-    }
-
-    private fun trendContext(input: IntradayTactics.Input): String {
-        val trend = input.trendAssessment?.let { "${it.major.label}/${it.shortTerm.label}" }
-        val box = input.boxRange?.takeIf { it.state != BoxRangeState.NOT_BOX }?.let { "箱体:${it.state.label}" }
-        val high = input.highPosition
-            ?.takeIf { it.phase != HighPositionPhase.NONE }
-            ?.let { "高位:${it.phase.label}" }
-        return listOfNotNull(trend, box, high).joinToString("｜")
+        if (signal.type == IntradaySignalType.BREAK_NOTICE ||
+            signal.holdingExitStage == HoldingExitStage.NOTICE
+        ) {
+            return GuardedTradeAction(
+                GuardedActionLevel.RISK_FACT,
+                com.example.stockmonitor.core.GuardedAction.HOLD,
+                "风险观察：破位风险提示只报告风险，不生成确定性卖量。",
+            )
+        }
+        val intent = when (signal.type) {
+            IntradaySignalType.REDUCE_POSITION,
+            IntradaySignalType.BREAK_SUPPORT,
+            IntradaySignalType.BREAKOUT_REVERSAL_RISK -> "risk_reduce"
+            IntradaySignalType.HIGH_REDUCE_POSITION -> "high_reduce"
+            IntradaySignalType.EXIT_POSITION -> "exit_position"
+            IntradaySignalType.EXIT_WINDOW -> "normal_exit"
+            IntradaySignalType.T_SELL -> "t_sell"
+            IntradaySignalType.RECLAIM_SUPPORT, IntradaySignalType.T_BUY -> "t_buy"
+            IntradaySignalType.BREAKOUT,
+            IntradaySignalType.PULLBACK,
+            IntradaySignalType.BOTTOM_REVERSAL,
+            IntradaySignalType.SECOND_WAVE -> "buy"
+            else -> "hold"
+        }
+        val reentry = intent == "t_buy"
+        val capacity = if (reentry) input.reentryCapacityQuantity else IntradayTactics.buyCapacityQuantity(input)
+        val blocked = mutableListOf<String>()
+        if (input.weakEnv) blocked += "大盘或板块环境转弱"
+        if (input.fundamentalHealth?.level == HealthLevel.ALERT) blocked += "基本面亮红灯"
+        if (input.highPosition?.allowBuy == false) blocked += "高位结构不允许新增买入"
+        if (input.trendAssessment?.major == MajorTrend.DOWN) blocked += "大趋势向下"
+        if (reentry && capacity <= 0.0) blocked += "缺少真实卖出后未接回数量"
+        val guarded = TradeActionGuard.evaluate(
+            intent = intent,
+            evidence = input.timeframeEvidence,
+            volume = input.volumeContext,
+            eligibility = TradeActionEligibility(
+                totalQuantity = input.quantity,
+                actionableSellableQuantity = input.sellableQuantity ?: 0.0,
+                todayLockedQuantity = input.lockedQuantity,
+                untrackedQuantity = input.untrackedQuantity,
+                buyCapacityQuantity = capacity,
+                ledgerConsistent = input.ledgerConsistent,
+            ),
+            tradeDate = input.tradeDate,
+            invalidationPrice = input.entrySetup?.stopPrice
+                ?: input.breakObservation?.exitPrice
+                ?: input.support.takeIf { it.isFinite() && it > 0.0 }
+                ?: 0.0,
+            permissions = TradeActionPermissions(
+                allowBuy = blocked.isEmpty(),
+                allowAdd = blocked.isEmpty(),
+                allowReentry = blocked.isEmpty(),
+                allowT = blocked.isEmpty(),
+                blockers = blocked,
+            ),
+        )
+        return guarded
     }
 
     private fun price(value: Double): String = if (value.isFinite() && value > 0) {

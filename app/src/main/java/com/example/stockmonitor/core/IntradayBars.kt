@@ -1,5 +1,6 @@
 package com.example.stockmonitor.core
 
+import java.time.LocalDateTime
 import org.json.JSONArray
 
 enum class MinuteTrend {
@@ -16,6 +17,7 @@ data class IntradayBar(
     val low: Double,
     val close: Double,
     val volume: Double,
+    val completed: Boolean = true,
 ) {
     val valid: Boolean
         get() = timestamp.isNotBlank() &&
@@ -26,7 +28,7 @@ data class IntradayBar(
 
 data class IntradayBarWindow(val bars: List<IntradayBar>) {
     val complete: Boolean
-        get() = bars.size >= 2 && bars.all { it.valid } &&
+        get() = bars.size >= 2 && bars.all { it.valid && it.completed } &&
             bars.zipWithNext().all { (previous, current) -> previous.timestamp < current.timestamp }
 
     val trend: MinuteTrend
@@ -48,6 +50,17 @@ data class IntradayBarWindow(val bars: List<IntradayBar>) {
         require(limit > 0) { "K线数量必须大于0" }
         val updated = bars.filterNot { it.timestamp == bar.timestamp } + bar
         return IntradayBarWindow(updated.sortedBy { it.timestamp }.takeLast(limit))
+    }
+
+    fun completedAt(now: LocalDateTime, quoteDate: String?, minutes: Int): IntradayBarWindow {
+        val latest = TimeframeEvidence.latestCompletedSlot(now, minutes, quoteDate) ?: return IntradayBarWindow(emptyList())
+        return IntradayBarWindow(bars.filter { it.valid && it.completed && it.timestamp <= latest })
+    }
+
+    fun withCompletionState(now: LocalDateTime, quoteDate: String?, minutes: Int): IntradayBarWindow {
+        val latest = TimeframeEvidence.latestCompletedSlot(now, minutes, quoteDate)
+            ?: return IntradayBarWindow(bars.map { it.copy(completed = false) })
+        return IntradayBarWindow(bars.map { it.copy(completed = it.timestamp <= latest) })
     }
 }
 

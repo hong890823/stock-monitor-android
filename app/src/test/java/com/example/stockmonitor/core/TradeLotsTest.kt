@@ -256,4 +256,40 @@ class TradeLotsTest {
         assertEquals(0.0, availability.lockedToday, 0.001)
         assertEquals(0.0, availability.untrackedQuantity, 0.001)
     }
+
+    @Test
+    fun portfolioAndLotMismatchBlocksAllActionableSellableQuantity() {
+        val book = TradeLotLedger.migrate(listOf(position(500.0)))
+
+        val availability = TradeLotLedger.availability(
+            book,
+            listOf(position(800.0)),
+            "2026-10-23",
+        ).single()
+
+        assertEquals(500.0, availability.sellableToday, 0.001)
+        assertEquals(0.0, availability.actionableSellableToday, 0.001)
+        assertEquals(0.0, availability.actionableNextTradingDaySellable, 0.001)
+        assertEquals(false, availability.ledgerConsistent)
+    }
+
+    @Test
+    fun sellToPortfolioRejectsWhenPortfolioQuantityAndLotsDoNotMatch() {
+        val book = TradeLotLedger.migrate(listOf(position(500.0)))
+        val portfolio = Portfolio(positions = mutableListOf(position(800.0)))
+        val sell = TradeRecord(
+            id = "sell-inconsistent",
+            code = "sz000001",
+            name = "测试股",
+            side = TradeSide.SELL,
+            date = "2026-10-23",
+            quantity = 100.0,
+            price = 11.0,
+            source = TradeSource.MANUAL,
+        )
+
+        assertThrows(IllegalStateException::class.java) {
+            TradeLotLedger.sellToPortfolio(book, portfolio, sell)
+        }
+    }
 }

@@ -14,7 +14,8 @@ object MonitoringCopy {
     fun rules(dropAlertPct: Double = 5.0): List<Rule> = listOf(
         Rule(
             "监控范围",
-            "持仓：跌幅、破位、买卖点和做T；大盘：风险；观察池：只提醒进入“买点已确认”",
+            "持仓：跌幅、破位、买卖点和做T；大盘：风险；自选股和观察池：只提醒“买点已确认”，" +
+                "不推送反弹、封板、炸板或突破风险",
         ),
         Rule(
             "触发限制",

@@ -1,14 +1,14 @@
 package com.example.stockmonitor
 
 import com.example.stockmonitor.analysis.LimitReport
-import com.example.stockmonitor.analysis.ObservationCandidate
 import com.example.stockmonitor.analysis.ObservationEligibility
 import com.example.stockmonitor.analysis.ObservationSection
-import com.example.stockmonitor.analysis.ObservationStage
-import com.example.stockmonitor.analysis.ObservationStrategy
 import com.example.stockmonitor.core.FundFlow
 import com.example.stockmonitor.core.LimitDataSource
 import com.example.stockmonitor.core.LimitStock
+import com.example.stockmonitor.core.ObservationCandidate
+import com.example.stockmonitor.core.ObservationStage
+import com.example.stockmonitor.core.ObservationStrategy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test

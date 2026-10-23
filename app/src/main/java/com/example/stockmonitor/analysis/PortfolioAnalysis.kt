@@ -59,6 +59,9 @@ data class PositionResult(
     val rhythm: AdaptiveRhythmDecision? = null,
     val impulse: ImpulseContext? = null,
     val fundFlowScoreDelta: Int = 0,
+    val analysisDate: String = "",
+    val fiveDayNoNewLow: Boolean? = null,
+    val closesBelowMa20: Int = 0,
 ) {
     val intradayScore: Int
         get() = score - fundFlowScoreDelta

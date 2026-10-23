@@ -6,7 +6,7 @@ class IntradaySignalState(
 ) {
     private data class PendingSignal(val type: IntradaySignalType, val rounds: Int)
 
-    private val activeByCode = mutableMapOf<String, IntradaySignalType>()
+    private val activeByCode = mutableMapOf<String, String>()
     private val pendingByCode = mutableMapOf<String, PendingSignal>()
     private val lastAtByKey = mutableMapOf<String, Long>()
     private val countByCode = mutableMapOf<String, Int>()
@@ -47,20 +47,35 @@ class IntradaySignalState(
         return true
     }
 
-    fun canEmit(code: String, type: IntradaySignalType, nowMs: Long, risk: Boolean): Boolean {
-        if (activeByCode[code] == type) return false
+    fun canEmit(
+        code: String,
+        type: IntradaySignalType,
+        nowMs: Long,
+        risk: Boolean,
+        riskStage: Int = 0,
+    ): Boolean {
+        if (activeByCode[code] == activeKey(type, riskStage)) return false
         if (risk) return true
         val key = signalKey(code, type)
         return nowMs - (lastAtByKey[key] ?: 0L) >= cooldownMs &&
             (countByCode[code] ?: 0) < maxPerDay
     }
 
-    fun commit(code: String, type: IntradaySignalType, nowMs: Long, risk: Boolean) {
-        activeByCode[code] = type
+    fun commit(
+        code: String,
+        type: IntradaySignalType,
+        nowMs: Long,
+        risk: Boolean,
+        riskStage: Int = 0,
+    ) {
+        activeByCode[code] = activeKey(type, riskStage)
         pendingByCode.remove(code)
         lastAtByKey[signalKey(code, type)] = nowMs
         if (!risk) countByCode[code] = (countByCode[code] ?: 0) + 1
     }
 
     private fun signalKey(code: String, type: IntradaySignalType): String = "$code|${type.name}"
+
+    private fun activeKey(type: IntradaySignalType, riskStage: Int): String =
+        if (riskStage > 0) "${type.name}|$riskStage" else type.name
 }

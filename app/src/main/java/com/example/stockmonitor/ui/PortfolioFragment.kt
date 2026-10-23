@@ -29,10 +29,11 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             val portfolio = store.portfolio
             val tradeBook = store.tradeBook
             val tradeAvailability = TradeLotLedger.availability(tradeBook, portfolio.positions, java.time.LocalDate.now().toString())
-            val sellableTotal = tradeAvailability.sumOf { it.sellableToday }
+            val sellableTotal = tradeAvailability.sumOf { it.actionableSellableToday }
             val lockedTotal = tradeAvailability.sumOf { it.lockedToday }
-            val nextDayTotal = tradeAvailability.sumOf { it.nextTradingDaySellable }
+            val nextDayTotal = tradeAvailability.sumOf { it.actionableNextTradingDaySellable }
             val untrackedTotal = tradeAvailability.sumOf { it.untrackedQuantity }
+            val ledgerInconsistent = tradeAvailability.any { !it.ledgerConsistent }
             val swingPlan = Repo.portfolioSwing?.validatedFor(portfolio)
             val holdingRowKeys = if (Repo.portfolioResults.isEmpty()) {
                 portfolio.positions.map { "portfolio:${it.code}" }
@@ -70,8 +71,14 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                 addKeyValue("监控股票", "${portfolio.positions.size} 只")
                 addKeyValue(
                     "T+1 可卖",
-                    "今日可卖 ${formatShares(sellableTotal)}｜今日锁定 ${formatShares(lockedTotal)}｜下一交易日 ${formatShares(nextDayTotal)}",
-                    note = if (untrackedTotal > 0) {
+                    if (ledgerInconsistent) {
+                        "账本不一致，当前可执行卖出 0 股｜今日锁定 ${formatShares(lockedTotal)}｜下一交易日 0 股"
+                    } else {
+                        "今日可卖 ${formatShares(sellableTotal)}｜今日锁定 ${formatShares(lockedTotal)}｜下一交易日 ${formatShares(nextDayTotal)}"
+                    },
+                    note = if (ledgerInconsistent) {
+                        "持仓数量与交易批次不一致，先在「记录交易」核对批次；暂不生成可执行卖量。"
+                    } else if (untrackedTotal > 0) {
                         "其中 ${formatShares(untrackedTotal)} 股未记录买入日期，不会自动解锁；在「记录交易」里补记"
                     } else {
                         null

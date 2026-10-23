@@ -138,6 +138,14 @@ class Store(
         get() = ObservationPoolJson.decode(prefs.getString(KEY_OBSERVATION_POOL, null))
         set(value) = prefs.edit().putString(KEY_OBSERVATION_POOL, ObservationPoolJson.encode(value)).apply()
 
+    /** 自选股的买点确认状态，独立于观察池保存，避免混入观察池列表和纸上交易。 */
+    var watchlistBuyCandidates: MutableList<ObservationCandidate>
+        get() = ObservationPoolJson.decode(prefs.getString(KEY_WATCHLIST_BUY_CANDIDATES, null))
+        set(value) =
+            prefs.edit()
+                .putString(KEY_WATCHLIST_BUY_CANDIDATES, ObservationPoolJson.encode(value))
+                .apply()
+
     var fundFlowHistory: Map<String, List<FundFlow>>
         get() = FundFlowHistoryJson.decode(prefs.getString(KEY_FUND_FLOW_HISTORY, null))
         set(value) = prefs.edit().putString(KEY_FUND_FLOW_HISTORY, FundFlowHistoryJson.encode(value)).apply()
@@ -470,6 +478,7 @@ class Store(
         private const val KEY_BOARD_GROUPS = "board_groups"
         private const val KEY_SCREEN_RESULT = "screen_result"
         private const val KEY_OBSERVATION_POOL = "observation_pool"
+        private const val KEY_WATCHLIST_BUY_CANDIDATES = "watchlist_buy_candidates"
         private const val KEY_FUND_FLOW_HISTORY = "fund_flow_history"
         private const val KEY_OBSERVATION_SNAPSHOTS = "observation_snapshots"
         private const val KEY_PAPER_TRADES = "paper_trades"

@@ -6,6 +6,7 @@ import com.example.stockmonitor.analysis.EntrySetupType
 import com.example.stockmonitor.analysis.HighPositionPhase
 import com.example.stockmonitor.analysis.PriceLocation
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -26,6 +27,7 @@ class BreakoutRiskPolicyTest {
 
         assertTrue(result.risk)
         assertTrue(result.reason.contains("下杀风险"))
+        assertEquals(11.0, result.breakoutReference!!, 0.001)
     }
 
     @Test

@@ -62,4 +62,17 @@ class IntradaySignalStateTest {
 
         assertTrue(state.canEmit("sh600000", IntradaySignalType.T_SELL, nowMs = 11_001, risk = false))
     }
+
+    @Test
+    fun riskStageEscalationRearmsWithoutRepeatingSameStage() {
+        val state = IntradaySignalState(cooldownMs = 10_000, maxPerDay = 8)
+        state.confirmed("sh600000", IntradaySignalType.BREAK_NOTICE, requiredRounds = 1)
+        state.commit("sh600000", IntradaySignalType.BREAK_NOTICE, nowMs = 1_000, risk = true, riskStage = 1)
+
+        assertFalse(state.canEmit("sh600000", IntradaySignalType.BREAK_NOTICE, nowMs = 1_001, risk = true, riskStage = 1))
+        assertTrue(state.canEmit("sh600000", IntradaySignalType.BREAK_NOTICE, nowMs = 1_001, risk = true, riskStage = 2))
+
+        state.commit("sh600000", IntradaySignalType.BREAK_NOTICE, nowMs = 1_002, risk = true, riskStage = 2)
+        assertFalse(state.canEmit("sh600000", IntradaySignalType.BREAK_NOTICE, nowMs = 1_003, risk = true, riskStage = 2))
+    }
 }

@@ -26,7 +26,8 @@ class MonitoringCopyTest {
     fun compactRulesDescribeActualAlertScopeAndLimits() {
         val text = MonitoringCopy.rules(0.8).joinToString("\n") { "${it.label}：${it.text}" }
         assertTrue(text.contains("持仓：跌幅、破位、买卖点和做T"))
-        assertTrue(text.contains("观察池：只提醒进入“买点已确认”"))
+        assertTrue(text.contains("自选股和观察池：只提醒“买点已确认”"))
+        assertTrue(text.contains("不推送反弹、封板、炸板或突破风险"))
         assertTrue(text.contains("交易时段"))
         assertTrue(text.contains("破位立即提醒"))
         assertTrue(text.contains("同类信号10分钟冷却"))

@@ -19,6 +19,7 @@ data class BreakoutRiskEvidence(
 data class BreakoutRiskDecision(
     val risk: Boolean,
     val reason: String,
+    val breakoutReference: Double? = null,
 )
 
 object BreakoutRiskPolicy {
@@ -31,7 +32,11 @@ object BreakoutRiskPolicy {
 
     fun evaluate(evidence: BreakoutRiskEvidence): BreakoutRiskDecision {
         if (!evidence.continuation || !evidence.price.isFinite() || evidence.price <= 0.0) {
-            return BreakoutRiskDecision(false, "不属于突破延续后的下杀风险")
+            return BreakoutRiskDecision(
+                false,
+                "不属于突破延续后的下杀风险",
+                evidence.breakoutReference,
+            )
         }
         val reference = evidence.breakoutReference?.takeIf { it.isFinite() && it > 0.0 }
         val belowReference = reference != null &&
@@ -47,7 +52,13 @@ object BreakoutRiskPolicy {
         val priceDamage = belowReference && expanded && (evidence.changePct <= -2.0 || rapidDrop)
         val riskLineBroken = riskLineBroken(evidence)
         val risk = riskLineBroken || priceDamage || (rapidDrop && expanded)
-        if (!risk) return BreakoutRiskDecision(false, "突破延续状态暂未出现下杀确认")
+        if (!risk) {
+            return BreakoutRiskDecision(
+                false,
+                "突破延续状态暂未出现下杀确认",
+                evidence.breakoutReference,
+            )
+        }
         val reason = when {
             riskLineBroken && useMa5Stop(evidence) -> "股价位置偏高或乖离较大，跌破5日线，突破延续转为下杀风险"
             riskLineBroken -> "股价位置不高，跌破20日线，突破延续转为下杀风险"
@@ -55,7 +66,7 @@ object BreakoutRiskPolicy {
             priceDamage -> "突破延续后跌破突破参考位，出现下杀风险"
             else -> "突破延续后从日内高点快速回落且量能放大，出现下杀风险"
         }
-        return BreakoutRiskDecision(true, reason)
+        return BreakoutRiskDecision(true, reason, evidence.breakoutReference)
     }
 
     fun continuation(

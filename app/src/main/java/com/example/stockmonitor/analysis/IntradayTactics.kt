@@ -1,6 +1,9 @@
 package com.example.stockmonitor.analysis
 
 import com.example.stockmonitor.core.DualTimeframeDecision
+import com.example.stockmonitor.core.DailyRiskContext
+import com.example.stockmonitor.core.IntradayVolumeContext
+import com.example.stockmonitor.core.TimeframeEvidence
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.floor
@@ -41,6 +44,19 @@ enum class IntradaySignalType(val label: String) {
             BREAK_NOTICE,
         )
 
+    val isPureObservation: Boolean
+        get() = this in setOf(
+            TREND_WATCH,
+            TIMEFRAME_WATCH,
+            RECLAIM_WATCH,
+            T_SELL_DEFERRED,
+            T_HOLD,
+            T_HOLD_CAUTION,
+            T_TREND_HOLD,
+            HIGH_CONSOLIDATION,
+            SECOND_WAVE_CANDIDATE,
+        )
+
     /** 只有会直接形成买入、普通止盈/减仓或做T动作的信号需要15/30分钟确认。 */
     val requiresDualTimeframe: Boolean
         get() = this in setOf(
@@ -56,7 +72,12 @@ enum class IntradaySignalType(val label: String) {
 }
 
 /** 一条盘中提醒：标题进通知栏，正文带数量建议或大体操作。 */
-data class IntradaySignal(val type: IntradaySignalType, val title: String, val body: String)
+data class IntradaySignal(
+    val type: IntradaySignalType,
+    val title: String,
+    val body: String,
+    val holdingExitStage: HoldingExitStage? = null,
+)
 
 /**
  * 盘中买卖点 / 做 T 的判定。
@@ -105,9 +126,12 @@ object IntradayTactics {
     /** 反弹到压力位附近的容差：距压力这么多以内算「反弹到位」（深套红灯的离场窗口）。 */
     const val EXIT_NEAR_PCT = 0.02
 
-    /** 风险信号立即提醒，其余信号连续两轮（约 30 秒）确认后再提醒。 */
-    fun confirmationRounds(type: IntradaySignalType): Int =
-        if (type.isRisk) 1 else 2
+    /** 风险信号立即提醒，可执行信号连续两轮（约 30 秒）确认；纯观察状态不进入通知。 */
+    fun confirmationRounds(type: IntradaySignalType): Int = when {
+        type.isPureObservation -> 0
+        type.isRisk -> 1
+        else -> 2
+    }
 
     /** 双周期不满足时只保留状态，不把原动作和股数继续带进通知。 */
     fun watchOnly(
@@ -120,7 +144,7 @@ object IntradayTactics {
             type = IntradaySignalType.TIMEFRAME_WATCH,
             title = "${signal.title}｜仅观察",
             body = "原触发：${signal.title}。${decision.reason}。" +
-                "当前仅观察，不执行买入、做T或普通止盈/减仓；风险卖出仍按15分钟风险信号即时提醒。",
+                "当前仅观察，不执行买入、做T或普通止盈/减仓；风险卖出仍按最新已完成15分钟证据评估。",
         )
     }
 
@@ -222,6 +246,14 @@ object IntradayTactics {
         val trendAssessment: TrendAssessment? = null,
         val boxRange: BoxRangeAssessment? = null,
         val highPosition: HighPositionDecision? = null,
+        /** 行情数据源交易日；缺失时统一动作守卫只允许观察。 */
+        val tradeDate: String? = null,
+        val dailyRiskContext: DailyRiskContext? = null,
+        val timeframeEvidence: TimeframeEvidence? = null,
+        val volumeContext: IntradayVolumeContext? = null,
+        val ledgerConsistent: Boolean = true,
+        /** 真实卖出后尚未接回的数量，用于接回/做T买入资格。 */
+        val reentryCapacityQuantity: Double = 0.0,
     ) {
         /** 大盘或板块任一塌陷。 */
         val collapse: Boolean
@@ -232,6 +264,23 @@ object IntradayTactics {
             get() = collapse ||
                 marketRegime == MarketRegime.WEAK ||
                 sectorRegime == MarketRegime.WEAK
+    }
+
+    fun buyCapacityQuantity(input: Input): Double {
+        if (input.totalCapital <= 0 || input.price <= 0 || input.initialEntryPct <= 0) return 0.0
+        input.entrySetup?.let { setup ->
+            if (setup.canBuy && setup.stopPrice != null) {
+                return TrendEntryStrategy.suggestedQuantity(
+                    price = input.price,
+                    stopPrice = setup.stopPrice,
+                    totalCapital = input.totalCapital,
+                    initialEntryPct = input.initialEntryPct,
+                    maxPositionPct = input.maxPositionPct,
+                    riskPerTradePct = input.riskPerTradePct,
+                )
+            }
+        }
+        return floor(input.totalCapital * input.initialEntryPct / 100.0 / input.price / LOT) * LOT
     }
 
     fun evaluate(input: Input): IntradaySignal? {
@@ -595,6 +644,7 @@ object IntradayTactics {
                 (if (input.price < support * (1 - BREAK_TOLERANCE)) "跌破支撑 ${price(support)}。" else "，支撑参考 ${price(support)}。") + decision.action +
                 (input.fundamentalHealth?.let { "基本面${it.level.label}：${it.reasons.take(2).joinToString("；")}。" }
                     ?: "基本面暂无数据，待核实；技术风险不因此忽略。"),
+            holdingExitStage = decision.stage,
         )
     }
 

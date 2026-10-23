@@ -1,5 +1,6 @@
 package com.example.stockmonitor.core
 
+import java.time.LocalDateTime
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -28,6 +29,18 @@ class IntradayBarsTest {
                 ),
             ).complete,
         )
+    }
+
+    @Test
+    fun livePreviewBarMakesWindowIncompleteForConfirmation() {
+        val window = IntradayBarWindow(
+            listOf(
+                bar(0, 10.0),
+                bar(15, 10.2).copy(completed = false),
+            ),
+        )
+
+        assertFalse(window.complete)
     }
 
     @Test
@@ -99,5 +112,19 @@ class IntradayBarsTest {
         )
         assertEquals(10.3, updated.bars[1].close, 0.0001)
         assertTrue(updated.complete)
+    }
+
+    @Test
+    fun livePreviewBecomesCompletedOnlyAfterItsSlotEnds() {
+        val live = bar(15, 10.2).copy(completed = false)
+        val beforeEnd = IntradayBarWindow(listOf(bar(0, 10.0), live))
+            .completedAt(LocalDateTime.parse("2026-10-20T10:10:00"), "2026-10-20", 15)
+
+        assertEquals(listOf("2026-10-20 10:00:00"), beforeEnd.bars.map { it.timestamp })
+
+        val afterEnd = IntradayBarWindow(listOf(bar(0, 10.0), live))
+            .withCompletionState(LocalDateTime.parse("2026-10-20T10:16:00"), "2026-10-20", 15)
+
+        assertTrue(afterEnd.bars.single { it.timestamp == "2026-10-20 10:15:00" }.completed)
     }
 }
