@@ -4,6 +4,7 @@ import com.example.stockmonitor.core.ObservationCandidate
 import com.example.stockmonitor.core.ObservationSignal
 import com.example.stockmonitor.core.ObservationStage
 import com.example.stockmonitor.core.ObservationStrategy
+import com.example.stockmonitor.core.withStageResult
 
 /**
  * 选股后的连续观察规则。它只消费已经得到的选股/行情信号，不自行请求数据。
@@ -16,7 +17,22 @@ object ObservationPool {
     const val ENTRY_CONFIRMATION_MAX_MS = 45 * 60 * 1000L
 
     fun requiredConfirmationRounds(candidate: ObservationCandidate): Int =
-        if (candidate.limitStreak?.let { it >= 3 } == true) {
+        if (candidate.entryConfirmationRequiredRounds > 0) {
+            candidate.entryConfirmationRequiredRounds
+        } else {
+            requiredConfirmationRounds(candidate, candidate.limitStreak ?: 0)
+        }
+
+    fun requiredConfirmationRounds(
+        candidate: ObservationCandidate,
+        signal: ObservationSignal,
+    ): Int = requiredConfirmationRounds(candidate, signal.recentLimitUpDays)
+
+    private fun requiredConfirmationRounds(
+        candidate: ObservationCandidate,
+        currentLimitIdentity: Int,
+    ): Int =
+        if (currentLimitIdentity >= 3) {
             ENTRY_CONFIRMATION_ROUNDS + 1
         } else {
             ENTRY_CONFIRMATION_ROUNDS
@@ -55,17 +71,11 @@ object ObservationPool {
             }
             if (signal.trendWeak) base - 2 else base + fundFlowDelta
         }
-        val qualityScore = candidate.sealQualityScore
-        val qualityCoverage = candidate.sealQualityCoveragePct
-        val sealQualityDelta = when {
-            qualityCoverage == null || qualityCoverage < LimitRanking.MIN_RELIABLE_COVERAGE_PCT -> 0
-            qualityScore == null -> 0
-            qualityScore >= 75 -> 1
-            qualityScore <= 35 -> -1
-            else -> 0
-        }
-        val score = (baseScore + sealQualityDelta).coerceIn(0, 3)
-        val highBoard = candidate.limitStreak?.let { it >= 3 } == true
+        val usesSealQuality = candidate.limitUpBlocked || signal.limitUpBlocked
+        val qualityScore = candidate.sealQualityScore.takeIf { usesSealQuality }
+        val qualityCoverage = candidate.sealQualityCoveragePct.takeIf { usesSealQuality }
+        val score = baseScore.coerceIn(0, 3)
+        val highBoard = usesSealQuality && candidate.limitStreak?.let { it >= 3 } == true
         val weakHighBoardSeal = highBoard &&
             qualityCoverage != null &&
             qualityCoverage >= LimitRanking.MIN_RELIABLE_COVERAGE_PCT &&
@@ -107,6 +117,15 @@ object ObservationPool {
                 signal.fundFlow?.tone == FundFlowTone.RISK ||
                 signal.fundFlow?.tone == FundFlowTone.ABSORPTION_WATCH ||
                 signal.fundFlowWindow?.tone == FundFlowWindowTone.PERSISTENT_OUTFLOW
+        val softRisk = breakoutRisk?.risk == true
+        val hardRisk = signal.limitUpShrinkAcceleration ||
+            signal.trendAssessment?.major == MajorTrend.DOWN ||
+            signal.highPosition?.riskPriority == true
+        val softRiskRounds = when {
+            hardRisk -> 0
+            softRisk -> (candidate.softRiskRounds + 1).coerceAtMost(2)
+            else -> 0
+        }
         val eligible = breakoutRisk?.risk != true && trendGate == null && signal.confirmedEntry && signal.canBuy &&
             !signal.riskFlag && !signal.trendWeak &&
             !signal.limitUpBlocked && !signal.limitUpShrinkAcceleration && !fundFlowDelay
@@ -114,7 +133,7 @@ object ObservationPool {
             candidate.strategy == ObservationStrategy.LIMIT_UP_CONTINUATION
         val sealedContinuous = candidate.strategy == ObservationStrategy.LIMIT_UP_CONTINUATION &&
             candidate.continuousObservation && signal.limitUpBlocked
-        val requiredConfirmationRounds = requiredConfirmationRounds(candidate)
+        val requiredConfirmationRounds = requiredConfirmationRounds(candidate, signal)
         val elapsed = signal.evaluatedAtMs - candidate.entryConfirmedAtMs
         val validSample = signal.evaluatedAtMs > 0
         val continuing = sameDay && candidate.entryConfirmationRounds > 0 &&
@@ -127,14 +146,22 @@ object ObservationPool {
             else -> candidate.entryConfirmationRounds
         }
         val confirmed = eligible && (!leader || rounds >= requiredConfirmationRounds)
+        val continuousOpeningGrace = candidate.continuousObservation &&
+            candidate.limitUpBlocked && !signal.limitUpBlocked
         val stage = when {
             sealedContinuous -> ObservationStage.OBSERVING
-            !sealedContinuous && weakDays >= MAX_WEAK_DAYS -> ObservationStage.ELIMINATED
-            !sealedContinuous && observedDays >= MAX_OBSERVED_DAYS && !confirmed -> ObservationStage.ELIMINATED
-            signal.limitUpShrinkAcceleration -> ObservationStage.OBSERVING
-            breakoutRisk?.risk == true -> ObservationStage.OBSERVING
-            signal.trendAssessment?.major == MajorTrend.DOWN -> ObservationStage.OBSERVING
-            signal.highPosition?.riskPriority == true -> ObservationStage.OBSERVING
+            !sealedContinuous && !continuousOpeningGrace && weakDays >= MAX_WEAK_DAYS ->
+                ObservationStage.ELIMINATED
+            !sealedContinuous && !continuousOpeningGrace &&
+                observedDays >= MAX_OBSERVED_DAYS && !confirmed -> ObservationStage.ELIMINATED
+            hardRisk && candidate.stage == ObservationStage.BUY_CANDIDATE -> ObservationStage.NEAR_ENTRY
+            hardRisk -> ObservationStage.OBSERVING
+            signal.riskFlag && candidate.stage == ObservationStage.BUY_CANDIDATE ->
+                ObservationStage.NEAR_ENTRY
+            signal.riskFlag -> ObservationStage.OBSERVING
+            softRisk && candidate.stage == ObservationStage.BUY_CANDIDATE && softRiskRounds < 2 ->
+                ObservationStage.NEAR_ENTRY
+            softRisk -> ObservationStage.OBSERVING
             signal.trendAssessment?.major == MajorTrend.BOTTOMING -> ObservationStage.NEAR_ENTRY
             signal.highPosition?.phase == HighPositionPhase.SECOND_WAVE_CANDIDATE -> ObservationStage.NEAR_ENTRY
             signal.highPosition?.phase == HighPositionPhase.CONSOLIDATION -> ObservationStage.NEAR_ENTRY
@@ -142,16 +169,22 @@ object ObservationPool {
                 BoxRangeState.BOX_RANGE,
                 BoxRangeState.BREAKOUT_CANDIDATE,
             ) -> ObservationStage.NEAR_ENTRY
+            fundFlowDelay && candidate.stage == ObservationStage.BUY_CANDIDATE ->
+                ObservationStage.NEAR_ENTRY
+            fundFlowDelay -> ObservationStage.OBSERVING
             confirmed -> ObservationStage.BUY_CANDIDATE
             score >= 2 || signal.confirmedEntry -> ObservationStage.NEAR_ENTRY
             else -> ObservationStage.OBSERVING
         }
-        val reason = when (stage) {
+        val stageReason = when (stage) {
             ObservationStage.BUY_CANDIDATE -> if (candidate.strategy != ObservationStrategy.PRE_BREAKOUT) {
                 "强势资格与缩量回踩企稳条件连续${requiredConfirmationRounds}轮通过；仅为技术候选，不代表资金承接已获证实"
             } else signal.signalReason.ifBlank { "趋势入场已确认，等待执行纪律与仓位检查" }
             ObservationStage.NEAR_ENTRY -> when {
                 sealedContinuous -> ObservationEligibility.CONTINUOUS_LIMIT_WAIT_REASON
+                softRisk && candidate.stage == ObservationStage.BUY_CANDIDATE && softRiskRounds < 2 ->
+                    "${breakoutRisk.reason}｜风险缓冲1/2，暂降等待确认"
+                signal.riskFlag -> "${signal.signalReason.ifBlank { "风险信号" }}｜风险未解除，不晋级"
                 trendGate != null -> trendGate
                 fundFlowDelay -> fundFlowDelayReason(signal)
                 signal.limitUpBlocked -> ObservationEligibility.LIMIT_WAIT_REASON
@@ -160,6 +193,9 @@ object ObservationPool {
             }
             ObservationStage.OBSERVING -> when {
                 sealedContinuous -> ObservationEligibility.CONTINUOUS_LIMIT_WAIT_REASON
+                softRisk && softRiskRounds >= 2 ->
+                    "${breakoutRisk.reason}｜连续2轮风险确认，降级观察"
+                signal.riskFlag -> "${signal.signalReason.ifBlank { "风险信号" }}｜风险未解除，仅保持观察"
                 trendGate != null -> trendGate
                 breakoutRisk?.risk == true -> breakoutRisk.reason
                 fundFlowDelay -> fundFlowDelayReason(signal)
@@ -174,20 +210,27 @@ object ObservationPool {
                 "观察期超过${MAX_OBSERVED_DAYS}个交易日仍未确认，自动淘汰"
             }
         }
-        return candidate.copy(
+        val reason = if (fundFlowDelay && !stageReason.contains("资金流")) {
+            "${fundFlowDelayReason(signal)}｜$stageReason"
+        } else {
+            stageReason
+        }
+        val evaluated = candidate.copy(
             lastEvaluatedDate = signal.date,
-            stage = stage,
             score = score,
+            technicalScore = signal.technicalScore,
+            weeklyTrendLabel = signal.weeklyTrendLabel,
+            monthlyTrendLabel = signal.monthlyTrendLabel,
             weakDays = weakDays,
             observedDays = observedDays,
             lastPrice = signal.price,
             stopPrice = signal.stopPrice,
-            reason = reason,
             evidence = signal.evidence,
             limitUpBlocked = signal.limitUpBlocked,
             limitUpShrinkAcceleration = signal.limitUpShrinkAcceleration,
-            continuousObservation = sealedContinuous,
+            continuousObservation = candidate.continuousObservation || sealedContinuous,
             entryConfirmationRounds = if (sealedContinuous) 0 else rounds,
+            entryConfirmationRequiredRounds = if (sealedContinuous) 0 else requiredConfirmationRounds,
             entryConfirmedAtMs = when {
                 sealedContinuous || rounds == 0 -> 0L
                 !continuing || freshRound -> signal.evaluatedAtMs
@@ -200,12 +243,19 @@ object ObservationPool {
             },
             breakoutRisk = breakoutRisk,
         )
+        return evaluated.withStageResult(
+            stage = stage,
+            date = signal.date,
+            atMs = signal.evaluatedAtMs,
+            reason = reason,
+            softRiskRounds = softRiskRounds,
+        )
     }
 
     private fun fundFlowDelayReason(signal: ObservationSignal): String {
         val evidence = signal.fundFlowWindow?.reason?.takeIf { it.isNotBlank() }
             ?: signal.fundFlow?.reason?.takeIf { it.isNotBlank() }
             ?: "资金流证据偏弱"
-        return "资金流证据暂缓晋级：$evidence"
+        return "资金流证据暂缓晋级：$evidence｜资金流只影响晋级节奏，不影响盘中提醒（包括买卖点提醒）。"
     }
 }

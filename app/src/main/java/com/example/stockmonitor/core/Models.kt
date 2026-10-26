@@ -423,6 +423,11 @@ data class LeaderOverrides(
             LeaderOverrides(pinned - member.code, excluded + member.code)
         }
 
+    fun withoutPinned(codes: Collection<String>): LeaderOverrides {
+        val removed = codes.toSet()
+        return copy(pinned = pinned.filterKeys { it !in removed })
+    }
+
     companion object {
         /** 落盘格式：`{"BK0438": {"pinned": {"600487": "亨通光电"}, "excluded": ["300570"]}}`。 */
         fun encodeAll(all: Map<String, LeaderOverrides>): org.json.JSONObject {
@@ -519,6 +524,10 @@ data class ScreenHit(
     /** 价格位置上下文（近 60 日区间位置 + 从低点反弹幅度），取不到日线时为 null；界面据此解释量价标签。 */
     val priceContext: PriceContext? = null,
     val relaxedTrendEligible: Boolean = false,
+    /** 0..100 统一技术分；旧缓存缺失时只按当日指标最多给 40 分。 */
+    val technicalScore: Int = (relaxedScore.coerceIn(0, 3) * 40 / 3),
+    val weeklyTrendLabel: String = "数据不足",
+    val monthlyTrendLabel: String = "数据不足",
 )
 
 /** 趋势入场策略命中项：与原有指标策略、513形态分开展示。 */
@@ -529,6 +538,9 @@ data class TrendScreenHit(
     val changePct: Double,
     val volumeRatio: Double?,
     val entrySetup: EntrySetup,
+    val technicalScore: Int = 40,
+    val weeklyTrendLabel: String = "数据不足",
+    val monthlyTrendLabel: String = "数据不足",
 )
 
 data class FiveOneThreeStats(
@@ -552,7 +564,16 @@ enum class ObservationStage(val label: String) {
     OBSERVING("观察中"),
     NEAR_ENTRY("买点待确认"),
     BUY_CANDIDATE("买点已确认"),
-    ELIMINATED("已淘汰"),
+    ELIMINATED("已淘汰")
+    ;
+
+    val promotionRank: Int
+        get() = when (this) {
+            BUY_CANDIDATE -> 3
+            NEAR_ENTRY -> 2
+            OBSERVING -> 1
+            ELIMINATED -> 0
+        }
 }
 
 enum class ObservationStrategy(val label: String) {
@@ -560,6 +581,14 @@ enum class ObservationStrategy(val label: String) {
     LEADER("强势龙头"),
     LIMIT_UP_CONTINUATION("涨停持续观察"),
 }
+
+data class ObservationStatusChange(
+    val date: String,
+    val atMs: Long,
+    val previousStage: ObservationStage?,
+    val stage: ObservationStage,
+    val reason: String,
+)
 
 data class ObservationCandidate(
     val code: String,
@@ -569,6 +598,9 @@ data class ObservationCandidate(
     val stage: ObservationStage,
     val score: Int,
     val weakDays: Int,
+    val technicalScore: Int? = null,
+    val weeklyTrendLabel: String? = null,
+    val monthlyTrendLabel: String? = null,
     val observedDays: Int = 0,
     val lastPrice: Double = 0.0,
     val stopPrice: Double? = null,
@@ -579,6 +611,7 @@ data class ObservationCandidate(
     val limitUpBlocked: Boolean = false,
     val limitUpShrinkAcceleration: Boolean = false,
     val entryConfirmationRounds: Int = 0,
+    val entryConfirmationRequiredRounds: Int = 0,
     val entryConfirmedAtMs: Long = 0L,
     val entryConfirmationVolume: Double = 0.0,
     val breakoutRisk: BreakoutRiskDecision? = null,
@@ -587,7 +620,49 @@ data class ObservationCandidate(
     val sealQualityScore: Int? = null,
     val sealQualityCoveragePct: Int? = null,
     val boards: List<String> = emptyList(),
+    val highestStage: ObservationStage? = null,
+    val highestStageDate: String? = null,
+    val highestStageAtMs: Long = 0L,
+    val statusChanges: List<ObservationStatusChange> = emptyList(),
+    val softRiskRounds: Int = 0,
 )
+
+fun ObservationCandidate.withStageResult(
+    stage: ObservationStage,
+    date: String,
+    atMs: Long,
+    reason: String,
+    softRiskRounds: Int = this.softRiskRounds,
+): ObservationCandidate {
+    val historyStage = highestStage ?: this.stage
+    val newHighestStage = if (stage.promotionRank >= historyStage.promotionRank) stage else historyStage
+    val reachedAtMs = if (newHighestStage == historyStage) highestStageAtMs else atMs
+    val reachedDate = if (newHighestStage == historyStage) {
+        highestStageDate ?: this.lastEvaluatedDate ?: date
+    } else {
+        date
+    }
+    val statusChanges = if (this.stage == stage) {
+        this.statusChanges
+    } else {
+        this.statusChanges + ObservationStatusChange(
+            date = date,
+            atMs = atMs,
+            previousStage = this.stage,
+            stage = stage,
+            reason = reason,
+        )
+    }
+    return copy(
+        stage = stage,
+        reason = reason,
+        highestStage = newHighestStage,
+        highestStageDate = reachedDate,
+        highestStageAtMs = reachedAtMs,
+        statusChanges = statusChanges,
+        softRiskRounds = softRiskRounds,
+    )
+}
 
 data class ObservationSignal(
     val date: String,
@@ -619,6 +694,9 @@ data class ObservationSignal(
     val fundFlow: com.example.stockmonitor.analysis.FundFlowAssessment? = null,
     val fundFlowWindow: com.example.stockmonitor.analysis.FundFlowWindowAssessment? = null,
     val environmentGate: String? = null,
+    val technicalScore: Int? = null,
+    val weeklyTrendLabel: String? = null,
+    val monthlyTrendLabel: String? = null,
 )
 
 /**

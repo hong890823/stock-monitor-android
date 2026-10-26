@@ -12,6 +12,7 @@ import android.text.util.Linkify
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.example.stockmonitor.R
 import com.example.stockmonitor.analysis.ReportMarkup
@@ -34,6 +35,12 @@ class ReportActivity : AppCompatActivity() {
         findViewById<TextView>(R.id.report_text).apply {
             this.text = styled(text)
             Linkify.addLinks(this, Linkify.WEB_URLS)
+        }
+        val notificationId = intent.getIntExtra(EXTRA_NOTIFICATION_ID, -1)
+        if (notificationId >= 0) {
+            findViewById<TextView>(R.id.report_text).post {
+                NotificationManagerCompat.from(this).cancel(notificationId)
+            }
         }
         findViewById<android.view.View>(R.id.action_copy).setOnClickListener {
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
@@ -73,15 +80,18 @@ class ReportActivity : AppCompatActivity() {
     companion object {
         private const val EXTRA_TITLE = "title"
         private const val EXTRA_TEXT = "text"
+        private const val EXTRA_NOTIFICATION_ID = "notification_id"
 
         fun createIntent(
             context: Context,
             title: String,
             text: String,
+            notificationId: Int = -1,
         ): Intent =
             Intent(context, ReportActivity::class.java)
                 .putExtra(EXTRA_TITLE, title)
                 .putExtra(EXTRA_TEXT, text)
+                .putExtra(EXTRA_NOTIFICATION_ID, notificationId)
 
         fun open(
             context: Context,

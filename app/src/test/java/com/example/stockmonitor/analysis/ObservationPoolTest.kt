@@ -267,10 +267,95 @@ class ObservationPoolTest {
             ),
         )
 
-        assertEquals(ObservationStage.OBSERVING, risk.stage)
+        assertEquals(ObservationStage.NEAR_ENTRY, risk.stage)
+        assertEquals(1, risk.softRiskRounds)
         assertTrue(risk.reason.contains("下杀风险"))
-        assertTrue(ObservationBreakoutRiskAlert.shouldNotify(original, risk))
-        assertFalse(ObservationBreakoutRiskAlert.shouldNotify(risk, risk))
+
+        val secondRisk = ObservationPool.evaluate(
+            risk,
+            ObservationSignal(
+                date = "2026-10-14",
+                price = 10.1,
+                hasScreenSignal = true,
+                confirmedEntry = true,
+                canBuy = true,
+                trendWeak = false,
+                stopPrice = 9.6,
+                changePct = -3.5,
+                breakoutRisk = BreakoutRiskDecision(true, "跌破5日线，突破延续转为下杀风险"),
+            ),
+        )
+
+        assertEquals(ObservationStage.OBSERVING, secondRisk.stage)
+        assertEquals(2, secondRisk.softRiskRounds)
+        assertTrue(ObservationBreakoutRiskAlert.shouldNotify(original, secondRisk))
+        assertFalse(ObservationBreakoutRiskAlert.shouldNotify(secondRisk, secondRisk))
+    }
+
+    @Test
+    fun hardRiskDowngradesBuyCandidateOneLevelAtATime() {
+        val result = ObservationPool.evaluate(
+            candidate().copy(stage = ObservationStage.BUY_CANDIDATE),
+            ObservationSignal(
+                date = "2026-10-14",
+                price = 10.2,
+                hasScreenSignal = true,
+                confirmedEntry = true,
+                canBuy = true,
+                trendWeak = false,
+                stopPrice = 9.6,
+                changePct = -2.5,
+                trendAssessment = majorDown,
+            ),
+        )
+
+        assertEquals(ObservationStage.NEAR_ENTRY, result.stage)
+        assertEquals(0, result.softRiskRounds)
+
+        val next = ObservationPool.evaluate(
+            result,
+            ObservationSignal(
+                date = "2026-10-14",
+                price = 10.1,
+                hasScreenSignal = true,
+                confirmedEntry = true,
+                canBuy = true,
+                trendWeak = false,
+                stopPrice = 9.6,
+                changePct = -3.0,
+                trendAssessment = majorDown,
+            ),
+        )
+        assertEquals(ObservationStage.OBSERVING, next.stage)
+    }
+
+    @Test
+    fun candidateRecordsHighestStageAndStatusChanges() {
+        val original = candidate().copy(
+            stage = ObservationStage.BUY_CANDIDATE,
+            highestStage = ObservationStage.BUY_CANDIDATE,
+            highestStageDate = "2026-10-13",
+            highestStageAtMs = 1000L,
+        )
+        val downgraded = ObservationPool.evaluate(
+            original,
+            ObservationSignal(
+                date = "2026-10-14",
+                price = 10.2,
+                hasScreenSignal = true,
+                confirmedEntry = true,
+                canBuy = true,
+                trendWeak = false,
+                stopPrice = 9.6,
+                changePct = -2.5,
+                breakoutRisk = BreakoutRiskDecision(true, "跌破5日线"),
+            ),
+        )
+
+        assertEquals(ObservationStage.BUY_CANDIDATE, downgraded.highestStage)
+        assertEquals("2026-10-13", downgraded.highestStageDate)
+        assertEquals(1, downgraded.statusChanges.size)
+        assertEquals(ObservationStage.NEAR_ENTRY, downgraded.statusChanges.single().stage)
     }
 
     @Test

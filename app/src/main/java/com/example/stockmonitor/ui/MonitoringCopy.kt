@@ -24,8 +24,9 @@ object MonitoringCopy {
         ),
         Rule(
             "风险阈值",
-            "大盘同步 -${MarketRiskPolicy.EARLY_WARNING_PCT}% 两轮；单指数 -${MarketRiskPolicy.RISK_WARNING_PCT}% / " +
-                "-${MarketRiskPolicy.SEVERE_WARNING_PCT}%；5分钟 -0.3% / -0.5% / -0.8%；持仓日内 " +
+            "只使用已完成、不重叠的5分钟K线；单指数连续两根 -0.3% 只观察，不推送；两指数同窗 -0.5% 且市场宽度偏弱，" +
+                "或两指数日跌 -0.8% 并普跌/放量，升级市场风险；多指数 -0.8% 后下一根继续恶化升级系统性风险；" +
+                "速度阈值按近期5分钟波动率归一；放量后下一根未止跌或未收复中点才算指数风险；持仓日内 " +
                 "-${StockRiskPolicy.DAILY_WARNING_PCT.toInt()}% / -${StockRiskPolicy.DAILY_RISK_PCT.toInt()}%",
         ),
         Rule(
@@ -44,7 +45,12 @@ object MonitoringCopy {
         ),
         Rule(
             "重新武装",
-            "指数均回到 -${MarketRiskPolicy.REARM_PCT}% 以上，只解除大盘风险提醒",
+            "指数均回到 -${MarketRiskPolicy.REARM_PCT}% 以上，解除市场风险提醒；单指数观察不生成通知",
+        ),
+        Rule(
+            "刷新节奏",
+            "每 15 秒刷新一次，工作日 08:30-16:00 请求新行情；板块每 30 分钟、指标选股与持仓分析每 30 分钟一个槽位；" +
+                "盘面总结每天 16:00 / 18:00 / 21:00 生成；夜间 18:00-06:00 指标选股失败会每 90 分钟重试，最多 8 次。",
         ),
     )
 

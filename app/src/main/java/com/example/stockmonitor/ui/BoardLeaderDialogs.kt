@@ -62,8 +62,6 @@ object BoardLeaderDialogs {
         groupId: String,
         groupName: String,
         onSaved: () -> Unit,
-        extraMembers: Map<String, String> = emptyMap(),
-        removedCodes: Set<String> = emptySet(),
     ) {
         val overrides = store.sectorLeaderOverrides[groupId] ?: LeaderOverrides()
         val policyCandidates =
@@ -74,12 +72,9 @@ object BoardLeaderDialogs {
             )
         val universe = LinkedHashMap<String, BoardMember>()
         policyCandidates.forEach { universe[it.member.code] = it.member }
-        extraMembers.forEach { (code, name) -> universe.putIfAbsent(code, BoardMember(code, name, 0.0)) }
-        (removedCodes - extraMembers.keys).forEach { universe.remove(it) }
         val initialNames = universe.entries.associate { it.key to it.value.name }
         val checkedCodes = mutableSetOf<String>()
         policyCandidates.forEach { if (it.checked && it.member.code in universe) checkedCodes += it.member.code }
-        checkedCodes += extraMembers.keys
         val deletedCodes = mutableSetOf<String>()
 
         val container =
@@ -87,25 +82,16 @@ object BoardLeaderDialogs {
                 orientation = LinearLayout.VERTICAL
                 setPadding(UiKit.dp(context, 20), UiKit.dp(context, 8), UiKit.dp(context, 20), 0)
             }
-        container.addView(
+        val addButton =
             MaterialButton(context).apply {
-                text = "➕ 添加个股"
-                setOnClickListener {
-                    Dialogs.searchStock(scope, context) { code, name ->
-                        openEditor(
-                            scope,
-                            context,
-                            store,
-                            groupId,
-                            groupName,
-                            onSaved,
-                            extraMembers + (sixDigitCode(code) to name),
-                            removedCodes + deletedCodes,
-                        )
-                    }
-                }
-            },
-        )
+                text = "➕ 添加龙头"
+            }
+        container.addView(addButton)
+        val selectionSummary =
+            UiKit.body(context, "已选 0 只龙头", 12f).apply {
+                setPadding(0, UiKit.dp(context, 8), 0, UiKit.dp(context, 4))
+            }
+        container.addView(selectionSummary)
         val listView =
             ListView(context).apply {
                 choiceMode = ListView.CHOICE_MODE_MULTIPLE
@@ -125,6 +111,7 @@ object BoardLeaderDialogs {
                     codes.map { "${universe[it]?.name}（$it）" },
                 )
             codes.indices.forEach { listView.setItemChecked(it, codes[it] in checkedCodes) }
+            selectionSummary.text = "已选 ${checkedCodes.size} 只龙头 · 共 ${universe.size} 只候选"
         }
 
         fun syncChecked() {
@@ -139,6 +126,21 @@ object BoardLeaderDialogs {
         }
 
         renderList()
+
+        addButton.setOnClickListener {
+            syncChecked()
+            Dialogs.searchStock(scope, context) { code, name ->
+                val normalizedCode = sixDigitCode(code)
+                universe[normalizedCode] = BoardMember(normalizedCode, name, 0.0)
+                checkedCodes.add(normalizedCode)
+                renderList()
+            }
+        }
+
+        listView.setOnItemClickListener { _, _, _, _ ->
+            syncChecked()
+            selectionSummary.text = "已选 ${checkedCodes.size} 只龙头 · 共 ${universe.size} 只候选"
+        }
 
         listView.setOnItemLongClickListener { _, _, position, _ ->
             val code = universe.keys.toList()[position]
@@ -159,11 +161,12 @@ object BoardLeaderDialogs {
         container.addView(listView)
 
         MaterialAlertDialogBuilder(context)
-            .setTitle("「$groupName」龙头（勾选 = 算龙头，长按个股可删除）")
-            .setMessage("勾选 = 算龙头，取消勾选 = 移出龙头；长按个股可从板块删除。要改股票属于哪个板块，请用「板块管理」。")
+            .setTitle("「$groupName」龙头名单")
+            .setMessage("勾选 = 算龙头，取消 = 移出龙头；新增项会保留为人工龙头。长按个股可从板块删除，改归属请用「板块管理」。")
             .setView(container)
             .setNeutralButton("恢复自动") { _, _ ->
                 store.sectorLeaderOverrides = store.sectorLeaderOverrides - groupId
+                Repo.sectorLeaders = Repo.sectorLeaders - groupId
                 MonitorService.send(context, MonitorService.ACTION_REFRESH)
                 Toast.makeText(context, "已恢复按成交额前 ${SectorLeaders.SIZE} 名自动挑龙头", Toast.LENGTH_SHORT).show()
                 onSaved()
@@ -172,12 +175,18 @@ object BoardLeaderDialogs {
                 syncChecked()
                 val chosenCodes = checkedCodes.filter { it in universe }.toSet()
                 val chosen = chosenCodes.mapNotNull { code -> universe[code]?.let { code to it.name } }.toMap()
-                store.sectorLeaderOverrides = store.sectorLeaderOverrides + (
-                    groupId to
-                        LeaderOverrides(
-                            pinned = chosen,
-                            excluded = universe.keys.toSet() - chosenCodes,
-                        )
+                val overrides = LeaderOverrides(
+                    pinned = chosen,
+                    excluded = universe.keys.toSet() - chosenCodes,
+                )
+                store.sectorLeaderOverrides = store.sectorLeaderOverrides + (groupId to overrides)
+                Repo.sectorMembers = Repo.sectorMembers + (groupId to universe.values.toList())
+                Repo.sectorLeaders = Repo.sectorLeaders + (
+                    groupId to SectorLeaders(
+                        members = chosen.map { (code, name) -> BoardMember(code, name, 0.0) },
+                        asOfMs = System.currentTimeMillis(),
+                        overrides = overrides,
+                    )
                 )
                 if (deletedCodes.isNotEmpty()) {
                     val book = store.boardGroups
@@ -186,6 +195,7 @@ object BoardLeaderDialogs {
                     store.boardGroups = book.withMembers(groupId, groupName, base - deletedCodes)
                 }
                 MonitorService.send(context, MonitorService.ACTION_REFRESH)
+                Toast.makeText(context, "已保存 ${chosenCodes.size} 只龙头", Toast.LENGTH_SHORT).show()
                 onSaved()
             }.show()
     }

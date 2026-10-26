@@ -21,12 +21,17 @@ data class TimeframeEvidence(
     val riskThresholdPct: Double = 0.005,
     val riskBreachPct: Double = 0.0,
     val riskLevel: DailyRiskLevel = DailyRiskLevel.NORMAL,
+    val riskLine: Double? = null,
+    val riskLineThresholdPct: Double = 0.0,
+    val riskLineBelow: Boolean = false,
+    val riskLineConfirmations: Int = 0,
+    val riskLineM30Below: Boolean = false,
 ) {
     companion object {
         private val TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
 
         fun latestCompletedSlot(now: LocalDateTime, minutes: Int, quoteDate: String?): String? {
-            require(minutes == 15 || minutes == 30) { "分钟K线仅支持15或30分钟" }
+            require(minutes == 5 || minutes == 15 || minutes == 30) { "分钟K线仅支持5、15或30分钟" }
             val date = runCatching { LocalDate.parse(quoteDate?.take(10).orEmpty()) }.getOrNull() ?: return null
             if (date != now.toLocalDate()) return null
             val slots = sessionSlots(date, minutes)
@@ -42,6 +47,7 @@ data class TimeframeEvidence(
             now: LocalDateTime,
             quoteDate: String?,
             dailyContext: DailyRiskContext? = null,
+            riskLine: Double? = null,
         ): TimeframeEvidence {
             val latest15 = latestCompletedSlot(now, 15, quoteDate)
             val latest30 = latestCompletedSlot(now, 30, quoteDate)
@@ -64,6 +70,19 @@ data class TimeframeEvidence(
             val riskConfirmed = support > 0.0 && fresh15 && completed15.isNotEmpty() &&
                 price < riskPriceThreshold && completed15.last().close < riskPriceThreshold
             val riskConfirmations = if (riskConfirmed) riskConfirmations(completed15, price, riskPriceThreshold) else 0
+            val activeRiskLine = riskLine?.takeIf { it.isFinite() && it > 0.0 }
+            val riskLineThresholdPct = activeRiskLine?.let { riskThresholdPct(completed15, it) } ?: 0.0
+            val riskLinePriceThreshold = activeRiskLine?.let { it * (1.0 - riskLineThresholdPct) }
+            val riskLineConfirmations = if (riskLinePriceThreshold != null && fresh15) {
+                riskConfirmations(completed15, price, riskLinePriceThreshold)
+            } else {
+                0
+            }
+            val riskLineM30Below = riskLinePriceThreshold != null &&
+                fresh30 &&
+                completed30.lastOrNull()?.close?.let { it < riskLinePriceThreshold } == true
+            val riskLineBelow = riskLinePriceThreshold != null &&
+                price < riskLinePriceThreshold
             val confirmedBars = completed15.takeLast(minOf(2, confirmations))
             val m15DistancePct = if (threshold > 0.0 && confirmedBars.isNotEmpty()) {
                 confirmedBars.minOf { (it.close - threshold) / threshold }
@@ -91,8 +110,8 @@ data class TimeframeEvidence(
                 complete = completed15.size >= 2 && completed30.size >= 2 && fresh15 && fresh30,
                 riskComplete = support > 0.0 && fresh15 && completed15.isNotEmpty(),
                 riskConfirmed = riskConfirmed,
-                lastCompleted15m = latest15,
-                lastCompleted30m = latest30,
+                lastCompleted15m = completed15.lastOrNull()?.timestamp,
+                lastCompleted30m = completed30.lastOrNull()?.timestamp,
                 m15DistancePct = m15DistancePct,
                 m30DistancePct = m30DistancePct,
                 lastBarRejected = lastBarRejected,
@@ -102,6 +121,11 @@ data class TimeframeEvidence(
                 riskThresholdPct = riskThresholdPct,
                 riskBreachPct = if (support > 0.0) maxOf(0.0, (support - price) / support) else 0.0,
                 riskLevel = context?.riskLevel(price) ?: DailyRiskLevel.NORMAL,
+                riskLine = activeRiskLine,
+                riskLineThresholdPct = riskLineThresholdPct,
+                riskLineBelow = riskLineBelow,
+                riskLineConfirmations = riskLineConfirmations,
+                riskLineM30Below = riskLineM30Below,
             )
         }
 

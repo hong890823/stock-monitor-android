@@ -42,3 +42,22 @@ Create pure `HeadlineSelector.select(items: List<NewsItem>, nowMs: Long, limit: 
 
 Use “可能影响” or category labels only. Do not claim a headline guarantees a market or sector
 move. Always show source and publication time so users can verify the item.
+
+## 2026-10-23 Multi-Source Tech Enhancement
+
+Keep East Money and Sina as the investment-news baseline and add InfoQ China,
+Jiqizhixin, 36Kr, and Techmeme as a separate technology-news lane. The feed URLs
+must be treated as runtime configuration: each source degrades independently and
+the UI must expose partial-source failures without replacing successful results.
+
+The first-level card is split into `投资要闻` and `科技重点`, with up to three
+items in each lane. The detail report keeps up to ten items per lane. Techmeme
+may retain its original English title; do not invent a translation.
+
+Ranking uses a transparent score ordered by portfolio/watchlist/observation
+relevance, material investable events, source trust, distinct-source corroboration,
+and freshness. Duplicate stories are clustered before corroboration is scored, so
+syndicated copies cannot occupy multiple card slots. High-value themes include
+AI, semiconductors, compute, robotics, consumer electronics, cloud, export
+controls, orders, capacity expansion, and M&A. Promotional copy, launch marketing,
+generic forecasts, and near-duplicate syndication are penalized.

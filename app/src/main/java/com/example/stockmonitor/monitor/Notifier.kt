@@ -15,7 +15,10 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.example.stockmonitor.R
+import com.example.stockmonitor.core.AlertRecord
+import com.example.stockmonitor.core.Store
 import com.example.stockmonitor.ui.MainActivity
+import java.util.UUID
 
 /** 通知封装：常驻监控通知 + 行情提醒。 */
 object Notifier {
@@ -116,6 +119,100 @@ object Notifier {
         context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
+    private fun newAlertRecord(
+        notificationId: Int,
+        kind: String,
+        title: String,
+        text: String,
+        level: String,
+        triggerType: String,
+    ) = AlertRecord(
+        id = UUID.randomUUID().toString(),
+        notificationId = notificationId,
+        kind = kind,
+        level = level,
+        triggerType = triggerType,
+        title = title,
+        body = text,
+        createdAtMs = System.currentTimeMillis(),
+    )
+
+    private fun buildRecordedNotification(
+        context: Context,
+        record: AlertRecord,
+        channelId: String,
+        priority: Int,
+        category: String? = null,
+    ): Notification {
+        val intent =
+            Intent(context, MainActivity::class.java)
+                .putExtra(MainActivity.EXTRA_ALERT_RECORD_ID, record.id)
+                .putExtra(MainActivity.EXTRA_ALERT_NOTIFICATION_ID, record.notificationId)
+                .putExtra(MainActivity.EXTRA_ALERT_TITLE, record.title)
+                .putExtra(MainActivity.EXTRA_ALERT_BODY, record.body)
+                .putExtra(MainActivity.EXTRA_ALERT_CREATED_AT_MS, record.createdAtMs)
+                .putExtra(MainActivity.EXTRA_ALERT_KIND, record.kind)
+                .putExtra(MainActivity.EXTRA_ALERT_LEVEL, record.level)
+                .putExtra(MainActivity.EXTRA_ALERT_TRIGGER_TYPE, record.triggerType)
+        val pending =
+            PendingIntent.getActivity(
+                context,
+                record.notificationId,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+        return NotificationCompat
+            .Builder(context, channelId)
+            .setSmallIcon(R.drawable.ic_stat_monitor)
+            .setContentTitle(record.title)
+            .setContentText(record.body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(record.body))
+            .setWhen(record.createdAtMs)
+            .setAutoCancel(false)
+            .setContentIntent(pending)
+            .setCategory(category)
+            .setPriority(priority)
+            .build()
+    }
+
+    private fun postRecordedNotification(
+        context: Context,
+        record: AlertRecord,
+        notification: Notification,
+        channelId: String,
+        failureMessage: String,
+    ): Boolean {
+        if (!canPost(context, channelId)) {
+            Log.w(TAG, "$failureMessage：系统通知或渠道不可用: id=${record.notificationId}")
+            return false
+        }
+        val store = Store(context)
+        val persisted =
+            runCatching { store.appendAlertRecord(record) }
+                .onFailure { error -> Log.e(TAG, "提醒正文记录失败: id=${record.id}", error) }
+                .getOrDefault(false)
+        if (!persisted) Log.e(TAG, "提醒正文未持久化: id=${record.id}")
+        val posted =
+            runCatching {
+                NotificationManagerCompat.from(context).notify(record.notificationId, notification)
+                true
+            }.onFailure { error ->
+                Log.e(TAG, "$failureMessage: id=${record.notificationId} title=${record.title}", error)
+            }.getOrDefault(false)
+        if (!posted) {
+            runCatching { store.removeAlertRecord(record.id) }
+        }
+        return posted
+    }
+
+    private fun canPost(context: Context, channelId: String): Boolean {
+        if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return false
+        val channel =
+            context.getSystemService(NotificationManager::class.java)
+                ?.getNotificationChannel(channelId)
+        return channel != null && channel.importance != NotificationManager.IMPORTANCE_NONE
+    }
+
     fun buildMonitorNotification(
         context: Context,
         title: String,
@@ -153,12 +250,21 @@ object Notifier {
         report: String,
     ) {
         ensureChannels(context)
+        val record =
+            newAlertRecord(
+                notificationId = id,
+                kind = "analysis_complete",
+                title = title,
+                text = text,
+                level = "INFO",
+                triggerType = "analysis",
+            )
         val pending =
             PendingIntent.getActivity(
                 context,
                 id,
                 com.example.stockmonitor.ui.ReportActivity
-                    .createIntent(context, reportTitle, report),
+                    .createIntent(context, reportTitle, report, notificationId = id),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
         val notification =
@@ -168,14 +274,15 @@ object Notifier {
                 .setContentTitle(title)
                 .setContentText(text)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-                .setAutoCancel(true)
+                .setWhen(record.createdAtMs)
+                .setAutoCancel(false)
                 .setContentIntent(pending)
                 .setPriority(NotificationCompat.PRIORITY_DEFAULT)
                 .build()
-        runCatching { NotificationManagerCompat.from(context).notify(id, notification) }
+        postRecordedNotification(context, record, notification, CHANNEL_ANALYSIS, "分析完成通知发送失败")
     }
 
-    /** 分析失败通知：点击回到主界面重试。不受「行情提醒」开关拦截。 */
+    /** 分析失败通知：点击在应用内查看失败详情。不受「行情提醒」开关拦截。 */
     fun analysisFailed(
         context: Context,
         id: Int,
@@ -183,25 +290,23 @@ object Notifier {
         text: String,
     ) {
         ensureChannels(context)
-        val pending =
-            PendingIntent.getActivity(
-                context,
-                id,
-                Intent(context, MainActivity::class.java),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        val record =
+            newAlertRecord(
+                notificationId = id,
+                kind = "analysis_failed",
+                title = title,
+                text = text,
+                level = "FAILED",
+                triggerType = "analysis",
             )
         val notification =
-            NotificationCompat
-                .Builder(context, CHANNEL_ANALYSIS)
-                .setSmallIcon(R.drawable.ic_stat_monitor)
-                .setContentTitle(title)
-                .setContentText(text)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-                .setAutoCancel(true)
-                .setContentIntent(pending)
-                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-                .build()
-        runCatching { NotificationManagerCompat.from(context).notify(id, notification) }
+            buildRecordedNotification(
+                context = context,
+                record = record,
+                channelId = CHANNEL_ANALYSIS,
+                priority = NotificationCompat.PRIORITY_DEFAULT,
+            )
+        postRecordedNotification(context, record, notification, CHANNEL_ANALYSIS, "分析失败通知发送失败")
     }
 
     fun alert(
@@ -215,33 +320,25 @@ object Notifier {
                 .Store(context)
         if (!store.alertsEnabled) return
         ensureChannels(context)
-        val intent = Intent(context, MainActivity::class.java)
-        val pending =
-            PendingIntent.getActivity(
-                context,
-                id,
-                intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        val record =
+            newAlertRecord(
+                notificationId = id,
+                kind = "alert",
+                title = title,
+                text = text,
+                level = "INFO",
+                triggerType = "alert",
             )
         val notification =
-            NotificationCompat
-                .Builder(context, CHANNEL_ALERT)
-                .setSmallIcon(R.drawable.ic_stat_monitor)
-                .setContentTitle(title)
-                .setContentText(text)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-                .setAutoCancel(true)
-                .setContentIntent(pending)
-                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-                .build()
+            buildRecordedNotification(
+                context = context,
+                record = record,
+                channelId = CHANNEL_ALERT,
+                priority = NotificationCompat.PRIORITY_DEFAULT,
+            )
         val status = reminderStatus(context, CHANNEL_ALERT)
         val posted =
-            runCatching {
-                NotificationManagerCompat.from(context).notify(id, notification)
-                true
-            }.onFailure { error ->
-                Log.e(TAG, "普通提醒发送失败: id=$id title=$title", error)
-            }.getOrDefault(false)
+            postRecordedNotification(context, record, notification, CHANNEL_ALERT, "普通提醒发送失败")
         if (posted && shouldVibrateReminder(status)) vibrateSignal(context)
     }
 
@@ -251,41 +348,34 @@ object Notifier {
         id: Int,
         title: String,
         text: String,
+        level: String = "WARNING",
+        triggerType: String = "market",
     ) {
         val store =
             com.example.stockmonitor.core
                 .Store(context)
         if (!store.alertsEnabled) return
         ensureChannels(context)
-        val intent = Intent(context, MainActivity::class.java)
-        val pending =
-            PendingIntent.getActivity(
-                context,
-                id,
-                intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        val record =
+            newAlertRecord(
+                notificationId = id,
+                kind = "market_risk",
+                title = title,
+                text = text,
+                level = level,
+                triggerType = triggerType,
             )
         val notification =
-            NotificationCompat
-                .Builder(context, CHANNEL_ALERT)
-                .setSmallIcon(R.drawable.ic_stat_monitor)
-                .setContentTitle(title)
-                .setContentText(text)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-                .setAutoCancel(true)
-                .setContentIntent(pending)
-                .setCategory(NotificationCompat.CATEGORY_ALARM)
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .build()
+            buildRecordedNotification(
+                context = context,
+                record = record,
+                channelId = CHANNEL_ALERT,
+                priority = NotificationCompat.PRIORITY_HIGH,
+                category = NotificationCompat.CATEGORY_ALARM,
+            )
         val status = reminderStatus(context, CHANNEL_ALERT)
-        val manager = NotificationManagerCompat.from(context)
         val posted =
-            runCatching {
-                manager.notify(id, notification)
-                true
-            }.onFailure { error ->
-                Log.e(TAG, "大盘提醒发送失败: id=$id title=$title", error)
-            }.getOrDefault(false)
+            postRecordedNotification(context, record, notification, CHANNEL_ALERT, "大盘提醒发送失败")
         if (posted && shouldVibrateReminder(status)) vibrateSignal(context)
     }
 
@@ -301,34 +391,26 @@ object Notifier {
                 .Store(context)
         if (!store.alertsEnabled) return
         ensureChannels(context)
-        val intent = Intent(context, MainActivity::class.java)
-        val pending =
-            PendingIntent.getActivity(
-                context,
-                id,
-                intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        val record =
+            newAlertRecord(
+                notificationId = id,
+                kind = "risk_sell",
+                title = title,
+                text = text,
+                level = "RISK",
+                triggerType = "risk_sell",
             )
         val notification =
-            NotificationCompat
-                .Builder(context, CHANNEL_ALERT)
-                .setSmallIcon(R.drawable.ic_stat_monitor)
-                .setContentTitle(title)
-                .setContentText(text)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-                .setAutoCancel(true)
-                .setContentIntent(pending)
-                .setCategory(NotificationCompat.CATEGORY_ALARM)
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .build()
+            buildRecordedNotification(
+                context = context,
+                record = record,
+                channelId = CHANNEL_ALERT,
+                priority = NotificationCompat.PRIORITY_HIGH,
+                category = NotificationCompat.CATEGORY_ALARM,
+            )
         val status = reminderStatus(context, CHANNEL_ALERT)
         val posted =
-            runCatching {
-                NotificationManagerCompat.from(context).notify(id, notification)
-                true
-            }.onFailure { error ->
-                Log.e(TAG, "个股风险卖出提醒发送失败: id=$id title=$title", error)
-            }.getOrDefault(false)
+            postRecordedNotification(context, record, notification, CHANNEL_ALERT, "个股风险卖出提醒发送失败")
         if (posted && shouldVibrateReminder(status)) vibrateSignal(context)
     }
 
@@ -349,34 +431,26 @@ object Notifier {
                 .Store(context)
         if (!store.alertsEnabled || !store.intradaySignalEnabled) return
         ensureChannels(context)
-        val intent = Intent(context, MainActivity::class.java)
-        val pending =
-            PendingIntent.getActivity(
-                context,
-                id,
-                intent,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        val record =
+            newAlertRecord(
+                notificationId = id,
+                kind = "signal",
+                title = title,
+                text = text,
+                level = "SIGNAL",
+                triggerType = "signal",
             )
         val notification =
-            NotificationCompat
-                .Builder(context, CHANNEL_SIGNAL)
-                .setSmallIcon(R.drawable.ic_stat_monitor)
-                .setContentTitle(title)
-                .setContentText(text)
-                .setStyle(NotificationCompat.BigTextStyle().bigText(text))
-                .setAutoCancel(true)
-                .setContentIntent(pending)
-                .setCategory(NotificationCompat.CATEGORY_ALARM)
-                .setPriority(NotificationCompat.PRIORITY_HIGH)
-                .build()
+            buildRecordedNotification(
+                context = context,
+                record = record,
+                channelId = CHANNEL_SIGNAL,
+                priority = NotificationCompat.PRIORITY_HIGH,
+                category = NotificationCompat.CATEGORY_ALARM,
+            )
         val status = signalStatus(context)
         val posted =
-            runCatching {
-                NotificationManagerCompat.from(context).notify(id, notification)
-                true
-            }.onFailure { error ->
-                Log.e(TAG, "盘中信号发送失败: id=$id title=$title", error)
-            }.getOrDefault(false)
+            postRecordedNotification(context, record, notification, CHANNEL_SIGNAL, "盘中信号发送失败")
         if (posted && shouldVibrateReminder(status)) vibrateSignal(context)
     }
 

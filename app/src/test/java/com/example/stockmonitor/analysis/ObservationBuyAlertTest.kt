@@ -15,7 +15,9 @@ class ObservationBuyAlertTest {
         val previous = candidate(ObservationStage.OBSERVING)
         listOf(ObservationStage.OBSERVING, ObservationStage.NEAR_ENTRY, ObservationStage.ELIMINATED).forEach {
             assertFalse(ObservationBuyAlert.shouldNotify(previous, candidate(it)))
+            assertFalse(ObservationBuyAlert.canNotify(candidate(it)))
         }
+        assertTrue(ObservationBuyAlert.canNotify(candidate(ObservationStage.BUY_CANDIDATE)))
         assertFalse(ObservationBuyAlert.shouldNotify(previous,
             candidate(ObservationStage.BUY_CANDIDATE).copy(limitUpBlocked = true)))
         assertFalse(ObservationBuyAlert.shouldNotify(previous,
@@ -94,5 +96,30 @@ class ObservationBuyAlertTest {
         )
 
         assertEquals("自选股", ObservationBuyAlert.body(confirmed).substringAfter("｜").substringBefore("｜"))
+    }
+
+    @Test
+    fun threeBoardCandidateRequiresThreeRoundsBeforeAlert() {
+        val previous = candidate(ObservationStage.NEAR_ENTRY).copy(
+            strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
+            limitStreak = 3,
+        )
+        val twoRounds = candidate(ObservationStage.BUY_CANDIDATE).copy(
+            strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
+            limitStreak = 3,
+            entryConfirmationRounds = 2,
+        )
+        val threeRounds = twoRounds.copy(entryConfirmationRounds = 3)
+
+        assertFalse(ObservationBuyAlert.shouldNotify(previous, twoRounds))
+        assertTrue(ObservationBuyAlert.shouldNotify(previous, threeRounds))
+    }
+
+    @Test
+    fun alertIdentityIsStockCodeSoDifferentRoutesCannotDuplicateAlerts() {
+        val leader = candidate(ObservationStage.BUY_CANDIDATE).copy(strategy = ObservationStrategy.LEADER)
+        val limit = leader.copy(strategy = ObservationStrategy.LIMIT_UP_CONTINUATION)
+
+        assertEquals(ObservationBuyAlert.alertKey(leader), ObservationBuyAlert.alertKey(limit))
     }
 }

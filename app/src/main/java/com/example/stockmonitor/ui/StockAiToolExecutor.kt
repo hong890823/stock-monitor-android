@@ -9,6 +9,7 @@ import com.example.stockmonitor.analysis.EnvContext
 import com.example.stockmonitor.analysis.MarketRegime
 import com.example.stockmonitor.analysis.MarketRiskContext
 import com.example.stockmonitor.analysis.MarketTimingContext
+import com.example.stockmonitor.analysis.NewsRelatedQueryPolicy
 import com.example.stockmonitor.analysis.RecentMarketContext
 import com.example.stockmonitor.analysis.StockAnalysis
 import com.example.stockmonitor.analysis.TimeUtils
@@ -22,6 +23,8 @@ import com.example.stockmonitor.core.EastMoneyClient
 import com.example.stockmonitor.core.FundamentalsClient
 import com.example.stockmonitor.core.GlobalFundamentalsClient
 import com.example.stockmonitor.core.GlobalSecurity
+import com.example.stockmonitor.core.MarketNewsClient
+import com.example.stockmonitor.core.NewsSourceFailure
 import com.example.stockmonitor.core.RowSnapshot
 import com.example.stockmonitor.core.SinaClient
 import com.example.stockmonitor.core.Store
@@ -32,6 +35,7 @@ import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 
 /**
  * AI 综合分析的程序工具桥接层。
@@ -67,6 +71,7 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
                 "get_market_summary_report" -> getMarketSummaryReport()
                 "get_recent_market_context" -> getRecentMarketContext(arguments)
                 "get_sector_snapshot" -> getSectorSnapshot(arguments)
+                "get_related_news" -> getRelatedNews(arguments)
                 "get_market_risk_context" -> getMarketRiskContext()
                 "search_web" -> searchWeb(arguments)
                 "list_knowledge_bases" -> listKnowledgeBases()
@@ -95,6 +100,73 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
             limit = arguments.optInt("limit", 5),
             includeRankings = arguments.optBoolean("include_rankings", true),
         )
+    }
+
+    private fun getRelatedNews(arguments: JSONObject): JSONObject {
+        val query = arguments.optString("query").trim()
+        require(query.isNotBlank()) { "get_related_news 缺少 query" }
+        val maxAgeDays = arguments.optInt("max_age_days", 3).coerceIn(1, 7)
+        val maxItems = arguments.optInt("max_items", 6).coerceIn(1, 10)
+        val nowMs = System.currentTimeMillis()
+        val fetchResult = runCatching {
+            MarketNewsClient.recentBlocking(nowMs, maxAgeDays)
+        }
+        val result = fetchResult.getOrNull()
+        val cachedFallback = fetchResult.isFailure
+        val items = result?.items ?: Repo.todayHeadlinesState.items.map { it.item }
+        val failures = result?.failures ?: listOf(
+            NewsSourceFailure(
+                sourceId = "all",
+                label = "新闻接口",
+                message = fetchResult.exceptionOrNull()?.message ?: "新闻数据暂缺",
+            ),
+        )
+        val matches = NewsRelatedQueryPolicy.query(
+            items = items,
+            query = query,
+            nowMs = nowMs,
+            limit = maxItems,
+            maxAgeDays = maxAgeDays,
+        )
+        return JSONObject()
+            .put("query", query)
+            .put("max_age_days", maxAgeDays)
+            .put("generated_at", nowStamp())
+            .put("data_source", if (cachedFallback) "cached_headlines" else "news_feeds")
+            .put("candidate_count", items.size)
+            .put(
+                "items",
+                JSONArray().apply {
+                    matches.forEach { match ->
+                        put(
+                            JSONObject()
+                                .put("title", match.headline.item.title)
+                                .put("source", match.headline.item.source)
+                                .put("published_at_ms", match.headline.item.publishedAtMs)
+                                .put("published_at", formatNewsTimestamp(match.headline.item.publishedAtMs))
+                                .put("url", match.headline.item.url ?: JSONObject.NULL)
+                                .put("track", match.headline.track.name)
+                                .put("category", match.headline.category.name)
+                                .put("relevance_score", match.headline.score.total)
+                                .put("matched_terms", JSONArray(match.matchedTerms))
+                                .put("supporting_sources", JSONArray(match.headline.supportingSources)),
+                        )
+                    }
+                },
+            )
+            .put(
+                "source_failures",
+                JSONArray().apply {
+                    failures.forEach { failure ->
+                        put(
+                            JSONObject()
+                                .put("source_id", failure.sourceId)
+                                .put("label", failure.label)
+                                .put("message", failure.message),
+                        )
+                    }
+                },
+            )
     }
 
     private fun searchSecurity(arguments: JSONObject): JSONObject {
@@ -552,6 +624,11 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
 
     private fun nowStamp(): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA).format(Date())
+
+    private fun formatNewsTimestamp(timestampMs: Long): String =
+        SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA)
+            .apply { timeZone = TimeZone.getTimeZone("Asia/Shanghai") }
+            .format(Date(timestampMs))
 
     private companion object {
         const val KNOWLEDGE_DIR = "knowledge"

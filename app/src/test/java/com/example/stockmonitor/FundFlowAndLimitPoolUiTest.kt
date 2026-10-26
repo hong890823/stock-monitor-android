@@ -69,8 +69,8 @@ class FundFlowAndLimitPoolUiTest {
             .readText()
 
         assertTrue(source.contains("LimitReport.fundFlowSummary(currentFlow)"))
-        assertTrue(source.contains("近3日${'$'}{flowWindow.recent3PositiveDays}"))
-        assertTrue(source.contains("val shortNote = listOf(stageText, item.reason, flowSummary)"))
+        assertTrue(source.contains("flowWindow.summary"))
+        assertTrue(source.contains("UiKit.DetailRow(\"多日资金流\", flowWindow.reason)"))
     }
 
     private fun limitStock() = LimitStock(

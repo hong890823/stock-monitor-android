@@ -15,9 +15,8 @@ class MarketWatchlistFundFlowUiTest {
             .substringBefore("// ── 行业涨幅榜 / 跌幅榜 ──")
 
         assertTrue(watchlist.contains("fundFlow = currentFundFlowSummary(code)"))
-        assertTrue(source.contains("LimitReport.fundFlowSummary(current)"))
-        assertTrue(source.contains("\"近3日${'$'}{window.recent3PositiveDays}/${'$'}{minOf(window.sampleCount, 3)}日净流入\""))
-        assertTrue(source.contains("\"多日样本1/3\""))
+        assertTrue(source.contains("FundFlowDisplayPolicy.current(current)"))
+        assertTrue(source.contains("FundFlowDisplayPolicy.multiDay(Repo.fundFlowHistory[code].orEmpty())"))
         assertTrue(source.contains("builder.append(\"｜${'$'}fundFlow\")"))
     }
 }

@@ -523,33 +523,35 @@ object UiKit {
             setPadding(dp(context, 8), dp(context, 2), dp(context, 4), dp(context, 5))
             visibility = if (QuoteRowExpansionState.isExpanded(stateKey)) View.VISIBLE else View.GONE
         }
-        details.forEach { detail ->
-            val row = LinearLayout(context).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(0, dp(context, 2), 0, dp(context, 2))
+        fun buildDetails() {
+            details.forEach { detail ->
+                val row = LinearLayout(context).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(0, dp(context, 2), 0, dp(context, 2))
+                }
+                row.addView(
+                    TextView(context).apply {
+                        text = detail.label
+                        textSize = 11.5f
+                        setTextColor(color(context, R.color.text_secondary))
+                        layoutParams = LinearLayout.LayoutParams(
+                            dp(context, 82),
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                        )
+                    }
+                )
+                row.addView(
+                    body(context, detail.value, 11.5f, color(context, R.color.text_primary)).apply {
+                        layoutParams = LinearLayout.LayoutParams(
+                            0,
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            1f,
+                        )
+                    }
+                )
+                detailsView.addView(row)
             }
-            row.addView(
-                TextView(context).apply {
-                    text = detail.label
-                    textSize = 11.5f
-                    setTextColor(color(context, R.color.text_secondary))
-                    layoutParams = LinearLayout.LayoutParams(
-                        dp(context, 82),
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                    )
-                }
-            )
-            row.addView(
-                body(context, detail.value, 11.5f, color(context, R.color.text_primary)).apply {
-                    layoutParams = LinearLayout.LayoutParams(
-                        0,
-                        LinearLayout.LayoutParams.WRAP_CONTENT,
-                        1f,
-                    )
-                }
-            )
-            detailsView.addView(row)
         }
         root.addView(detailsView)
 
@@ -563,6 +565,7 @@ object UiKit {
         root.addView(toggleLabel)
 
         fun updateExpansion(expanded: Boolean) {
+            if (expanded && detailsView.childCount == 0) buildDetails()
             detailsView.visibility = if (expanded) View.VISIBLE else View.GONE
             toggleLabel.text = if (expanded) "收起详情 ▴" else "展开详情 ▾"
             ViewCompat.setStateDescription(core, if (expanded) "已展开详情" else "已收起详情")

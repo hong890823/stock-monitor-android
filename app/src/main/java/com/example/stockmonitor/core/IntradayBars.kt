@@ -97,7 +97,7 @@ internal fun parseIntradayBars(
     code: String,
     minutes: Int,
 ): List<IntradayBar> {
-    require(minutes == 15 || minutes == 30) { "分钟K线仅支持15或30分钟" }
+    require(minutes == 5 || minutes == 15 || minutes == 30) { "分钟K线仅支持5、15或30分钟" }
     val array = JSONArray(payload)
     val bars = ArrayList<IntradayBar>(array.length())
     for (index in 0 until array.length()) {

@@ -95,6 +95,21 @@ class IntradayBarsTest {
     }
 
     @Test
+    fun intradayKlineParserAcceptsCompletedFiveMinuteBars() {
+        val payload = JSONArray(
+            """[
+                {"day":"2026-10-20 10:05:00","open":"10.0","high":"10.1","low":"9.9","close":"10.05","volume":"1000"},
+                {"day":"2026-10-20 10:10:00","open":"10.05","high":"10.1","low":"9.8","close":"9.85","volume":"1800"}
+            ]""",
+        ).toString()
+
+        val bars = parseIntradayBars(payload, "sz399006", minutes = 5)
+
+        assertEquals(listOf("2026-10-20 10:05:00", "2026-10-20 10:10:00"), bars.map { it.timestamp })
+        assertTrue(bars.all { it.completed })
+    }
+
+    @Test
     fun liveBarUpsertReplacesCurrentBarWithoutBreakingChronology() {
         val initial = IntradayBarWindow(
             listOf(

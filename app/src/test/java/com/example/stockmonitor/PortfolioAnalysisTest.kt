@@ -159,9 +159,10 @@ class PortfolioAnalysisTest {
     fun todayBriefDoesNotChangeFullReportBriefContract() {
         val result = evaluate(price = 31.0, support = 30.0, cost = 30.0, trendWeak = false)
         val legacy = PortfolioAnalysis.brief(listOf(result))
-        assertTrue(legacy.size == 4)
-        assertTrue(legacy[0].startsWith("今日结果："))
-        assertTrue(legacy[2].startsWith("持仓整体操作建议："))
+        assertTrue(legacy.size == 5)
+        assertTrue(legacy[0].startsWith("最高优先级操作："))
+        assertTrue(legacy[1].startsWith("今日结果："))
+        assertTrue(legacy[3].startsWith("持仓整体操作建议："))
         val report = PortfolioAnalysis.formatReport(listOf(result), "2026-10-16 10:00")
         PortfolioAnalysis.todayBrief(listOf(result), portfolio())
         assertEquals(report, PortfolioAnalysis.formatReport(listOf(result), "2026-10-16 10:00"))
@@ -326,7 +327,7 @@ class PortfolioAnalysisTest {
         assertTrue(report.contains("追加100股"))
         assertFalse(report.contains("今天不用动"))
         assertFalse(report.contains("建议风险仓位"))
-        assertTrue(PortfolioAnalysis.brief(listOf(result), swingPlan = plan)[2].contains("追加100股"))
+        assertTrue(PortfolioAnalysis.brief(listOf(result), swingPlan = plan)[3].contains("追加100股"))
     }
 
     @Test
@@ -375,7 +376,7 @@ class PortfolioAnalysisTest {
             com.example.stockmonitor.analysis.SwingStatus.READY, 90, "基本面与技术条件通过",
             price = 31.0, addQuantity = 100.0)
         val plan = com.example.stockmonitor.analysis.SwingPlan(listOf(row), "2026-10-15", null)
-        val brief = PortfolioAnalysis.brief(listOf(risk, preferred), swingPlan = plan)[2]
+        val brief = PortfolioAnalysis.brief(listOf(risk, preferred), swingPlan = plan)[3]
         assertTrue(brief.contains("风险持仓"))
         assertTrue(brief.contains("持续未收回则减仓"))
         assertTrue(brief.contains("优先持仓"))
@@ -923,11 +924,12 @@ class PortfolioAnalysisTest {
             market = env(MarketRegime.WEAK).market,
         )
 
-        assertTrue(brief.size == 4)
-        assertTrue(brief[0].startsWith("今日结果："))
-        assertTrue(brief[1].startsWith("市场环境："))
-        assertTrue(brief[2].startsWith("持仓整体操作建议："))
-        assertTrue(brief[3].startsWith("风险点："))
+        assertTrue(brief.size == 5)
+        assertTrue(brief[0].startsWith("最高优先级操作："))
+        assertTrue(brief[1].startsWith("今日结果："))
+        assertTrue(brief[2].startsWith("市场环境："))
+        assertTrue(brief[3].startsWith("持仓整体操作建议："))
+        assertTrue(brief[4].startsWith("风险点："))
     }
 
     @Test
@@ -940,8 +942,8 @@ class PortfolioAnalysisTest {
             ),
         )
 
-        assertTrue(brief[2].contains("机动仓做T"))
-        assertTrue(brief[2].contains("持有观察"))
+        assertTrue(brief[3].contains("机动仓做T"))
+        assertTrue(brief[3].contains("持有观察"))
     }
 
     @Test
@@ -950,8 +952,8 @@ class PortfolioAnalysisTest {
             results = listOf(evaluate(price = 30.0, support = 30.5)), // 破位 + 深套
         )
 
-        assertTrue(brief[3].contains("破位 1 只"))
-        assertTrue(brief[3].contains("深套 1 只"))
+        assertTrue(brief[4].contains("破位 1 只"))
+        assertTrue(brief[4].contains("深套 1 只"))
     }
 
     @Test
@@ -964,5 +966,24 @@ class PortfolioAnalysisTest {
         val briefAt = report.indexOf("📌 今日要点")
         val detailAt = report.indexOf("状态：深套风险观察")
         assertTrue(briefAt in 0 until detailAt)
+    }
+
+    @Test
+    fun highestPriorityOperationUsesRiskBeforeOrdinaryHoldAndAppearsInTodayBrief() {
+        val hold = evaluate(price = 31.0, support = 30.0, cost = 30.0, trendWeak = false)
+        val risk = hold.copy(
+            code = "sz000001",
+            name = "破位股",
+            signal = "减仓风险",
+            action = "跌破支撑，分批减仓或退出",
+        )
+
+        val priority = PortfolioAnalysis.highestPriorityAction(listOf(hold, risk))
+        val today = PortfolioAnalysis.todayBrief(listOf(hold, risk), portfolio())
+
+        assertTrue(priority!!.contains("破位股"))
+        assertTrue(priority.contains("分批减仓或退出"))
+        assertTrue(today.first().startsWith("最高优先级操作："))
+        assertTrue(today.first().contains("破位股"))
     }
 }

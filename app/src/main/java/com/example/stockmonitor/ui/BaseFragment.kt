@@ -24,19 +24,30 @@ abstract class BaseFragment(@LayoutRes layout: Int) : Fragment(layout) {
     protected var content: LinearLayout? = null
     private var imeVisible = false
     private var deferredRender = false
+    private var dataDirty = false
     private var imeLayoutListener: ViewTreeObserver.OnGlobalLayoutListener? = null
     private val listener: () -> Unit = {
-        val textInputFocused = view?.findFocus() is EditText
-        if (UiInteractionPolicy.shouldDeferRender(textInputFocused, imeVisible)) {
-            deferredRender = true
+        if (view?.isShown == true) {
+            val textInputFocused = view?.findFocus() is EditText
+            if (UiInteractionPolicy.shouldDeferRender(textInputFocused, imeVisible)) {
+                deferredRender = true
+            } else {
+                dataDirty = false
+                render()
+            }
         } else {
-            render()
+            dataDirty = true
         }
     }
     private val focusListener = ViewTreeObserver.OnGlobalFocusChangeListener { _, newFocus ->
         if (deferredRender && !imeVisible && newFocus !is EditText) {
             deferredRender = false
-            view?.post { if (isAdded && view != null) render() }
+            view?.post {
+                if (isAdded && view != null) {
+                    dataDirty = false
+                    render()
+                }
+            }
         }
     }
 
@@ -58,6 +69,7 @@ abstract class BaseFragment(@LayoutRes layout: Int) : Fragment(layout) {
         view.viewTreeObserver.addOnGlobalLayoutListener(imeLayoutListener)
         ViewCompat.requestApplyInsets(view)
         Repo.addListener(listener)
+        dataDirty = false
         render()
     }
 
@@ -67,6 +79,7 @@ abstract class BaseFragment(@LayoutRes layout: Int) : Fragment(layout) {
         view?.let { ViewCompat.setOnApplyWindowInsetsListener(it, null) }
         deferredRender = false
         imeVisible = false
+        dataDirty = false
         Repo.removeListener(listener)
         swipe = null
         content = null
@@ -94,13 +107,28 @@ abstract class BaseFragment(@LayoutRes layout: Int) : Fragment(layout) {
         )
         if (wasImeVisible && !imeVisible && deferredRender && root.findFocus() !is EditText) {
             deferredRender = false
-            root.post { if (isAdded) render() }
+            root.post {
+                if (isAdded) {
+                    dataDirty = false
+                    render()
+                }
+            }
         }
     }
 
     override fun onResume() {
         super.onResume()
+        renderIfStale()
+    }
+
+    fun renderIfStale() {
+        if (!isAdded || view?.isShown != true || !dataDirty) return
+        dataDirty = false
         render()
+    }
+
+    protected fun markRenderDirty() {
+        dataDirty = true
     }
 
     /** 下拉刷新：默认请求后台服务立即刷新一轮。 */

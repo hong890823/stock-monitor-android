@@ -431,6 +431,21 @@ object Fundamentals {
         val currentPb = input.valuations.lastOrNull { it.pbMrq != null }?.pbMrq
         val pePercentile = currentPercentile(peHistory, currentPe)
         val pbPercentile = currentPercentile(pbHistory, currentPb)
+        val valuationRisk = ValuationRiskPolicy.assess(
+            peTtm = currentPe,
+            pbMrq = currentPb,
+            pePercentile = pePercentile,
+            pbPercentile = pbPercentile,
+        )
+        if (valuationRisk.level in setOf(ValuationRiskLevel.WATCH, ValuationRiskLevel.ALERT)) {
+            risks.add(
+                RiskItem(
+                    level = if (valuationRisk.level == ValuationRiskLevel.ALERT) RiskLevel.ALERT else RiskLevel.WATCH,
+                    text = "独立估值风险：${valuationRisk.summary}；不计入技术分",
+                    evidenceDate = input.valuations.lastOrNull()?.date,
+                ),
+            )
+        }
 
         val anchors = valuationAnchors(input, eps, bps, peHistory, pbHistory, notes)
         val (fairLow, fairHigh) = combine(anchors, notes)

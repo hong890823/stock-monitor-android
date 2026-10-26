@@ -38,6 +38,25 @@ class ObservationSnapshotTest {
     }
 
     @Test
+    fun appendingSameTradingDayKeepsHighestStage() {
+        val first = snapshot("sh600000", "2026-10-14", 1).copy(
+            stage = ObservationStage.BUY_CANDIDATE,
+            highestStage = ObservationStage.BUY_CANDIDATE,
+            highestStageDate = "2026-10-14",
+        )
+        val replacement = snapshot("sh600000", "2026-10-14", 2).copy(
+            stage = ObservationStage.NEAR_ENTRY,
+            highestStage = ObservationStage.NEAR_ENTRY,
+            highestStageDate = "2026-10-14",
+        )
+
+        val result = ObservationSnapshotHistory.append(listOf(first), replacement)
+
+        assertEquals(ObservationStage.NEAR_ENTRY, result.single().stage)
+        assertEquals(ObservationStage.BUY_CANDIDATE, result.single().highestStage)
+    }
+
+    @Test
     fun historyKeepsTheLatestThirtyTradingDaysPerStock() {
         val history = (1..31).map { day ->
             snapshot("sh600000", "2026-09-${String.format("%02d", day)}", day)
@@ -54,7 +73,13 @@ class ObservationSnapshotTest {
 
     @Test
     fun jsonRoundTripPreservesSnapshotFields() {
-        val source = listOf(snapshot("sz000001", "2026-10-14", 2))
+        val source = listOf(
+            snapshot("sz000001", "2026-10-14", 2).copy(
+                highestStage = ObservationStage.BUY_CANDIDATE,
+                highestStageDate = "2026-10-13",
+                highestStageAtMs = 1234L,
+            ),
+        )
 
         val decoded = ObservationSnapshotJson.decode(ObservationSnapshotJson.encode(source))
 

@@ -25,4 +25,16 @@
     <string name="action_refresh">立即刷新</string>
     <string name="action_settings">设置</string>
     <string name="copied">已复制到剪贴板</string>
+    <string name="alert_history_title">提醒记录</string>
+    <string name="alert_history_empty">暂无提醒记录</string>
+    <string name="news_detail_title">今日要闻</string>
+    <string name="news_filter_all">全部</string>
+    <string name="news_filter_investment">投资要闻</string>
+    <string name="news_filter_technology">科技重点</string>
+    <string name="news_filter_holding">持仓相关</string>
+    <string name="news_sort_score">综合评分排序</string>
+    <string name="news_sort_latest">最新发布排序</string>
+    <string name="news_detail_empty">当前筛选下暂无新闻</string>
+    <string name="news_open_original">打开原文</string>
+    <string name="news_link_unavailable">这条新闻没有可打开的原文链接</string>
 </resources>

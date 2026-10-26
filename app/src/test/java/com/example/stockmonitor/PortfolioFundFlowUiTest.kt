@@ -12,8 +12,8 @@ class PortfolioFundFlowUiTest {
             .readText()
 
         assertTrue(source.contains("\"📦 持仓股\""))
-        assertTrue(source.contains("LimitReport.fundFlowSummary(current)"))
-        assertTrue(source.contains("近3日${'$'}{window.recent3PositiveDays}"))
+        assertTrue(source.contains("FundFlowDisplayPolicy.current(Repo.fundFlowHistory[code].orEmpty().lastOrNull())"))
+        assertTrue(source.contains("FundFlowDisplayPolicy.multiDay(Repo.fundFlowHistory[code].orEmpty())"))
         assertTrue(source.contains("currentFundFlowSummary(result.code)"))
         assertTrue(source.contains("UiKit.DetailRow(\"资金流\", currentFundFlowSummary(result.code))"))
         assertTrue(source.contains("UiKit.DetailRow(\n                \"近3日资金流\","))

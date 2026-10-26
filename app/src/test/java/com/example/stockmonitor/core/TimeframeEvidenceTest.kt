@@ -138,4 +138,46 @@ class TimeframeEvidenceTest {
         assertFalse(evidence.complete)
         assertFalse(evidence.riskComplete)
     }
+
+    @Test
+    fun riskLineEvidenceTracksDynamicLineSeparatelyFromSupport() {
+        val evidence = TimeframeEvidence.build(
+            bars15 = listOf(
+                bar(9, 45, 9.8),
+                bar(10, 0, 9.78),
+                bar(10, 15, 9.76),
+            ),
+            bars30 = listOf(bar(9, 30, 9.8), bar(10, 0, 9.76)),
+            price = 9.76,
+            support = 9.0,
+            resistance = 10.5,
+            now = LocalDateTime.parse("2026-10-23T10:18:00"),
+            quoteDate = "2026-10-23",
+            riskLine = 10.0,
+        )
+
+        assertEquals(10.0, evidence.riskLine, 0.00001)
+        assertTrue(evidence.riskLineThresholdPct > 0.0)
+        assertTrue(evidence.riskLineBelow)
+        assertTrue(evidence.riskLineConfirmations in 1..3)
+        assertTrue(evidence.riskLineM30Below)
+    }
+
+    @Test
+    fun staleMinuteBarsCannotConfirmRiskLine() {
+        val evidence = TimeframeEvidence.build(
+            bars15 = listOf(bar(9, 45, 9.8), bar(10, 0, 9.78), bar(10, 15, 9.76)),
+            bars30 = listOf(bar(9, 30, 9.8), bar(10, 0, 9.76)),
+            price = 9.76,
+            support = 9.0,
+            resistance = 10.5,
+            now = LocalDateTime.parse("2026-10-23T10:35:00"),
+            quoteDate = "2026-10-23",
+            riskLine = 10.0,
+        )
+
+        assertTrue(evidence.riskLineBelow)
+        assertEquals(0, evidence.riskLineConfirmations)
+        assertFalse(evidence.riskLineM30Below)
+    }
 }

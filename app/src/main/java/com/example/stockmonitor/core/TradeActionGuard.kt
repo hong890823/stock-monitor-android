@@ -83,6 +83,19 @@ object TradeActionGuard {
             if (invalidationPrice <= 0.0 || !invalidationPrice.isFinite()) {
                 return observe("缺少明确失效价，仅观察，不执行买入。")
             }
+            if (evidence.riskLine != null &&
+                (evidence.riskLineBelow || evidence.riskLineConfirmations > 0)
+            ) {
+                return observe(
+                    if (evidence.riskLineConfirmations >= 3 ||
+                        (evidence.riskLineConfirmations >= 2 && evidence.riskLineM30Below)
+                    ) {
+                        "关键均线已确认跌破，先不新增买入，等待重新站稳并完成新的入场确认。"
+                    } else {
+                        "关键均线跌破尚未完成30分钟确认，先不新增买入，避免把正常分歧当买点。"
+                    },
+                )
+            }
             if (!evidence.complete || evidence.m15Confirmations < 2 || !evidence.m30Aligned || !evidence.clearanceConfirmed) {
                 return observe("15/30分钟站稳距离不足，仅观察，不执行买入。")
             }

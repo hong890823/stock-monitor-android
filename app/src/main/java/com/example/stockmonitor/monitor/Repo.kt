@@ -15,6 +15,7 @@ import com.example.stockmonitor.analysis.PriceContext
 import com.example.stockmonitor.analysis.SelectedHeadline
 import com.example.stockmonitor.analysis.SectorContext
 import com.example.stockmonitor.analysis.StrongContinuationEvent
+import com.example.stockmonitor.analysis.TechnicalTrendSnapshot
 import com.example.stockmonitor.analysis.SwingPlan
 import com.example.stockmonitor.analysis.TechnicalCard
 import com.example.stockmonitor.analysis.TurnoverTracker
@@ -79,8 +80,16 @@ object Repo {
     @Volatile
     var fundFlowHistory: Map<String, List<FundFlow>> = emptyMap()
 
+    /** 板块跨日强度证据。只保留最近交易日快照，主线持续性不在 UI 层临时猜。 */
+    @Volatile
+    var sectorStrengthHistory: List<com.example.stockmonitor.analysis.SectorStrengthDay> = emptyList()
+
     @Volatile
     var observationSnapshots: List<ObservationSnapshot> = emptyList()
+
+    /** 自选股和持仓股共用同一套技术综合评分、周/月趋势与统一操作建议。 */
+    @Volatile
+    var technicalTrendSnapshots: Map<String, TechnicalTrendSnapshot> = emptyMap()
 
     @Volatile
     var paperTrades: List<PaperTradeRecord> = emptyList()

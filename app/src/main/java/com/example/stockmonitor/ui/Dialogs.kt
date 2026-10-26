@@ -244,6 +244,8 @@ object Dialogs {
             store.syncPositionToWatchlist,
         ) { store.syncPositionToWatchlist = it }
 
+        val dropAlertNote =
+            "个股较上一次刷新急跌超过该比例时提醒；日内累计跌幅 -3% / -5% 另有固定预警"
         container.addView(
             UiKit.body(
                 activity,
@@ -255,7 +257,7 @@ object Dialogs {
                     input(
                         activity,
                         "急跌预警阈值",
-                        "个股较上一次刷新急跌超过该比例时提醒；日内累计跌幅 -3% / -5% 另有固定预警",
+                        dropAlertNote,
                         listOf(Field("阈值（%）", String.format(Locale.CHINA, "%.1f", store.dropAlertPct), numeric = true)),
                     ) { values ->
                         values.firstOrNull()?.toDoubleOrNull()?.let { store.dropAlertPct = it }
@@ -264,26 +266,20 @@ object Dialogs {
             }
         )
         container.addView(
-            UiKit.body(
-                activity,
-                "刷新规则：每 15 秒刷新一次，工作日 08:30-16:00 请求新行情；" +
-                    "板块每 30 分钟、指标选股与持仓分析每 30 分钟一个槽位；盘面总结每天 16:00 / 18:00 / 21:00 生成。" +
-                    "夜间 18:00-06:00 指标选股失败会每 90 分钟重试，最多 8 次。",
-                11.5f,
-            ).apply { setPadding(0, UiKit.dp(activity, 14), 0, 0) }
+            UiKit.body(activity, dropAlertNote, 11.5f).apply {
+                setPadding(0, UiKit.dp(activity, 4), 0, 0)
+            }
         )
         container.addView(
             MaterialButton(activity).apply {
                 text = "打开应用通知设置"
+                layoutParams =
+                    LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                    ).apply { topMargin = UiKit.dp(activity, 12) }
                 setOnClickListener { Notifier.openAppNotificationSettings(activity) }
             }
-        )
-        container.addView(
-            UiKit.body(
-                activity,
-                "这里用于开启通知权限；买卖点震动由应用执行，仍会受手机静音、勿扰模式和系统震动设置影响。",
-                11.5f,
-            )
         )
 
         MaterialAlertDialogBuilder(activity)

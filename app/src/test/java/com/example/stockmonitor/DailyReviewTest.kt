@@ -183,6 +183,26 @@ class DailyReviewTest {
         assertTrue(text.contains("较触发 +2.27%"))
     }
 
+    @Test
+    fun reviewPutsHighestPriorityOperationBeforeOverallAdvice() {
+        val risk = result(
+            code = "sh600001",
+            name = "乙",
+            signal = "减仓风险",
+            action = "跌破支撑，分批减仓或退出",
+        )
+        val text = report(
+            positions = listOf(Position("sh600001", "乙", 1_000.0, 8.5)),
+            quotes = mapOf("sh600001" to quote("sh600001", 8.0, 8.5, "乙")),
+            results = listOf(risk),
+        )
+
+        assertTrue(text.contains("最高优先级操作"))
+        assertTrue(text.contains("乙"))
+        assertTrue(text.contains("分批减仓或退出"))
+        assertTrue(text.indexOf("最高优先级操作") < text.indexOf("持仓整体操作建议"))
+    }
+
     // ── 三、近两日个股重大利好 ────────────────────────────────────────────────
 
     @Test

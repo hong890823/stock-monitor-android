@@ -36,6 +36,7 @@ import com.example.stockmonitor.analysis.TradeNotification
 import com.example.stockmonitor.analysis.VolumePrice
 import com.example.stockmonitor.core.GlobalFundamentalsClient
 import com.example.stockmonitor.core.GlobalSecurity
+import com.example.stockmonitor.core.NewsTrack
 import com.example.stockmonitor.core.Store
 import com.example.stockmonitor.monitor.AnalysisService
 import com.example.stockmonitor.monitor.MonitorService
@@ -279,21 +280,44 @@ class ToolsFragment : BaseFragment(R.layout.fragment_scroll) {
                 val headlines = newsState.displayItems(nowMs)
                 addTaskStatus(Repo.newsTask)
                 addText(
-                    "公开财经快讯自动筛选｜更新时间 ${formatNewsTime(newsState.updatedAtMs)}",
+                    "财经事件 + 深度科技 + AI 垂直 + 全球科技｜更新时间 ${formatNewsTime(newsState.updatedAtMs)}",
                     11.5f,
                 )
                 if (headlines.isEmpty()) {
                     addText(
-                        if (newsState.error.isNullOrBlank()) "暂无今日可用要闻" else "刷新失败，暂时没有可展示的今日要闻",
+                        when {
+                            newsState.error.isNullOrBlank() -> "暂无今日可用要闻"
+                            newsState.error.contains("部分来源暂不可用") -> "部分来源暂不可用，暂时没有可展示的今日要闻"
+                            else -> "刷新失败，暂时没有可展示的今日要闻"
+                        },
                         12f,
                     )
                 } else {
-                    headlines.take(HeadlineSelector.CARD_LIMIT).forEachIndexed { index, selected ->
-                        addText(
-                            "${index + 1}. ${selected.item.title}\n" +
-                                "${selected.category.label}｜${selected.item.source}｜${formatNewsTime(selected.item.publishedAtMs)}",
-                            11.5f,
-                        )
+                    addText("【${NewsTrack.INVESTMENT.label}】", 12f)
+                    val investmentHeadlines = headlines.filter { it.track == NewsTrack.INVESTMENT }
+                    if (investmentHeadlines.isEmpty()) {
+                        addText("暂无投资要闻", 11.5f)
+                    } else {
+                        investmentHeadlines.take(HeadlineSelector.CARD_LANE_LIMIT).forEachIndexed { index, selected ->
+                            addText(
+                                "${index + 1}. ${selected.item.title}\n" +
+                                    "${selected.category.label}｜${selected.item.source}｜${formatNewsTime(selected.item.publishedAtMs)}｜评分 ${selected.score.total}",
+                                11.5f,
+                            )
+                        }
+                    }
+                    addText("【${NewsTrack.TECHNOLOGY.label}】", 12f)
+                    val technologyHeadlines = headlines.filter { it.track == NewsTrack.TECHNOLOGY }
+                    if (technologyHeadlines.isEmpty()) {
+                        addText("暂无科技重点", 11.5f)
+                    } else {
+                        technologyHeadlines.take(HeadlineSelector.CARD_LANE_LIMIT).forEachIndexed { index, selected ->
+                            addText(
+                                "${index + 1}. ${selected.item.title}\n" +
+                                    "${selected.category.label}｜${selected.item.source}｜${formatNewsTime(selected.item.publishedAtMs)}｜评分 ${selected.score.total}",
+                                11.5f,
+                            )
+                        }
                     }
                 }
                 add(
@@ -306,10 +330,11 @@ class ToolsFragment : BaseFragment(R.layout.fragment_scroll) {
                 if (headlines.isNotEmpty()) {
                     add(
                         button(context, "查看全部要闻（${headlines.size}条）") {
-                            ReportActivity.open(
-                                context,
-                                "📰 今日要闻",
-                                HeadlineSelector.formatReport(headlines, newsState.updatedAtMs),
+                            NewsDetailActivity.open(
+                                context = context,
+                                items = headlines,
+                                updatedAtMs = newsState.updatedAtMs,
+                                warning = newsState.error,
                             )
                         },
                     )
@@ -359,15 +384,6 @@ class ToolsFragment : BaseFragment(R.layout.fragment_scroll) {
                 add(
                     button(context, "打开设置") {
                         Dialogs.showSettings(requireActivity() as AppCompatActivity) { render() }
-                    },
-                )
-                add(
-                    button(context, "监控规则与说明") {
-                        Dialogs.showDetails(
-                            requireActivity() as AppCompatActivity,
-                            "监控规则与说明",
-                            MonitoringCopy.detailText(store.dropAlertPct),
-                        )
                     },
                 )
                 add(
@@ -434,6 +450,15 @@ class ToolsFragment : BaseFragment(R.layout.fragment_scroll) {
                         store.monitorEnabled = false
                         Repo.reset()
                         render()
+                    },
+                )
+                add(
+                    button(context, "监控规则与说明") {
+                        Dialogs.showDetails(
+                            requireActivity() as AppCompatActivity,
+                            "监控规则与说明",
+                            MonitoringCopy.detailText(store.dropAlertPct),
+                        )
                     },
                 )
                 container.addView(view)

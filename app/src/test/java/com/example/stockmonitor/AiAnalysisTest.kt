@@ -48,6 +48,8 @@ class AiAnalysisTest {
         assertTrue(prompt.contains("analysis_scope"))
         assertFalse(prompt.contains("综合分析必须同时覆盖技术面、基本面、持仓报告和盘面总结四类报告"))
         assertTrue(prompt.contains("事实、推断和不确定性"))
+        assertTrue(prompt.contains("新闻、公告、催化事件或风险事件"))
+        assertTrue(prompt.contains("get_related_news"))
     }
 
     @Test
@@ -58,6 +60,16 @@ class AiAnalysisTest {
         assertTrue(catalog.contains("get_market_summary_report"))
         assertTrue(catalog.contains("get_recent_market_context"))
         assertTrue(catalog.contains("get_market_risk_context"))
+    }
+
+    @Test
+    fun toolCatalogOffersRelatedNewsForStocksAndSectors() {
+        val catalog = AiToolCatalog.definitions().toString()
+
+        assertTrue(catalog.contains("get_related_news"))
+        assertTrue(catalog.contains("股票名称、代码、行业或概念板块"))
+        assertTrue(catalog.contains("max_age_days"))
+        assertTrue(catalog.contains("max_items"))
     }
 
     @Test

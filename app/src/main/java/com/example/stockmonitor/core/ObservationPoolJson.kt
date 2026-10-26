@@ -16,6 +16,9 @@ object ObservationPoolJson {
                     put("last_evaluated_date", item.lastEvaluatedDate)
                     put("stage", item.stage.name)
                     put("score", item.score)
+                    item.technicalScore?.let { put("technical_score", it) }
+                    item.weeklyTrendLabel?.let { put("weekly_trend", it) }
+                    item.monthlyTrendLabel?.let { put("monthly_trend", it) }
                     put("weak_days", item.weakDays)
                     put("observed_days", item.observedDays)
                     put("last_price", item.lastPrice)
@@ -27,8 +30,13 @@ object ObservationPoolJson {
                     put("limit_up_blocked", item.limitUpBlocked)
                     put("limit_up_shrink_acceleration", item.limitUpShrinkAcceleration)
                     put("entry_confirmation_rounds", item.entryConfirmationRounds)
+                    put("entry_confirmation_required_rounds", item.entryConfirmationRequiredRounds)
                     put("entry_confirmed_at_ms", item.entryConfirmedAtMs)
                     put("entry_confirmation_volume", item.entryConfirmationVolume)
+                    item.highestStage?.let { put("highest_stage", it.name) }
+                    item.highestStageDate?.let { put("highest_stage_date", it) }
+                    put("highest_stage_at_ms", item.highestStageAtMs)
+                    put("soft_risk_rounds", item.softRiskRounds)
                     item.limitStreak?.let { put("limit_streak", it) }
                     item.sealQualityScore?.let { put("seal_quality_score", it) }
                     item.sealQualityCoveragePct?.let { put("seal_quality_coverage_pct", it) }
@@ -40,6 +48,17 @@ object ObservationPoolJson {
                             risk.breakoutReference?.let { put("breakout_reference", it) }
                         })
                     }
+                    put("status_changes", JSONArray().apply {
+                        item.statusChanges.forEach { change ->
+                            put(JSONObject().apply {
+                                put("date", change.date)
+                                put("at_ms", change.atMs)
+                                put("previous_stage", change.previousStage?.name)
+                                put("stage", change.stage.name)
+                                put("reason", change.reason)
+                            })
+                        }
+                    })
                     ObservationEvidenceJson.put(this, "supporting", item.evidence.supporting)
                     ObservationEvidenceJson.put(this, "counter", item.evidence.counter)
                     ObservationEvidenceJson.put(this, "missing", item.evidence.missing)
@@ -65,6 +84,9 @@ object ObservationPoolJson {
                         ObservationStage.valueOf(item.optString("stage"))
                     }.getOrDefault(ObservationStage.OBSERVING),
                     score = item.optInt("score", 0),
+                    technicalScore = if (item.has("technical_score")) item.optInt("technical_score") else null,
+                    weeklyTrendLabel = item.optString("weekly_trend").takeIf { it.isNotBlank() },
+                    monthlyTrendLabel = item.optString("monthly_trend").takeIf { it.isNotBlank() },
                     weakDays = item.optInt("weak_days", 0),
                     observedDays = item.optInt("observed_days", 0),
                     lastPrice = item.optDouble("last_price", 0.0),
@@ -81,8 +103,15 @@ object ObservationPoolJson {
                         "limit_up_shrink_acceleration", item.optString("reason").contains("涨停缩量加速"),
                     ),
                     entryConfirmationRounds = item.optInt("entry_confirmation_rounds", 0),
+                    entryConfirmationRequiredRounds = item.optInt("entry_confirmation_required_rounds", 0),
                     entryConfirmedAtMs = item.optLong("entry_confirmed_at_ms", 0L),
                     entryConfirmationVolume = item.optDouble("entry_confirmation_volume", 0.0),
+                    highestStage = item.optString("highest_stage").takeIf { it.isNotBlank() }?.let { stageName ->
+                        runCatching { ObservationStage.valueOf(stageName) }.getOrNull()
+                    },
+                    highestStageDate = item.optString("highest_stage_date").takeIf { it.isNotBlank() },
+                    highestStageAtMs = item.optLong("highest_stage_at_ms", 0L),
+                    softRiskRounds = item.optInt("soft_risk_rounds", 0),
                     limitStreak = if (item.has("limit_streak")) item.optInt("limit_streak") else null,
                     sealQualityScore = if (item.has("seal_quality_score")) {
                         item.optInt("seal_quality_score")
@@ -107,6 +136,24 @@ object ObservationPoolJson {
                                 .takeUnless { it.isNaN() },
                         )
                     },
+                    statusChanges = item.optJSONArray("status_changes")?.let { changes ->
+                        (0 until changes.length()).mapNotNull { changeIndex ->
+                            changes.optJSONObject(changeIndex)?.let { change ->
+                                ObservationStatusChange(
+                                    date = change.optString("date"),
+                                    atMs = change.optLong("at_ms", 0L),
+                                    previousStage = change.optString("previous_stage").takeIf { it.isNotBlank() }
+                                        ?.let { stageName ->
+                                            runCatching { ObservationStage.valueOf(stageName) }.getOrNull()
+                                        },
+                                    stage = runCatching {
+                                        ObservationStage.valueOf(change.optString("stage"))
+                                    }.getOrDefault(ObservationStage.OBSERVING),
+                                    reason = change.optString("reason"),
+                                )
+                            }
+                        }
+                    }.orEmpty(),
                 )
             }.filter { it.code.isNotBlank() }.toMutableList()
         }.getOrDefault(mutableListOf())

@@ -54,7 +54,7 @@ class ObservationEligibilityTest {
     }
 
     @Test
-    fun freshNewDayQuoteDowngradesOldBuyLabelForEitherSourceUntilReevaluated() {
+    fun freshNewDayQuoteDemotesConfirmedBuyUntilNextEvaluation() {
         ObservationStrategy.entries.forEach { strategy ->
             val old = candidate.copy(strategy = strategy, entryConfirmationRounds = 2)
             val quote = sealed.copy(price = 10.2, quoteDate = "2026-10-15")
@@ -95,6 +95,86 @@ class ObservationEligibilityTest {
     }
 
     @Test
+    fun strongNearEntryCandidateIsGroupedAboveOrdinaryWaitingConfirmation() {
+        val strongNear = candidate.copy(code = "sh603278", stage = ObservationStage.NEAR_ENTRY)
+        val ordinaryNear = candidate.copy(code = "sz000001", stage = ObservationStage.NEAR_ENTRY)
+        val strongObserving = candidate.copy(code = "sz000002", stage = ObservationStage.OBSERVING)
+        val ordinaryObserving = candidate.copy(code = "sz000003", stage = ObservationStage.OBSERVING)
+        val confirmedBuy = candidate.copy(code = "sz000004", stage = ObservationStage.BUY_CANDIDATE)
+
+        val display = ObservationEligibility.prioritizedSections(
+            candidates = listOf(strongNear, ordinaryNear, strongObserving, ordinaryObserving, confirmedBuy),
+            quotes = emptyMap(),
+            isStrong = { it.code == strongNear.code || it.code == strongObserving.code },
+        )
+
+        assertEquals(listOf(confirmedBuy), display.buy)
+        assertEquals(listOf(strongNear, strongObserving), display.strong)
+        assertEquals(listOf(ordinaryNear), display.waiting)
+        assertEquals(listOf(ordinaryObserving), display.other)
+    }
+
+    @Test
+    fun duplicateCodeCandidatesAreShownOnceWithBestStateAndMergedHistory() {
+        val leaderBuy = candidate.copy(
+            code = "sz003021",
+            strategy = ObservationStrategy.LEADER,
+            stage = ObservationStage.BUY_CANDIDATE,
+            boards = listOf("通用设备"),
+            highestStage = ObservationStage.BUY_CANDIDATE,
+            highestStageDate = "2026-10-20",
+        )
+        val limitWatch = leaderBuy.copy(
+            strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
+            stage = ObservationStage.OBSERVING,
+            continuousObservation = true,
+            limitUpBlocked = true,
+            limitStreak = 2,
+            boards = listOf("机器人"),
+            highestStage = ObservationStage.NEAR_ENTRY,
+            highestStageDate = "2026-10-19",
+        )
+
+        val result = ObservationEligibility.deduplicateCandidates(
+            listOf(leaderBuy, limitWatch),
+        )
+
+        assertEquals(1, result.size)
+        assertEquals(ObservationStage.BUY_CANDIDATE, result.single().stage)
+        assertEquals(true, result.single().continuousObservation)
+        assertEquals(2, result.single().limitStreak)
+        assertEquals(listOf("通用设备", "机器人"), result.single().boards)
+        assertEquals(ObservationStage.BUY_CANDIDATE, result.single().highestStage)
+
+        val displayed = ObservationEligibility
+            .sections(listOf(leaderBuy, limitWatch), emptyMap())
+            .values
+            .flatten()
+        assertEquals(listOf("sz003021"), displayed.map { it.code })
+    }
+
+    @Test
+    fun duplicateCodeDisplayUsesLatestEvaluationStateInsteadOfOlderHigherStage() {
+        val staleBuy = candidate.copy(
+            code = "sz003021",
+            strategy = ObservationStrategy.LEADER,
+            stage = ObservationStage.BUY_CANDIDATE,
+            lastEvaluatedDate = "2026-10-20",
+        )
+        val freshRisk = staleBuy.copy(
+            strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
+            stage = ObservationStage.OBSERVING,
+            lastEvaluatedDate = "2026-10-21",
+            reason = "连续2轮风险确认，降级观察",
+        )
+
+        val result = ObservationEligibility.deduplicateCandidates(listOf(staleBuy, freshRisk)).single()
+
+        assertEquals(ObservationStage.OBSERVING, result.stage)
+        assertEquals("2026-10-21", result.lastEvaluatedDate)
+    }
+
+    @Test
     fun entrySectionsOnlyShowTopTwoStagesWithoutDeferredStocksOrMutatingPool() {
         val near = candidate.copy(code = "sz000001", stage = ObservationStage.NEAR_ENTRY)
         val observing = candidate.copy(code = "sz000002", stage = ObservationStage.OBSERVING)
@@ -124,6 +204,15 @@ class ObservationEligibilityTest {
         val reopened = ObservationEligibility.applyQuoteGate(blocked, sealed.copy(price = 10.7))
         assertEquals(ObservationStage.NEAR_ENTRY, reopened.stage)
         assertFalse(ObservationBuyAlert.shouldNotify(blocked, reopened))
+    }
+
+    @Test
+    fun freshOpenQuoteClearsStaleLimitDefer() {
+        val stale = candidate.copy(limitUpBlocked = true)
+        val openQuote = sealed.copy(price = 10.7)
+
+        assertFalse(ObservationEligibility.isLimitUpDeferred(stale, openQuote))
+        assertFalse(ObservationEligibility.applyQuoteGate(stale, openQuote).limitUpBlocked)
     }
 
     @Test
@@ -158,7 +247,7 @@ class ObservationEligibilityTest {
                 false, 9.6, 10.0, setupScore = 3, strongScore = 3,
                 limitUpBlocked = true, limitUpShrinkAcceleration = true)
             val blocked = ObservationPool.evaluate(original, blockedSignal)
-            assertEquals(ObservationStage.OBSERVING, blocked.stage)
+            assertEquals(ObservationStage.NEAR_ENTRY, blocked.stage)
             assertFalse(ObservationBuyAlert.shouldNotify(original, blocked))
             val restored = ObservationPoolJson.decode(ObservationPoolJson.encode(listOf(blocked))).single()
             assertTrue(restored.limitUpShrinkAcceleration)

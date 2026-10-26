@@ -38,6 +38,31 @@ class MultiTimeframeTrendTest {
         assertEquals(first.weeks, second.weeks)
         assertEquals(first.months, second.months)
         assertEquals(first.years, second.years)
+        assertEquals(first.weekTrend, second.weekTrend)
+        assertEquals(first.monthTrend, second.monthTrend)
+    }
+
+    @Test
+    fun twoConfirmedCyclesAfterWeaknessAreMarkedAsStabilizing() {
+        val cycles = bottomingCycles(count = 25)
+
+        assertEquals("下跌企稳", MultiTimeframeTrend.classify(cycles, 20, 4).label)
+    }
+
+    @Test
+    fun singleBounceCannotConfirmStabilizing() {
+        val cycles = bottomingCycles(count = 24)
+
+        assertNotEquals("下跌企稳", MultiTimeframeTrend.classify(cycles, 20, 4).label)
+    }
+
+    @Test
+    fun laterNewLowRejectsStabilizing() {
+        val cycles = bottomingCycles(count = 25).mapIndexed { index, bar ->
+            if (index == 24) bar.copy(low = bar.low - 1.0, close = bar.close - 1.0) else bar
+        }
+
+        assertNotEquals("下跌企稳", MultiTimeframeTrend.classify(cycles, 20, 4).label)
     }
 
     @Test
@@ -71,5 +96,14 @@ class MultiTimeframeTrendTest {
         assertNull(MultiTimeframeTrend.evaluate(bars, "2026-10-15", tradingDates).issue)
         val afterHoliday = bars.filter { it.date <= "2026-09-30" }
         assertNull(MultiTimeframeTrend.evaluate(afterHoliday, "2026-10-09", afterHoliday.takeLast(30).map { it.date }).issue)
+    }
+
+    private fun bottomingCycles(count: Int): List<DayBar> {
+        val closes = List(20) { 10.0 } + listOf(8.0, 7.0, 6.0, 9.6, 10.0)
+        return closes.take(count).mapIndexed { index, close ->
+            val date = LocalDate.parse("2024-01-01").plusWeeks(index.toLong()).toString()
+            val low = if (index >= 22) close - 0.1 else close - 0.1
+            DayBar(date, close - 0.05, close + 0.1, low, close, 100.0)
+        }
     }
 }

@@ -192,6 +192,51 @@ class TradeActionGuardTest {
     }
 
     @Test
+    fun pendingRiskLineBlocksBuyBeforeTreatingPullbackAsEntry() {
+        val decision = TradeActionGuard.evaluate(
+            intent = "buy",
+            evidence = evidence().copy(
+                riskLine = 10.0,
+                riskLineConfirmations = 2,
+                riskLineM30Below = false,
+            ),
+            volume = IntradayVolumeContext(
+                marketExpanding = true,
+                stockVolumeConfirming = true,
+                barVolumeConfirming = true,
+            ),
+            eligibility = eligibility(),
+            invalidationPrice = 9.5,
+            tradeDate = "2026-10-23",
+        )
+
+        assertEquals(GuardedActionLevel.OBSERVATION, decision.level)
+        assertTrue(decision.text.contains("30分钟确认"))
+    }
+
+    @Test
+    fun currentPriceBelowRiskLineBlocksBuyBeforeConfirmation() {
+        val decision = TradeActionGuard.evaluate(
+            intent = "buy",
+            evidence = evidence().copy(
+                riskLine = 10.0,
+                riskLineBelow = true,
+            ),
+            volume = IntradayVolumeContext(
+                marketExpanding = true,
+                stockVolumeConfirming = true,
+                barVolumeConfirming = true,
+            ),
+            eligibility = eligibility(),
+            invalidationPrice = 9.5,
+            tradeDate = "2026-10-23",
+        )
+
+        assertEquals(GuardedActionLevel.OBSERVATION, decision.level)
+        assertTrue(decision.text.contains("尚未完成30分钟确认"))
+    }
+
+    @Test
     fun t1AndInconsistentLedgerBlockSellableQuantity() {
         val nextDay = TradeActionGuard.evaluate(
             intent = "risk_exit",

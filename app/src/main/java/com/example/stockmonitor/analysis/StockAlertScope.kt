@@ -23,8 +23,15 @@ object StockAlertScope {
         .map { it.code }
         .toSet()
 
-    fun shouldNotify(type: StockAlertType, held: Boolean): Boolean =
-        held || type == StockAlertType.CONFIRMED_BUY
+    fun shouldNotify(
+        type: StockAlertType,
+        held: Boolean,
+        buyPointConfirmed: Boolean = false,
+    ): Boolean = if (type == StockAlertType.CONFIRMED_BUY) {
+        buyPointConfirmed
+    } else {
+        held
+    }
 
     fun shouldNotifyPortfolioSignal(signal: String, exitStage: HoldingExitStage?): Boolean =
         signal in portfolioSignalLabels &&

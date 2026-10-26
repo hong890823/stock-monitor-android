@@ -8,11 +8,12 @@ import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.style.ForegroundColorSpan
 import com.example.stockmonitor.R
-import com.example.stockmonitor.analysis.FundFlowWindowPolicy
+import com.example.stockmonitor.analysis.FundFlowDisplayPolicy
 import com.example.stockmonitor.analysis.MarketSummary
 import com.example.stockmonitor.analysis.TimeUtils
 import com.example.stockmonitor.analysis.LimitReport
 import com.example.stockmonitor.analysis.PriceContext
+import com.example.stockmonitor.analysis.TechnicalTrendSnapshot
 import com.example.stockmonitor.analysis.VolumePrice
 import com.example.stockmonitor.analysis.VolumePriceSignal
 import com.example.stockmonitor.analysis.VolumeRatio
@@ -170,12 +171,14 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
                                 ratio = Repo.volumeRatios[code],
                                 priceContext = Repo.priceContexts[code],
                                 fundFlow = currentFundFlowSummary(code),
+                                technicalTrend = Repo.technicalTrendSnapshots[code],
                             ),
                             details = watchDetails(
                                 code = code,
                                 quote = quote,
                                 ratio = Repo.volumeRatios[code],
                                 priceContext = Repo.priceContexts[code],
+                                technicalTrend = Repo.technicalTrendSnapshots[code],
                             ),
                             onExpansionChanged = {
                                 setSecondaryExpanded(QuoteRowExpansionState.allExpanded(watchRowKeys))
@@ -409,8 +412,18 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
         ratio: Double?,
         priceContext: PriceContext?,
         fundFlow: String,
+        technicalTrend: TechnicalTrendSnapshot?,
     ): CharSequence {
         val builder = SpannableStringBuilder()
+        builder.append(
+            if (technicalTrend == null) {
+                "技术综合评分计算中｜周/月趋势数据不足"
+            } else {
+                "技术综合评分 ${technicalTrend.technicalScore}/100｜周/月趋势 " +
+                    "${technicalTrend.weeklyTrend.label}/${technicalTrend.monthlyTrend.label}"
+            },
+        )
+        builder.append("｜")
         val signal = VolumePrice.of(ratio, changePct, priceContext)
         if (signal != VolumePriceSignal.NEUTRAL && ratio != null) {
             val color = UiKit.signalColor(context, signal)
@@ -434,10 +447,21 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
         quote: Quote,
         ratio: Double?,
         priceContext: PriceContext?,
+        technicalTrend: TechnicalTrendSnapshot?,
     ): List<UiKit.DetailRow> {
         val signal = VolumePrice.of(ratio, quote.changePct, priceContext)
-        return listOf(
+        return listOfNotNull(
             UiKit.DetailRow("股票代码", code),
+            UiKit.DetailRow(
+                "技术综合评分",
+                technicalTrend?.let { "${it.technicalScore}/100" } ?: "计算中",
+            ),
+            UiKit.DetailRow(
+                "周/月趋势",
+                technicalTrend?.let { "${it.weeklyTrend.label}/${it.monthlyTrend.label}" } ?: "数据不足",
+            ),
+            technicalTrend?.let { UiKit.DetailRow("技术分构成", it.evidenceSummary.removePrefix("技术分构成：")) },
+            technicalTrend?.let { UiKit.DetailRow("操作建议", it.primaryAdvice) },
             UiKit.DetailRow("成交额", String.format(Locale.CHINA, "%.2f亿", quote.turnover / 1e8)),
             UiKit.DetailRow(
                 "最高 / 最低",
@@ -452,17 +476,11 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
 
     private fun currentFundFlowSummary(code: String): String {
         val current = Repo.fundFlowHistory[code].orEmpty().lastOrNull()
-        return LimitReport.fundFlowSummary(current)
+        return FundFlowDisplayPolicy.current(current)
     }
 
     private fun fundFlowWindowSummary(code: String): String {
-        val window = FundFlowWindowPolicy.assess(Repo.fundFlowHistory[code].orEmpty())
-        return when {
-            window.sampleCount >= 2 ->
-                "近3日${window.recent3PositiveDays}/${minOf(window.sampleCount, 3)}日净流入"
-            window.sampleCount == 1 -> "多日样本1/3"
-            else -> ""
-        }
+        return FundFlowDisplayPolicy.multiDay(Repo.fundFlowHistory[code].orEmpty())
     }
 
 }

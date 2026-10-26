@@ -43,6 +43,7 @@ import com.example.stockmonitor.analysis.MarketEnvironmentQuality
 import com.example.stockmonitor.analysis.MarketTurnoverFallbackPolicy
 import com.example.stockmonitor.analysis.MarketTurnoverSource
 import com.example.stockmonitor.analysis.MarketRegime
+import com.example.stockmonitor.analysis.NewsFocusContext
 import com.example.stockmonitor.analysis.MarketRiskContext
 import com.example.stockmonitor.analysis.MarketState
 import com.example.stockmonitor.analysis.MarketSummary
@@ -53,6 +54,8 @@ import com.example.stockmonitor.analysis.ObservationEligibility
 import com.example.stockmonitor.analysis.ObservationEntryPolicy
 import com.example.stockmonitor.analysis.ObservationEvidenceFactory
 import com.example.stockmonitor.analysis.ObservationPool
+import com.example.stockmonitor.analysis.ObservationReentryPolicy
+import com.example.stockmonitor.analysis.ObservationRefreshPolicy
 import com.example.stockmonitor.analysis.PaperTradeTracker
 import com.example.stockmonitor.analysis.PortfolioAnalysis
 import com.example.stockmonitor.analysis.PortfolioSwing
@@ -64,14 +67,21 @@ import com.example.stockmonitor.analysis.PromotionEnvironmentPolicy
 import com.example.stockmonitor.analysis.ReboundTracker
 import com.example.stockmonitor.analysis.SealSprintTracker
 import com.example.stockmonitor.analysis.RelaxedScreenSelection
+import com.example.stockmonitor.analysis.BoardKind
+import com.example.stockmonitor.analysis.MainlineStrengthPolicy
 import com.example.stockmonitor.analysis.SectorContext
+import com.example.stockmonitor.analysis.SectorStrengthDay
+import com.example.stockmonitor.analysis.SectorStrengthPoint
 import com.example.stockmonitor.analysis.SectorTurnoverTracker
 import com.example.stockmonitor.analysis.StockAlertScope
 import com.example.stockmonitor.analysis.StockAlertType
 import com.example.stockmonitor.analysis.StockAnalysis
 import com.example.stockmonitor.analysis.StockDropLevel
 import com.example.stockmonitor.analysis.StockRiskPolicy
+import com.example.stockmonitor.analysis.StrongSectorRankingPolicy
 import com.example.stockmonitor.analysis.StrongContinuationEvent
+import com.example.stockmonitor.analysis.TechnicalQualityPolicy
+import com.example.stockmonitor.analysis.TechnicalTrendSnapshotPolicy
 import com.example.stockmonitor.analysis.SwingEvidence
 import com.example.stockmonitor.analysis.SwingPlan
 import com.example.stockmonitor.analysis.TickPlan
@@ -85,6 +95,7 @@ import com.example.stockmonitor.analysis.TurnoverContext
 import com.example.stockmonitor.analysis.TurnoverTracker
 import com.example.stockmonitor.analysis.VolumeRatio
 import com.example.stockmonitor.analysis.WatchlistBuyCandidatePool
+import com.example.stockmonitor.core.BoardMembershipPolicy
 import com.example.stockmonitor.core.BoardMember
 import com.example.stockmonitor.core.BoardTagCache
 import com.example.stockmonitor.core.CachedScreen
@@ -182,9 +193,18 @@ class MonitorService : Service() {
     private var lastWatchlistBuyRefreshAtMs = 0L
     private val observationHistory = java.util.concurrent.ConcurrentHashMap<String, Pair<String, List<DayBar>>>()
     private val swingHistory = java.util.concurrent.ConcurrentHashMap<String, Pair<String, List<DayBar>>>()
+    private val technicalTrendHistory =
+        java.util.concurrent.ConcurrentHashMap<String, Pair<String, List<DayBar>>>()
+    private val technicalTrendBusy = AtomicBoolean(false)
+    private var lastTechnicalTrendRefreshAtMs = 0L
     private val intraday15ByCode = java.util.concurrent.ConcurrentHashMap<String, IntradayBarWindow>()
     private val intraday30ByCode = java.util.concurrent.ConcurrentHashMap<String, IntradayBarWindow>()
     private val intradayLastFetchAtMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val marketFiveMinuteBars =
+        java.util.concurrent.ConcurrentHashMap<String, List<MarketAlertEngine.IndexBar>>()
+    private val marketBarsBusy = AtomicBoolean(false)
+    private val marketBarsUpdatedAtMs = java.util.concurrent.atomic.AtomicLong(0L)
+    private val marketBarsDay = java.util.concurrent.atomic.AtomicReference<String?>(null)
     private val dailyRiskContextCache = DailyRiskContextCache()
 
     private lateinit var store: Store
@@ -338,11 +358,21 @@ class MonitorService : Service() {
         Repo.concepts = store.conceptBoards
         Repo.observationPool = store.observationPool
         Repo.fundFlowHistory = store.fundFlowHistory
+        Repo.sectorStrengthHistory = store.sectorStrengthHistory
         Repo.observationSnapshots = store.observationSnapshots
+        Repo.technicalTrendSnapshots = store.technicalTrendSnapshots
         Repo.paperTrades = store.paperTrades
         Repo.statusText = "正在加载行情…"
         restoreVolumeBaseline()
         restoreQuoteCache()
+        val technicalItems =
+            (
+                store.watchlist.map { it.code to it.name } +
+                    store.portfolio.positions.map { it.code to it.name }
+            ).distinctBy { it.first }
+        scope.launch {
+            refreshTechnicalTrendSnapshots(technicalItems, Repo.quotes)
+        }
         lastPortfolioSlot = store.portfolioSlot
         tickJob = scope.launch { runTickLoop() }
     }
@@ -504,6 +534,14 @@ class MonitorService : Service() {
                 refreshTurnover(Repo.quotes, calendar)
                 refreshVolumeMetrics(calendar)
             }
+            val technicalItems =
+                (
+                    watchlist.map { it.code to it.name } +
+                        store.portfolio.positions.map { it.code to it.name }
+                ).distinctBy { it.first }
+            scope.launch {
+                refreshTechnicalTrendSnapshots(technicalItems, Repo.quotes)
+            }
             // 盘中口径：预警、信号、分钟K线只认今天的行情，防旧行情触发盘中逻辑。
             val freshQuotes = incoming.filterValues { it.quoteDate == today }
             if (freshQuotes.isNotEmpty()) {
@@ -546,6 +584,72 @@ class MonitorService : Service() {
         autoDailyReview(calendar)
     }
 
+    /**
+     * 自选股与持仓股共用 35/25/20/20 的技术综合评分。长历史每只每天只取一次，
+     * 结论缓存落盘，行情轮询本身不反复请求几百根 K 线。
+     */
+    private suspend fun refreshTechnicalTrendSnapshots(
+        items: List<Pair<String, String>>,
+        quotes: Map<String, Quote>,
+    ) {
+        if (items.isEmpty() || !technicalTrendBusy.compareAndSet(false, true)) return
+        try {
+            val nowMs = System.currentTimeMillis()
+            val hasMissing = items.any { (code, _) -> Repo.technicalTrendSnapshots[code] == null }
+            if (!hasMissing && nowMs - lastTechnicalTrendRefreshAtMs < 30L * 60L * 1000L) return
+            val benchmark = runCatching { sina.kline(MARKET_INDEX_CODES.first(), 60) }.getOrNull()
+            val elapsed = TradingCalendar.tradingMinutesElapsed()
+            val semaphore = Semaphore(3)
+            val snapshots = coroutineScope {
+                items
+                    .distinctBy { it.first }
+                    .map { (code, name) ->
+                        async {
+                            semaphore.withPermit {
+                                val quote = quotes[code] ?: return@withPermit null
+                                val history =
+                                    technicalTrendHistory[code]?.takeIf { it.first == TimeUtils.todayText() }?.second
+                                        ?: runCatching { sina.kline(code, 520) }
+                                            .getOrNull()
+                                            ?.takeIf { it.size >= 250 }
+                                            ?.also { technicalTrendHistory[code] = TimeUtils.todayText() to it }
+                                        ?: return@withPermit null
+                                val bars = ObservationEntryPolicy.withLiveBar(history, quote)
+                                val entrySetup = TrendEntryStrategy.evaluateDaily(
+                                    bars,
+                                    benchmark,
+                                    elapsedTradingMinutes = elapsed,
+                                )
+                                val trendAssessment = TrendAssessmentPolicy.evaluateBars(
+                                    history = history,
+                                    asOf = quote.quoteDate?.substringBefore(' ') ?: TimeUtils.todayText(),
+                                )
+                                TechnicalTrendSnapshotPolicy.evaluate(
+                                    history = history,
+                                    code = code,
+                                    name = name,
+                                    asOf = quote.quoteDate?.substringBefore(' ') ?: TimeUtils.todayText(),
+                                    entrySetup = entrySetup,
+                                    trendAssessment = trendAssessment,
+                                )
+                            }
+                        }
+                    }
+                    .awaitAll()
+                    .filterNotNull()
+            }
+            if (snapshots.isNotEmpty()) {
+                Repo.technicalTrendSnapshots = Repo.technicalTrendSnapshots +
+                    snapshots.associateBy { it.code }
+                store.technicalTrendSnapshots = Repo.technicalTrendSnapshots
+                lastTechnicalTrendRefreshAtMs = nowMs
+                Repo.notifyChanged()
+            }
+        } finally {
+            technicalTrendBusy.set(false)
+        }
+    }
+
     private fun autoRefreshTodayHeadlines(calendar: Calendar = TimeUtils.nowCalendar()) {
         val nowMs = calendar.timeInMillis
         if (Repo.todayHeadlinesState.shouldRefresh(nowMs)) {
@@ -567,16 +671,18 @@ class MonitorService : Service() {
         Repo.newsTask = BackgroundTaskState.running("今日要闻", message = "正在获取公开财经快讯…")
         Repo.notifyChanged()
         try {
+            val fetched = MarketNewsClient.today(nowMs)
             val selected = HeadlineSelector.select(
-                MarketNewsClient.today(nowMs),
+                fetched.items,
                 nowMs,
                 HeadlineSelector.DETAIL_LIMIT,
+                newsFocusContext(),
             )
             Repo.todayHeadlinesState = TodayHeadlinesState(
                 items = selected,
                 updatedAtMs = nowMs,
                 lastAttemptAtMs = nowMs,
-                error = null,
+                error = partialNewsFailure(fetched.failures),
             )
             store.lastNewsJson = MarketNewsJson.encode(selected, nowMs, nowMs)
             store.lastNewsUpdatedAtMs = nowMs
@@ -584,7 +690,12 @@ class MonitorService : Service() {
             Repo.newsTask = BackgroundTaskState.success(
                 "今日要闻",
                 TimeUtils.nowText(),
-                if (selected.isEmpty()) "今日暂无可用要闻" else "已更新 ${selected.size} 条",
+                buildString {
+                    append(if (selected.isEmpty()) "今日暂无可用要闻" else "已更新 ${selected.size} 条")
+                    if (fetched.failures.isNotEmpty()) {
+                        append("；${fetched.failures.size} 个来源暂不可用")
+                    }
+                },
             )
         } catch (error: Exception) {
             Log.w(TAG, "今日要闻刷新失败", error)
@@ -606,6 +717,34 @@ class MonitorService : Service() {
         }
     }
 
+    private fun newsFocusContext(): NewsFocusContext {
+        fun codes(values: List<String>): Set<String> = values.flatMapTo(mutableSetOf()) { code ->
+            listOf(
+                code,
+                code.removePrefix("sh"),
+                code.removePrefix("sz"),
+                code.removePrefix("bj"),
+            )
+        }
+
+        val held = store.portfolio.positions
+        val watched = store.watchlist
+        val observed = store.observationPool.filter { it.stage != ObservationStage.ELIMINATED }
+        return NewsFocusContext(
+            heldCodes = codes(held.map { it.code }),
+            heldNames = held.mapTo(mutableSetOf()) { it.name },
+            watchCodes = codes(watched.map { it.code }),
+            watchNames = watched.mapTo(mutableSetOf()) { it.name },
+            observationCodes = codes(observed.map { it.code }),
+            observationNames = observed.mapTo(mutableSetOf()) { it.name },
+        )
+    }
+
+    private fun partialNewsFailure(failures: List<com.example.stockmonitor.core.NewsSourceFailure>): String? {
+        if (failures.isEmpty()) return null
+        return failures.joinToString("；", prefix = "部分来源暂不可用：") { "${it.label}：${it.message}" }
+    }
+
     /** 行业板块，等价于 get_sector_data + update_data 里的“保留上次有效数据”。 */
     private fun refreshSectors() {
         val fetched =
@@ -621,6 +760,7 @@ class MonitorService : Service() {
             Repo.sectors = fetched
             Repo.sectorTurnoverRatios = sectorTurnoverTracker.update(fetched.all, System.currentTimeMillis())
             Repo.sectorDataAsOfMs = System.currentTimeMillis()
+            captureSectorStrengthSnapshot()
         }
     }
 
@@ -638,6 +778,7 @@ class MonitorService : Service() {
             }
         Repo.sectorFlows = fetched
         Repo.sectorFlowAsOfMs = System.currentTimeMillis()
+        captureSectorStrengthSnapshot()
     }
 
     /**
@@ -738,6 +879,88 @@ class MonitorService : Service() {
         val published = fetched.copy(stamp = TimeUtils.nowText())
         Repo.concepts = published
         store.conceptBoards = published
+        captureSectorStrengthSnapshot()
+    }
+
+    private fun captureSectorStrengthSnapshot() {
+        val date = Repo.quotes.values
+            .mapNotNull { it.quoteDate?.take(10) }
+            .filter { it.isNotBlank() }
+            .maxOrNull() ?: TimeUtils.todayText()
+        val industryItems = Repo.sectors?.all.orEmpty().map { item ->
+            RankedBoardInput(
+                kind = BoardKind.INDUSTRY,
+                date = date,
+                name = item.name,
+                code = Repo.sectorContexts.values
+                    .mapNotNull { it.industry }
+                    .firstOrNull { StrongSectorRankingPolicy.boardNamesMatch(it.name, item.name) }
+                    ?.boardCode,
+                changePct = item.change,
+                volume = item.volume,
+            )
+        }
+        val conceptItems = (
+            Repo.conceptSummary?.sectors.orEmpty().ifEmpty {
+                (Repo.concepts?.top.orEmpty() + Repo.concepts?.bottom.orEmpty())
+                    .distinctBy { it.code.ifBlank { it.name } }
+            }
+        ).map { item ->
+            RankedBoardInput(
+                kind = BoardKind.CONCEPT,
+                date = date,
+                name = item.name,
+                code = item.code.takeIf { it.isNotBlank() },
+                changePct = item.change,
+                volume = item.volume,
+            )
+        }
+        val points = rankSectorStrengthInputs(industryItems) + rankSectorStrengthInputs(conceptItems)
+        if (points.isEmpty()) return
+        val next = MainlineStrengthPolicy.upsert(
+            Repo.sectorStrengthHistory,
+            SectorStrengthDay(date = date, points = points),
+        )
+        if (next == Repo.sectorStrengthHistory) return
+        Repo.sectorStrengthHistory = next
+        store.sectorStrengthHistory = next
+    }
+
+    private data class RankedBoardInput(
+        val kind: BoardKind,
+        val date: String,
+        val name: String,
+        val code: String?,
+        val changePct: Double,
+        val volume: Double,
+    )
+
+    private fun rankSectorStrengthInputs(items: List<RankedBoardInput>): List<SectorStrengthPoint> {
+        val changeValues = items.map { it.changePct }.filter { it.isFinite() }.sorted()
+        val volumeValues = items.map { it.volume }.filter { it.isFinite() }.sorted()
+        return items.map { item ->
+            SectorStrengthPoint(
+                kind = item.kind,
+                date = item.date,
+                name = item.name,
+                code = item.code,
+                changePct = item.changePct,
+                changeRankPct = percentileRank(changeValues, item.changePct),
+                turnoverRankPct = percentileRank(volumeValues, item.volume),
+                mainNetRatioPct = item.code?.let { Repo.sectorFlows[it]?.mainNetRatio },
+            )
+        }
+    }
+
+    private fun percentileRank(sortedValues: List<Double>, current: Double): Double? {
+        if (!current.isFinite() || sortedValues.size < 2) return null
+        var low = 0
+        var high = sortedValues.size
+        while (low < high) {
+            val middle = (low + high) ushr 1
+            if (sortedValues[middle] <= current) low = middle + 1 else high = middle
+        }
+        return (sortedValues.size - low).toDouble() / (sortedValues.size - 1)
     }
 
     /** 新浪兜底：顺手填 conceptSummary，供盘面总结与涨跌停板块标注复用。 */
@@ -775,13 +998,13 @@ class MonitorService : Service() {
             currentFundFlowCodes(scanned.up.map { it.code } + scanned.down.map { it.code })
                 .filterNot { Repo.fundFlowHistory.containsKey(it) }
         refreshFundFlowHistory(missingFlowCodes)
-        val boardMap = buildBoardMap()
+        val boardMap = resolveBoardMap(scanned.up + scanned.down)
         val flowByCode = Repo.fundFlowHistory.mapValues { (_, flows) -> flows.lastOrNull() }
         val enrichedUp = scanned.up.map {
-            it.copy(boards = boardMap[it.name].orEmpty(), fundFlow = flowByCode[it.code])
+            it.copy(boards = boardMap[it.code].orEmpty(), fundFlow = flowByCode[it.code])
         }
         val enrichedDown = scanned.down.map {
-            it.copy(boards = boardMap[it.name].orEmpty(), fundFlow = flowByCode[it.code])
+            it.copy(boards = boardMap[it.code].orEmpty(), fundFlow = flowByCode[it.code])
         }
         Repo.limits =
             LimitData(
@@ -826,7 +1049,7 @@ class MonitorService : Service() {
             code.startsWith("sz0") || code.startsWith("sz3") ||
             code.startsWith("bj4") || code.startsWith("bj8")
 
-    /** 从概念缓存构建 {股票名: [板块1, 板块2, ...]}，等价于 _build_board_map。 */
+    /** 概念榜自带的领涨股归属，作为 F10 个股板块缓存的快速兜底。 */
     private fun buildBoardMap(): Map<String, List<String>> {
         val summary = Repo.conceptSummary ?: return emptyMap()
         val map = LinkedHashMap<String, MutableList<String>>()
@@ -836,6 +1059,21 @@ class MonitorService : Service() {
             }
         }
         return map
+    }
+
+    private fun resolveBoardMap(stocks: List<LimitStock>): Map<String, List<String>> {
+        val result = BoardMembershipPolicy.resolve(
+            stocks = stocks.map { BoardMembershipPolicy.Stock(it.code, it.name) },
+            leaderBoardsByName = buildBoardMap(),
+            cachedEntries = BoardTagCache.decode(store.boardTags),
+            nowMs = System.currentTimeMillis(),
+        ) { code ->
+            runCatching { eastMoney.stockBoards(code) }.getOrDefault(emptyList())
+        }
+        if (result.refreshedCodes.isNotEmpty()) {
+            store.boardTags = BoardTagCache.encode(result.entries)
+        }
+        return result.boardsByCode
     }
 
     /**
@@ -1054,8 +1292,8 @@ class MonitorService : Service() {
     }
 
     /**
-     * 大盘风险预警：使用指数相对昨收的日内跌幅，而不是相邻两轮的跌幅。
-     * 这样全天缓慢下跌到危险区间时也能提醒；同一轮下跌只提醒一次。
+     * 市场风险预警：使用指数相对昨收的日内跌幅，而不是相邻两轮的跌幅。
+     * 这样全天缓慢下跌到危险区间时也能提醒；同一轮风险在重新武装前只提醒一次。
      */
     private fun checkMarketRiskAlert(
         quotes: Map<String, Quote>,
@@ -1063,7 +1301,13 @@ class MonitorService : Service() {
     ) {
         if (!store.alertsEnabled || !TradingCalendar.inMarketHoursForAlert(calendar)) return
         val timestamp = System.currentTimeMillis()
+        val today = TimeUtils.todayText()
+        if (marketBarsDay.getAndSet(today) != today) {
+            marketFiveMinuteBars.clear()
+            marketBarsUpdatedAtMs.set(0L)
+        }
         val turnoverRatio = marketTurnoverRatio(quotes, calendar)
+        refreshMarketFiveMinuteBars(quotes, timestamp)
         val snapshots =
             MARKET_INDEX_CODES.mapNotNull { code ->
                 quotes[code]?.let { quote ->
@@ -1078,13 +1322,112 @@ class MonitorService : Service() {
                     )
                 }
             }
-        marketAlertEngine.update(snapshots, TimeUtils.todayText()).forEach { alert ->
+        val breadth = marketBreadth(timestamp)
+        marketAlertEngine
+            .update(snapshots, HashMap(marketFiveMinuteBars), today, breadth)
+            .forEach { alert ->
             if (alert.vibrate) {
-                Notifier.marketRisk(this, ALERT_ID_MARKET_RISK, alert.title, alert.body)
+                Notifier.marketRisk(
+                    this,
+                    ALERT_ID_MARKET_RISK,
+                    alert.title,
+                    alert.body,
+                    level = alert.level.name,
+                    triggerType = alert.type,
+                )
             } else {
                 Notifier.alert(this, ALERT_ID_MARKET_WEAKNESS, alert.title, alert.body)
             }
         }
+    }
+
+    private fun refreshMarketFiveMinuteBars(
+        quotes: Map<String, Quote>,
+        nowMs: Long,
+    ) {
+        if (
+            marketBarsUpdatedAtMs.get() > 0L &&
+                nowMs - marketBarsUpdatedAtMs.get() < MARKET_FIVE_MINUTE_REFRESH_MS
+        ) {
+            return
+        }
+        if (!marketBarsBusy.compareAndSet(false, true)) return
+        scope.launch {
+            try {
+                val now =
+                    java.time.LocalDateTime.ofInstant(
+                        java.time.Instant.ofEpochMilli(nowMs),
+                        java.time.ZoneId.of("Asia/Shanghai"),
+                    )
+                MARKET_INDEX_CODES.forEach { code ->
+                    val bars =
+                        runCatching { sina.intradayKline(code, minutes = 5, length = 240) }
+                            .onFailure { Log.w(TAG, "5分钟K线暂不可用：code=$code", it) }
+                            .getOrDefault(emptyList())
+                    val quoteDate = quotes[code]?.quoteDate ?: TimeUtils.todayText()
+                    val latestCompleted =
+                        TimeframeEvidence.latestCompletedSlot(now, minutes = 5, quoteDate = quoteDate)
+                    val converted =
+                        bars
+                            .filter {
+                                it.valid &&
+                                    latestCompleted != null &&
+                                    it.timestamp.take(10) == quoteDate.take(10) &&
+                                    it.timestamp <= latestCompleted
+                            }
+                            .mapNotNull { bar ->
+                                TimeUtils.parseDateTime(bar.timestamp)?.time?.let { timestamp ->
+                                    MarketAlertEngine.IndexBar(
+                                        code = code,
+                                        name = quotes[code]?.name ?: code,
+                                        timestamp = timestamp,
+                                        open = bar.open,
+                                        high = bar.high,
+                                        low = bar.low,
+                                        close = bar.close,
+                                        volume = bar.volume,
+                                    )
+                                }
+                            }
+                            .distinctBy { it.timestamp }
+                            .sortedBy { it.timestamp }
+                    if (converted.isNotEmpty() && marketBarsDay.get() == quoteDate.take(10)) {
+                        marketFiveMinuteBars[code] = converted
+                    }
+                }
+                if (marketBarsDay.get() == TimeUtils.todayText()) {
+                    marketBarsUpdatedAtMs.set(nowMs)
+                }
+            } finally {
+                marketBarsBusy.set(false)
+            }
+        }
+    }
+
+    private fun marketBreadth(nowMs: Long): MarketAlertEngine.MarketBreadth {
+        val industry =
+            Repo.sectors?.all.orEmpty().let { sectors ->
+                MarketBreadthFreshnessPolicy.freshRatio(
+                    MarketBreadthSnapshot(
+                        rising = sectors.count { it.change > 0 },
+                        total = sectors.size,
+                        updatedAtMs = Repo.sectorsUpdatedAtMs,
+                    ),
+                    nowMs = nowMs,
+                )
+            }
+        val concept =
+            Repo.conceptSummary?.let { summary ->
+                MarketBreadthFreshnessPolicy.freshRatio(
+                    MarketBreadthSnapshot(
+                        rising = summary.rising,
+                        total = summary.rising + summary.falling,
+                        updatedAtMs = Repo.conceptSummaryUpdatedAtMs,
+                    ),
+                    nowMs = nowMs,
+                )
+            }
+        return MarketAlertEngine.MarketBreadth(industry, concept)
     }
 
     /**
@@ -1554,6 +1897,16 @@ class MonitorService : Service() {
                 now = nowLocal,
                 quoteDate = today,
                 dailyContext = dailyContext,
+                riskLine = level?.let {
+                    com.example.stockmonitor.analysis.NormalDivergencePolicy.riskLine(
+                        price = quote.price,
+                        ma5 = it.ma5,
+                        ma20 = it.ma20,
+                        priceLocation = currentPriceContext?.location,
+                        biasFromMa5Pct = it.ma5.takeIf { ma5 -> ma5 > 0.0 }
+                            ?.let { ma5 -> (quote.price / ma5 - 1.0) * 100.0 },
+                    )
+                },
             )
             val volumeContext = IntradayVolumeContext.build(
                 marketPredictedFullDayTurnover = turnoverSnapshot?.predictedFullDay?.div(100_000_000.0),
@@ -2100,8 +2453,11 @@ class MonitorService : Service() {
             }
         candidates.forEach { candidate ->
             val previous = existing[observationKey(candidate)]
-            if (previous == null || previous.stage != ObservationStage.ELIMINATED) {
-                existing[observationKey(candidate)] = previous ?: candidate
+            existing[observationKey(candidate)] = when {
+                previous == null -> candidate
+                previous.stage == ObservationStage.ELIMINATED ->
+                    ObservationReentryPolicy.revive(previous, candidate)
+                else -> previous
             }
         }
         val updated =
@@ -2138,13 +2494,16 @@ class MonitorService : Service() {
                 )
             val key = observationKey(candidate)
             val previous = existing[key]
-            if (previous == null || previous.stage != ObservationStage.ELIMINATED) {
-                existing[key] = previous?.copy(
+            existing[key] = when {
+                previous == null -> candidate
+                previous.stage == ObservationStage.ELIMINATED ->
+                    ObservationReentryPolicy.revive(previous, candidate)
+                else -> previous.copy(
                     limitStreak = stock.limitStreak,
                     sealQualityScore = stock.sealQualityScore,
                     sealQualityCoveragePct = stock.sealQualityCoveragePct,
                     boards = stock.boards,
-                ) ?: candidate
+                )
             }
         }
         val updated =
@@ -2184,15 +2543,18 @@ class MonitorService : Service() {
                 )
             val key = observationKey(candidate)
             val previous = existing[key]
-            if (previous == null || previous.stage != ObservationStage.ELIMINATED) {
-                existing[key] = previous?.copy(
+            existing[key] = when {
+                previous == null -> candidate
+                previous.stage == ObservationStage.ELIMINATED ->
+                    ObservationReentryPolicy.revive(previous, candidate)
+                else -> previous.copy(
                     continuousObservation = true,
                     limitUpBlocked = true,
                     limitStreak = stock.limitStreak,
                     sealQualityScore = stock.sealQualityScore,
                     sealQualityCoveragePct = stock.sealQualityCoveragePct,
                     boards = stock.boards,
-                ) ?: candidate
+                )
             }
         }
         val updated =
@@ -2296,10 +2658,10 @@ class MonitorService : Service() {
         val currentByKey = latest.associateBy { it.code to it.strategy }
         val accepted =
             evaluated
-                .filter { (key, candidate) ->
-                    key in currentByKey && (
-                        (candidate.stage != ObservationStage.BUY_CANDIDATE && candidate.entryConfirmationRounds == 0) ||
-                            (Repo.quotes[key.first] ?: quotes[key.first]) == evaluatedQuotes[key]
+                .filter { (key, _) ->
+                    key in currentByKey && ObservationRefreshPolicy.shouldPersist(
+                        evaluatedQuote = evaluatedQuotes[key],
+                        currentQuote = Repo.quotes[key.first] ?: quotes[key.first],
                     )
                 }.mapValues { (key, candidate) ->
                     ObservationEligibility.applyQuoteGate(candidate, Repo.quotes[key.first] ?: quotes[key.first])
@@ -2310,10 +2672,10 @@ class MonitorService : Service() {
                 val previous = currentByKey[candidate.code to candidate.strategy] ?: return@filter false
                 ObservationBuyAlert.shouldNotify(previous, candidate)
             }
-        val updatedKeys = updated.map { observationKey(it) }.toSet()
+        val updatedKeys = updated.map { ObservationBuyAlert.alertKey(it) }.toSet()
         pendingObservationBuyAlerts.keys.retainAll(updatedKeys)
         pendingObservationBuyAlerts.keys.toList().forEach { key ->
-            val current = updated.firstOrNull { observationKey(it) == key }
+            val current = updated.firstOrNull { ObservationBuyAlert.alertKey(it) == key }
             if (current == null ||
                 current.stage != ObservationStage.BUY_CANDIDATE ||
                 current.lastEvaluatedDate != today
@@ -2324,10 +2686,10 @@ class MonitorService : Service() {
             }
         }
         transitionedBuyAlerts.forEach { candidate ->
-            pendingObservationBuyAlerts[observationKey(candidate)] = candidate
+            pendingObservationBuyAlerts[ObservationBuyAlert.alertKey(candidate)] = candidate
         }
         val buyAlerts = (transitionedBuyAlerts + pendingObservationBuyAlerts.values)
-            .distinctBy { observationKey(it) }
+            .distinctBy { ObservationBuyAlert.alertKey(it) }
         store.observationPool = updated.toMutableList()
         Repo.observationPool = updated
         val evaluatedSnapshots =
@@ -2347,6 +2709,11 @@ class MonitorService : Service() {
                     stopPrice = candidate.stopPrice,
                     reason = candidate.reason,
                     evidence = candidate.evidence,
+                    highestStage = candidate.highestStage ?: candidate.stage,
+                    highestStageDate = candidate.highestStageDate
+                        ?: candidate.lastEvaluatedDate
+                        ?: candidate.addedDate,
+                    highestStageAtMs = candidate.highestStageAtMs,
                 )
             }
         if (evaluatedSnapshots.isNotEmpty()) {
@@ -2362,19 +2729,25 @@ class MonitorService : Service() {
         }
         buyAlerts.forEach { candidate ->
             val quote = Repo.quotes[candidate.code] ?: quotes[candidate.code] ?: return@forEach
+            if (!ObservationBuyAlert.canNotify(candidate)) return@forEach
             val guardedBuy = guardedObservationBuy(candidate, quote)
             if (guardedBuy.level != GuardedActionLevel.ACTIONABLE) return@forEach
-            if (!StockAlertScope.shouldNotify(StockAlertType.CONFIRMED_BUY, held = false)) return@forEach
+            if (!StockAlertScope.shouldNotify(
+                    StockAlertType.CONFIRMED_BUY,
+                    held = candidate.code in StockAlertScope.heldCodes(store.portfolio.positions),
+                    buyPointConfirmed = ObservationBuyAlert.canNotify(candidate),
+                )
+            ) return@forEach
             if (!store.alertsEnabled || !store.intradaySignalEnabled) return@forEach
             if (!TradingCalendar.inMarketHoursForAlert()) return@forEach
             if (!consumePushBudget(candidate.code)) return@forEach
             Notifier.signal(
                 this,
-                ALERT_ID_OBSERVATION_BUY + observationKey(candidate).hashCode(),
+                ALERT_ID_OBSERVATION_BUY + ObservationBuyAlert.alertKey(candidate).hashCode(),
                 ObservationBuyAlert.title(candidate),
                 ObservationBuyAlert.body(candidate, guardedBuy.text),
             )
-            pendingObservationBuyAlerts.remove(observationKey(candidate))
+            pendingObservationBuyAlerts.remove(ObservationBuyAlert.alertKey(candidate))
         }
         Repo.notifyChanged()
     }
@@ -2466,10 +2839,10 @@ class MonitorService : Service() {
             val previous = currentByCode[candidate.code] ?: return@filter false
             ObservationBuyAlert.shouldNotify(previous, candidate)
         }
-        val updatedKeys = updated.map { observationKey(it) }.toSet()
+        val updatedKeys = updated.map { ObservationBuyAlert.alertKey(it) }.toSet()
         pendingWatchlistBuyAlerts.keys.retainAll(updatedKeys)
         pendingWatchlistBuyAlerts.keys.toList().forEach { key ->
-            val current = updated.firstOrNull { observationKey(it) == key }
+            val current = updated.firstOrNull { ObservationBuyAlert.alertKey(it) == key }
             if (current == null ||
                 current.stage != ObservationStage.BUY_CANDIDATE ||
                 current.lastEvaluatedDate != today
@@ -2480,26 +2853,32 @@ class MonitorService : Service() {
             }
         }
         transitionedBuyAlerts.forEach { candidate ->
-            pendingWatchlistBuyAlerts[observationKey(candidate)] = candidate
+            pendingWatchlistBuyAlerts[ObservationBuyAlert.alertKey(candidate)] = candidate
         }
         val buyAlerts = (transitionedBuyAlerts + pendingWatchlistBuyAlerts.values)
-            .distinctBy { observationKey(it) }
+            .distinctBy { ObservationBuyAlert.alertKey(it) }
         store.watchlistBuyCandidates = updated.toMutableList()
         buyAlerts.forEach { candidate ->
             val quote = Repo.quotes[candidate.code] ?: quotes[candidate.code] ?: return@forEach
+            if (!ObservationBuyAlert.canNotify(candidate)) return@forEach
             val guardedBuy = guardedObservationBuy(candidate, quote)
             if (guardedBuy.level != GuardedActionLevel.ACTIONABLE) return@forEach
-            if (!StockAlertScope.shouldNotify(StockAlertType.CONFIRMED_BUY, held = false)) return@forEach
+            if (!StockAlertScope.shouldNotify(
+                    StockAlertType.CONFIRMED_BUY,
+                    held = candidate.code in StockAlertScope.heldCodes(store.portfolio.positions),
+                    buyPointConfirmed = ObservationBuyAlert.canNotify(candidate),
+                )
+            ) return@forEach
             if (!store.alertsEnabled || !store.intradaySignalEnabled) return@forEach
             if (!TradingCalendar.inMarketHoursForAlert()) return@forEach
             if (!consumePushBudget(candidate.code)) return@forEach
             Notifier.signal(
                 this,
-                ALERT_ID_OBSERVATION_BUY + observationKey(candidate).hashCode(),
+                ALERT_ID_OBSERVATION_BUY + ObservationBuyAlert.alertKey(candidate).hashCode(),
                 ObservationBuyAlert.title(candidate),
                 ObservationBuyAlert.body(candidate, guardedBuy.text),
             )
-            pendingWatchlistBuyAlerts.remove(observationKey(candidate))
+            pendingWatchlistBuyAlerts.remove(ObservationBuyAlert.alertKey(candidate))
         }
         Repo.notifyChanged()
     }
@@ -2515,6 +2894,28 @@ class MonitorService : Service() {
                 GuardedAction.HOLD,
                 "仅观察：缺少真实突破参考位，不执行买入。",
             )
+        val analysisBars = ObservationEntryPolicy.withLiveBar(
+            observationHistory[candidate.code]?.second.orEmpty(),
+            quote,
+        )
+        val closes = analysisBars.map { it.close }
+        val ma5 = closes.takeLast(5).takeIf { it.size == 5 }?.average()
+        val ma20 = closes.takeLast(20).takeIf { it.size == 20 }?.average()
+        val priceLocation = PricePosition
+            .of(analysisBars, quote.quoteDate?.substringBefore(' '))
+            ?.contextOf(quote.price)
+            ?.location
+        val riskLine = if (ma5 != null && ma20 != null) {
+            com.example.stockmonitor.analysis.NormalDivergencePolicy.riskLine(
+                price = quote.price,
+                ma5 = ma5,
+                ma20 = ma20,
+                priceLocation = priceLocation,
+                biasFromMa5Pct = ma5.takeIf { it > 0.0 }?.let { (quote.price / it - 1.0) * 100.0 },
+            )
+        } else {
+            null
+        }
         return TradeActionGuard.evaluate(
             intent = "buy",
             evidence = TimeframeEvidence.build(
@@ -2525,6 +2926,7 @@ class MonitorService : Service() {
                 resistance = breakoutReference,
                 now = java.time.LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai")),
                 quoteDate = quote.quoteDate?.substringBefore(' '),
+                riskLine = riskLine,
             ),
             volume = IntradayVolumeContext.build(
                 marketPredictedFullDayTurnover = Repo.turnoverSnapshot?.predictedFullDay?.div(100_000_000.0),
@@ -2666,6 +3068,12 @@ class MonitorService : Service() {
                         trend != null && trend.type != EntrySetupType.NONE,
                         trend?.confirmed == true,
                     ).count { it }
+                val technical = TechnicalQualityPolicy.evaluateBars(
+                    history = history,
+                    asOf = asOf,
+                    dailyEvidenceRatio = setupScore / 3.0,
+                    trendWeak = trend?.trendWeak == true || quote.changePct <= -3.0,
+                )
                 val trendCanBuy = trend?.canBuy == true
                 ObservationSignal(
                     date = quote.quoteDate ?: TimeUtils.todayText(),
@@ -2686,6 +3094,9 @@ class MonitorService : Service() {
                     fundFlow = fundFlow?.let { FundFlowPolicy.assess(quote.changePct, it) },
                     fundFlowWindow = fundFlowWindow,
                     environmentGate = environmentGate,
+                    technicalScore = technical.score,
+                    weeklyTrendLabel = technical.weeklyTrend.label,
+                    monthlyTrendLabel = technical.monthlyTrend.label,
                     signalReason =
                         when {
                             limitUpShrinkAcceleration -> ObservationEligibility.SHRINK_WAIT_REASON
@@ -2724,6 +3135,12 @@ class MonitorService : Service() {
                         relativeStrength != null && relativeStrength >= ObservationEntryPolicy.RELATIVE_STRENGTH_PCT,
                         entryConfirmed,
                     ).count { it }
+                val technical = TechnicalQualityPolicy.evaluateBars(
+                    history = history,
+                    asOf = asOf,
+                    dailyEvidenceRatio = strongScore / 3.0,
+                    trendWeak = trend?.trendWeak == true || quote.changePct <= -3.0,
+                )
                 val riskFlag =
                     trend?.trendWeak == true || quote.changePct <= -3.0 ||
                         (ratio >= LEADER_DISTRIBUTION_VOLUME_RATIO && quote.changePct < 1.0) ||
@@ -2759,6 +3176,9 @@ class MonitorService : Service() {
                     environmentGate = environmentGate,
                     evaluatedAtMs = System.currentTimeMillis(),
                     quoteVolume = quote.volume,
+                    technicalScore = technical.score,
+                    weeklyTrendLabel = technical.weeklyTrend.label,
+                    monthlyTrendLabel = technical.monthlyTrend.label,
                     signalReason =
                         String.format(
                             Locale.CHINA,
@@ -3250,6 +3670,14 @@ class MonitorService : Service() {
             now = nowLocal,
             quoteDate = today,
             dailyContext = dailyContext,
+            riskLine = com.example.stockmonitor.analysis.NormalDivergencePolicy.riskLine(
+                price = quote.price,
+                ma5 = result.ma5,
+                ma20 = result.ma20,
+                priceLocation = Repo.priceContexts[result.code]?.location,
+                biasFromMa5Pct = result.ma5.takeIf { it > 0.0 }
+                    ?.let { (quote.price / it - 1.0) * 100.0 },
+            ),
         )
         val volume = IntradayVolumeContext.build(
             marketPredictedFullDayTurnover = Repo.turnoverSnapshot?.predictedFullDay?.div(100_000_000.0),
@@ -3547,6 +3975,7 @@ class MonitorService : Service() {
 
         /** 15/30分钟K线每5分钟刷新；两次刷新之间用实时价更新当前未收盘柱。 */
         private const val MINUTE_KLINE_REFRESH_MS = 5 * 60 * 1000L
+        private const val MARKET_FIVE_MINUTE_REFRESH_MS = 5 * 60 * 1000L
         private const val MINUTE_KLINE_LENGTH = 120
 
         fun start(context: Context) {

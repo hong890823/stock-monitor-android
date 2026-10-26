@@ -34,13 +34,27 @@ class StockAlertScopeTest {
         StockAlertType.entries.filter { it != StockAlertType.CONFIRMED_BUY }.forEach { type ->
             assertFalse(type.name, StockAlertScope.shouldNotify(type, held = false))
         }
-        assertTrue(StockAlertScope.shouldNotify(StockAlertType.CONFIRMED_BUY, held = false))
+        assertFalse(StockAlertScope.shouldNotify(StockAlertType.CONFIRMED_BUY, held = false))
+        assertTrue(
+            StockAlertScope.shouldNotify(
+                StockAlertType.CONFIRMED_BUY,
+                held = false,
+                buyPointConfirmed = true,
+            ),
+        )
     }
 
     @Test
     fun heldStocksKeepAllAlertTypes() {
         StockAlertType.entries.forEach { type ->
-            assertTrue(type.name, StockAlertScope.shouldNotify(type, held = true))
+            assertTrue(
+                type.name,
+                StockAlertScope.shouldNotify(
+                    type,
+                    held = true,
+                    buyPointConfirmed = type == StockAlertType.CONFIRMED_BUY,
+                ),
+            )
         }
     }
 

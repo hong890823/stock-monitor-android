@@ -43,6 +43,16 @@
             android:exported="false"
             android:parentActivityName=".ui.MainActivity" />
 
+        <activity
+            android:name=".ui.AlertHistoryActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <activity
+            android:name=".ui.NewsDetailActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.MainActivity" />
+
         <!-- stopWithTask=false：划掉最近任务卡片后仍保留后台监控 -->
         <service
             android:name=".monitor.MonitorService"

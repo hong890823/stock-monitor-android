@@ -13,6 +13,7 @@ import android.widget.Toast
 import com.example.stockmonitor.R
 import com.example.stockmonitor.core.BoardGroup
 import com.example.stockmonitor.core.BoardGroupBook
+import com.example.stockmonitor.core.LeaderOverrides
 import com.example.stockmonitor.core.Store
 import com.example.stockmonitor.monitor.MonitorService
 import com.example.stockmonitor.monitor.Repo
@@ -186,6 +187,7 @@ object BoardGroupDialogs {
         val checkedCodes = mutableSetOf<String>()
         checkedCodes += group?.members?.keys ?: entries.keys
         checkedCodes += extraMembers.keys
+        val initialCheckedCodes = checkedCodes.toSet()
         val deletedCodes = mutableSetOf<String>()
 
         val container =
@@ -289,12 +291,21 @@ object BoardGroupDialogs {
             .setPositiveButton("保存") { _, _ ->
                 syncChecked()
                 val chosen = checkedCodes.mapNotNull { code -> entries[code]?.let { code to it } }.toMap()
+                val removedFromMembership = (initialCheckedCodes - chosen.keys) + deletedCodes
                 // 没动过就别写人工名单：白写一份会把自动成分冻住，以后东财加新成分也进不来。
                 if (group?.members == null && chosen.keys == initialKeys && extraMembers.isEmpty() && deletedCodes.isEmpty()) {
                     onSaved()
                     return@setPositiveButton
                 }
                 store.boardGroups = book.withMembers(groupId, displayName, chosen)
+                val currentOverrides = store.sectorLeaderOverrides[groupId] ?: LeaderOverrides()
+                val updatedOverrides = currentOverrides.withoutPinned(removedFromMembership)
+                store.sectorLeaderOverrides =
+                    if (updatedOverrides.isEmpty) {
+                        store.sectorLeaderOverrides - groupId
+                    } else {
+                        store.sectorLeaderOverrides + (groupId to updatedOverrides)
+                    }
                 Toast.makeText(context, "「$displayName」板块已保存（${chosen.size} 只）", Toast.LENGTH_SHORT).show()
                 MonitorService.send(context, MonitorService.ACTION_REFRESH)
                 onSaved()

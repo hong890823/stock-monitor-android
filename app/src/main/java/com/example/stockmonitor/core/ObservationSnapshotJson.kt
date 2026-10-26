@@ -21,6 +21,9 @@ object ObservationSnapshotJson {
                     put("observed_days", item.observedDays)
                     put("stop_price", item.stopPrice)
                     put("reason", item.reason)
+                    put("highest_stage", item.highestStage.name)
+                    put("highest_stage_date", item.highestStageDate)
+                    put("highest_stage_at_ms", item.highestStageAtMs)
                     ObservationEvidenceJson.put(this, "supporting", item.evidence.supporting)
                     ObservationEvidenceJson.put(this, "counter", item.evidence.counter)
                     ObservationEvidenceJson.put(this, "missing", item.evidence.missing)
@@ -60,6 +63,16 @@ object ObservationSnapshotJson {
                             stopPrice = item.optDouble("stop_price", Double.NaN)
                                 .takeUnless { it.isNaN() },
                             reason = item.optString("reason"),
+                            highestStage = runCatching {
+                                ObservationStage.valueOf(item.optString("highest_stage"))
+                            }.getOrDefault(
+                                runCatching {
+                                    ObservationStage.valueOf(item.optString("stage"))
+                                }.getOrDefault(ObservationStage.OBSERVING),
+                            ),
+                            highestStageDate = item.optString("highest_stage_date")
+                                .ifBlank { date },
+                            highestStageAtMs = item.optLong("highest_stage_at_ms", 0L),
                             evidence = ObservationEvidenceJson.read(item),
                         ),
                     )

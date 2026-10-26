@@ -1,6 +1,7 @@
 package com.example.stockmonitor
 
 import com.example.stockmonitor.analysis.*
+import com.example.stockmonitor.core.DailyRiskLevel
 import com.example.stockmonitor.core.GuardedAction
 import com.example.stockmonitor.core.GuardedActionLevel
 import com.example.stockmonitor.core.IntradayVolumeContext

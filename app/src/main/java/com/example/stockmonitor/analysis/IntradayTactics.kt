@@ -307,6 +307,29 @@ object IntradayTactics {
             },
         ))
         if (exitDecision != null) return breakSupport(input, support, exitDecision)
+        val normalDivergence = NormalDivergencePolicy.evaluateIntraday(
+            NormalDivergenceIntradayInput(
+                price = input.price,
+                ma5 = input.ma5,
+                ma20 = input.ma20,
+                priceLocation = input.priceContext?.location,
+                biasFromMa5Pct = input.ma5.takeIf { it > 0.0 }?.let { (input.price / it - 1.0) * 100.0 },
+                atrPct = input.atrPct,
+                volumeRatio = input.volumeRatio,
+                priceChangePct = input.changePct,
+                lastBarRejected = input.timeframeEvidence?.lastBarRejected == true,
+                riskLineThresholdPct = input.timeframeEvidence?.riskLineThresholdPct ?: 0.0,
+                riskLineBelow = input.timeframeEvidence?.riskLineBelow == true,
+                riskLineConfirmations = input.timeframeEvidence?.riskLineConfirmations ?: 0,
+                riskLineM30Below = input.timeframeEvidence?.riskLineM30Below == true,
+                hasCompleted15m = input.timeframeEvidence?.complete == true,
+                hasCompleted30m = input.timeframeEvidence?.complete == true,
+                backgroundTrendWeak = input.trendAssessment?.major == MajorTrend.DOWN ||
+                    input.trendAssessment?.shortTerm == ShortTermTrend.DOWN,
+            ),
+        )
+        val divergenceAllowsNewAction = normalDivergence.level == NormalDivergenceLevel.NORMAL ||
+            normalDivergence.level == NormalDivergenceLevel.MISSING
         val breakoutRisk = BreakoutRiskPolicy.evaluate(
             BreakoutRiskEvidence(
                 price = input.price,
@@ -362,8 +385,10 @@ object IntradayTactics {
         }
         val boxAllowsBuy = input.boxRange == null ||
             input.boxRange.state in setOf(BoxRangeState.NOT_BOX, BoxRangeState.BREAKOUT_CONFIRMED)
-        val ordinaryAllowed = input.trendAssessment?.allowsOrdinaryBuy != false && boxAllowsBuy
-        val tBuyAllowed = input.trendAssessment?.allowsTBuy != false && boxAllowsBuy
+        val ordinaryAllowed = input.trendAssessment?.allowsOrdinaryBuy != false &&
+            boxAllowsBuy && divergenceAllowsNewAction
+        val tBuyAllowed = input.trendAssessment?.allowsTBuy != false &&
+            boxAllowsBuy && divergenceAllowsNewAction
         val tSellAllowed = input.trendAssessment?.allowsTSell != false
         val highAllowsNewBuy = highPosition == null ||
             highPosition.phase == HighPositionPhase.NONE ||

@@ -8,7 +8,7 @@ import java.time.temporal.TemporalAdjusters
 import java.util.Locale
 
 enum class SwingTrend(val label: String) {
-    UP("向上"), REPAIR("修复中"), WEAK("偏弱"), MISSING("数据不足"),
+    UP("向上"), REPAIR("趋势修复"), STABILIZING("下跌企稳"), WEAK("偏弱"), MISSING("数据不足"),
 }
 
 data class MultiTimeframeSummary(
@@ -64,18 +64,37 @@ object MultiTimeframeTrend {
                 "历史不足：需250日日线、24个完整周K及13个完整月K"
             else -> null
         }
-        return MultiTimeframeSummary(weeks, months, years, trend(weeks, 20, 4), trend(months, 12, 1),
+        return MultiTimeframeSummary(weeks, months, years, classify(weeks, 20, 4), classify(months, 12, 1),
             ma250, asOf, closed.first().date, issue)
     }
 
-    private fun trend(bars: List<DayBar>, period: Int, lag: Int): SwingTrend {
+    /**
+     * 摆动趋势分五档。完整周期确认后才允许从「偏弱」进入「下跌企稳」：
+     * 至少两个完整周期收复均线、之后三个完整周期不再创新低，且均线仍未转为上行。
+     * 当前未完成周期由 [evaluate] 聚合时排除，不会改变结论。
+     */
+    fun classify(bars: List<DayBar>, period: Int, lag: Int): SwingTrend {
         if (bars.size < period + lag) return SwingTrend.MISSING
         val average = bars.takeLast(period).map { it.close }.average()
         val prior = bars.dropLast(lag).takeLast(period).map { it.close }.average()
-        return when {
-            bars.last().close < average -> SwingTrend.WEAK
-            average > prior -> SwingTrend.UP
-            else -> SwingTrend.REPAIR
+        val current = bars.last()
+        if (current.close < average) return SwingTrend.WEAK
+        if (average > prior) return SwingTrend.UP
+
+        val beforeConfirmation = bars.dropLast(2)
+        val wasWeak = beforeConfirmation.size >= period &&
+            beforeConfirmation.last().close <
+            beforeConfirmation.takeLast(period).map { it.close }.average()
+        val confirmed = bars.takeLast(2).mapIndexed { offset, bar ->
+            val endIndex = bars.size - 2 + offset
+            val startIndex = (endIndex - period).coerceAtLeast(0)
+            val previousAverage = bars.subList(startIndex, endIndex).map { it.close }.average()
+            bar.close >= previousAverage
+        }.all { it }
+        val lowsAfterBottom = bars.takeLast(3).map { it.low }
+        val noLaterNewLow = lowsAfterBottom.size == 3 && lowsAfterBottom.zipWithNext().all { (previous, next) ->
+            next >= previous
         }
+        return if (wasWeak && confirmed && noLaterNewLow) SwingTrend.STABILIZING else SwingTrend.REPAIR
     }
 }

@@ -6,14 +6,20 @@ import com.example.stockmonitor.core.ObservationStrategy
 import java.util.Locale
 
 object ObservationBuyAlert {
+    fun alertKey(candidate: ObservationCandidate): String = candidate.code
+
+    /** 非持仓股的盘中提醒只允许这里的真实“买点已确认”状态。 */
+    fun canNotify(candidate: ObservationCandidate): Boolean =
+        candidate.stage == ObservationStage.BUY_CANDIDATE &&
+            !ObservationEligibility.isLimitUpDeferred(candidate, null)
+
     fun shouldNotify(
         previous: ObservationCandidate,
         current: ObservationCandidate,
     ): Boolean = previous.stage != ObservationStage.BUY_CANDIDATE &&
-        current.stage == ObservationStage.BUY_CANDIDATE &&
+        canNotify(current) &&
         (current.strategy == ObservationStrategy.PRE_BREAKOUT ||
-            current.entryConfirmationRounds >= ObservationPool.ENTRY_CONFIRMATION_ROUNDS) &&
-        !ObservationEligibility.isLimitUpDeferred(current, null)
+            current.entryConfirmationRounds >= ObservationPool.requiredConfirmationRounds(current))
 
     fun title(candidate: ObservationCandidate): String =
         "🟢 ${ObservationStage.BUY_CANDIDATE.label}｜${candidate.name}"

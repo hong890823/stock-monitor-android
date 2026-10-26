@@ -248,6 +248,7 @@ object DailyReview {
                     "浮盈浮亏为较成本口径，两者不混用"
             )
             appendLine()
+            PortfolioAnalysis.highestPriorityAction(inputs.results)?.let { appendLine(it) }
             appendLine("持仓整体操作建议")
             PortfolioAnalysis.overallAdvice(inputs.results).forEach { appendLine("· $it") }
             append(separator())

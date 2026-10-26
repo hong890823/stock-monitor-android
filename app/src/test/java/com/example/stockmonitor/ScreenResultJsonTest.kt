@@ -33,6 +33,9 @@ class ScreenResultJsonTest {
                 relaxedScore = 3, macdDetail = "柱体转正", rsiOk = true, kdjOk = true,
                 changePct = -1.2, volumeRatio = 1.5,
                 priceContext = PriceContext(PriceLocation.LOW, 0.08),
+                technicalScore = 82,
+                weeklyTrendLabel = "向上",
+                monthlyTrendLabel = "修复中",
             ),
         ),
         relaxed = emptyList(),
@@ -63,6 +66,9 @@ class ScreenResultJsonTest {
                     stopPrice = 16.2,
                     reason = "站上前高，放量，M20向上",
                 ),
+                technicalScore = 76,
+                weeklyTrendLabel = "向上",
+                monthlyTrendLabel = "向上",
             ),
         ),
     )
@@ -84,9 +90,15 @@ class ScreenResultJsonTest {
         assertEquals("2026-10-09 20:00", decoded.patternAt)
         assertEquals(2_000_000L, decoded.patternAtMs)
         assertEquals(sampleResult().strict, decoded.result.strict)
+        assertEquals(82, decoded.result.strict.single().technicalScore)
+        assertEquals("向上", decoded.result.strict.single().weeklyTrendLabel)
+        assertEquals("修复中", decoded.result.strict.single().monthlyTrendLabel)
         assertEquals(sampleResult().fiveOneThree, decoded.result.fiveOneThree)
         assertEquals(sampleResult().fiveOneThreeStats, decoded.result.fiveOneThreeStats)
         val setup = decoded.result.trend.first().entrySetup
+        assertEquals(76, decoded.result.trend.single().technicalScore)
+        assertEquals("向上", decoded.result.trend.single().weeklyTrendLabel)
+        assertEquals("向上", decoded.result.trend.single().monthlyTrendLabel)
         assertEquals(EntrySetupType.BREAKOUT, setup.type)
         assertEquals(16.2, setup.stopPrice!!, 0.001)
         assertEquals(MarketFilter.UP, setup.marketFilter)

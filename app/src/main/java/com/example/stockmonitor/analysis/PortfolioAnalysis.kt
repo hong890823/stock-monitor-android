@@ -497,6 +497,7 @@ object PortfolioAnalysis {
         swingPlan: SwingPlan? = null,
     ): List<String> {
         val lines = mutableListOf<String>()
+        highestPriorityAction(results)?.let { lines.add(it) }
 
         // ① 今日结果：钱 + 相对大盘 + 主要来自哪只
         val resultLine = buildString {
@@ -554,6 +555,28 @@ object PortfolioAnalysis {
         results.filter { it.quantity.isFinite() && it.quantity > 0 && it.eventCoil != null }
             .map { result -> "🔥 事件后蓄势｜${result.name}：${result.eventCoil!!.brief}" }
 
+    /** 持仓页与复盘报告共用的最高优先级操作，只挑一条，避免用户面对一堆同等重要的建议。 */
+    fun highestPriorityAction(results: List<PositionResult>): String? {
+        val current = results.filter { it.quantity.isFinite() && it.quantity > 0 }
+            .sortedWith(compareBy<PositionResult> { operationPriority(it) }.thenBy { it.name })
+            .firstOrNull() ?: return null
+        val action = current.action.ifBlank { current.signal }
+        return "最高优先级操作：${current.name}｜$action"
+    }
+
+    private fun operationPriority(result: PositionResult): Int = when {
+        result.signal == "减仓风险" -> 0
+        result.exitDecision?.stage in setOf(
+            HoldingExitStage.EXIT,
+            HoldingExitStage.REDUCE,
+            HoldingExitStage.HIGH_REDUCE,
+        ) -> 1
+        result.signal == "趋势转弱观察" -> 2
+        result.signal == "持有/止盈观察" -> 3
+        result.signal in setOf("买入确认", "买入观察") || result.entrySetup.canBuy -> 4
+        else -> 5
+    }
+
     /**
      * 持仓 Tab 的精简今日要点。它和 [brief] 分开，避免把账户快照带进完整持仓报告。
      * 仓位只参与后台排序和整体建议，不在这里逐只展示。
@@ -569,6 +592,7 @@ object PortfolioAnalysis {
         val holdings = portfolio.positions.filter { it.quantity.isFinite() && it.quantity > 0 }
         val byCode = results.filter { it.quantity.isFinite() && it.quantity > 0 }
             .associateBy { it.code }
+        highestPriorityAction(results)?.let { add(it) }
         val complete = holdings.all { position ->
             val result = byCode[position.code]
             val quoteValue = quotes[position.code]?.let { quote ->

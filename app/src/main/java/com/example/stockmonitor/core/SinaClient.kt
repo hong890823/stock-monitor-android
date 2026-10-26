@@ -120,7 +120,7 @@ class SinaClient {
      * 两者都按新浪时间戳排序，最后一根可能是未收盘的实时柱，由调用方用 upsert 更新。
      */
     fun intradayKline(code: String, minutes: Int, length: Int): List<IntradayBar> {
-        require(minutes == 15 || minutes == 30) { "分钟K线仅支持15或30分钟" }
+        require(minutes == 5 || minutes == 15 || minutes == 30) { "分钟K线仅支持5、15或30分钟" }
         require(length in 2..600) { "分钟K线数量必须在2到600之间" }
         val url = "https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/" +
             "CN_MarketData.getKLineData?symbol=$code&scale=$minutes&ma=no&datalen=$length"

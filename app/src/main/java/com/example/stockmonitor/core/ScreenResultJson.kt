@@ -93,6 +93,9 @@ object ScreenResultJson {
                     .put("rsi_ok", hit.rsiOk)
                     .put("kdj_ok", hit.kdjOk)
                     .put("relaxed_trend_eligible", hit.relaxedTrendEligible)
+                    .put("technical_score", hit.technicalScore)
+                    .put("weekly_trend", hit.weeklyTrendLabel)
+                    .put("monthly_trend", hit.monthlyTrendLabel)
                     .putIfFinite("change_pct", hit.changePct)
                     .putIfPresent("volume_ratio", hit.volumeRatio)
                     .putIfPresent("price_context", encodeContext(hit.priceContext)),
@@ -117,6 +120,9 @@ object ScreenResultJson {
                 rsiOk = json.optBoolean("rsi_ok"),
                 kdjOk = json.optBoolean("kdj_ok"),
                 relaxedTrendEligible = json.optBoolean("relaxed_trend_eligible", false),
+                technicalScore = json.optInt("technical_score", json.optInt("relaxed_score") * 40 / 3),
+                weeklyTrendLabel = json.optString("weekly_trend", "数据不足"),
+                monthlyTrendLabel = json.optString("monthly_trend", "数据不足"),
                 changePct = json.optDouble("change_pct", Double.NaN),
                 volumeRatio = json.optDoubleOrNull("volume_ratio"),
                 priceContext = decodeContext(json.optJSONObject("price_context")),
@@ -133,6 +139,9 @@ object ScreenResultJson {
                     .putIfFinite("price", hit.price)
                     .putIfFinite("change_pct", hit.changePct)
                     .putIfPresent("volume_ratio", hit.volumeRatio)
+                    .put("technical_score", hit.technicalScore)
+                    .put("weekly_trend", hit.weeklyTrendLabel)
+                    .put("monthly_trend", hit.monthlyTrendLabel)
                     .put("entry_setup", encodeSetup(hit.entrySetup)),
             )
         }
@@ -149,6 +158,9 @@ object ScreenResultJson {
                 price = json.optDouble("price"),
                 changePct = json.optDouble("change_pct", Double.NaN),
                 volumeRatio = json.optDoubleOrNull("volume_ratio"),
+                technicalScore = json.optInt("technical_score", 40),
+                weeklyTrendLabel = json.optString("weekly_trend", "数据不足"),
+                monthlyTrendLabel = json.optString("monthly_trend", "数据不足"),
                 entrySetup = setup,
             )
         }

@@ -6,6 +6,7 @@ import com.example.stockmonitor.core.ObservationStage
 import com.example.stockmonitor.core.ObservationStrategy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import com.example.stockmonitor.core.ObservationPoolJson
 import org.junit.Test
@@ -15,6 +16,7 @@ class ObservationPoolStrategyTest {
         "2026-10-15", 10.2, true, true, true, false, 9.5, 1.0,
         strategy = ObservationStrategy.LEADER, strongScore = 3,
         evaluatedAtMs = 1_000_000L, quoteVolume = 1000.0,
+        technicalScore = 78, weeklyTrendLabel = "向上", monthlyTrendLabel = "修复中",
     )
 
     @Test
@@ -23,6 +25,9 @@ class ObservationPoolStrategyTest {
         assertEquals(ObservationStage.NEAR_ENTRY, first.stage)
         val restored = ObservationPoolJson.decode(ObservationPoolJson.encode(listOf(first))).single()
         assertEquals(first, restored)
+        assertEquals(78, restored.technicalScore)
+        assertEquals("向上", restored.weeklyTrendLabel)
+        assertEquals("修复中", restored.monthlyTrendLabel)
         val second = ObservationPool.evaluate(restored, entry.copy(evaluatedAtMs = 1_900_000L))
         assertEquals(ObservationStage.BUY_CANDIDATE, second.stage)
         assertTrue(ObservationBuyAlert.shouldNotify(first, second))
@@ -63,6 +68,7 @@ class ObservationPoolStrategyTest {
         )
         val opened = entry.copy(
             strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
+            recentLimitUpDays = 3,
             evaluatedAtMs = 1_000_000L,
         )
         val first = ObservationPool.evaluate(highBoard, opened)
@@ -84,6 +90,71 @@ class ObservationPoolStrategyTest {
         assertEquals(0, risk.entryConfirmationRounds)
         val restarted = ObservationPool.evaluate(risk, entry.copy(evaluatedAtMs = 1_900_000L))
         assertEquals(ObservationStage.NEAR_ENTRY, restarted.stage)
+    }
+
+    @Test
+    fun riskFlagCannotPromoteObservingCandidate() {
+        val result = ObservationPool.evaluate(
+            candidate(ObservationStrategy.LEADER),
+            entry.copy(
+                riskFlag = true,
+                signalReason = "高位放量分歧",
+            ),
+        )
+
+        assertEquals(ObservationStage.OBSERVING, result.stage)
+    }
+
+    @Test
+    fun staleLimitHistoryDoesNotExtendConfirmationOrReuseOldSealRisk() {
+        val staleHighBoard = candidate(ObservationStrategy.LIMIT_UP_CONTINUATION).copy(
+            limitStreak = 3,
+            sealQualityScore = 20,
+            sealQualityCoveragePct = 100,
+        )
+        val first = ObservationPool.evaluate(
+            staleHighBoard,
+            entry.copy(
+                strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
+                recentLimitUpDays = 0,
+            ),
+        )
+        val second = ObservationPool.evaluate(
+            first,
+            entry.copy(
+                strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
+                recentLimitUpDays = 0,
+                evaluatedAtMs = 1_900_000L,
+            ),
+        )
+
+        assertEquals(2, first.entryConfirmationRequiredRounds)
+        assertEquals(3, first.score)
+        assertEquals(ObservationStage.BUY_CANDIDATE, second.stage)
+    }
+
+    @Test
+    fun continuousOpeningGraceLastsOnlyOneEvaluation() {
+        val sealed = candidate(ObservationStrategy.LIMIT_UP_CONTINUATION).copy(
+            stage = ObservationStage.NEAR_ENTRY,
+            continuousObservation = true,
+            limitUpBlocked = true,
+            entryConfirmationRounds = 1,
+            observedDays = 9,
+        )
+        val opened = entry.copy(
+            strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
+            limitUpBlocked = false,
+        )
+
+        val firstOpenedEvaluation = ObservationPool.evaluate(sealed, opened)
+        val nextTradingDay = ObservationPool.evaluate(
+            firstOpenedEvaluation,
+            opened.copy(date = "2026-10-16", evaluatedAtMs = 1_900_000L),
+        )
+
+        assertNotEquals(ObservationStage.ELIMINATED, firstOpenedEvaluation.stage)
+        assertEquals(ObservationStage.ELIMINATED, nextTradingDay.stage)
     }
 
     private fun candidate(strategy: ObservationStrategy) = ObservationCandidate(
@@ -166,6 +237,6 @@ class ObservationPoolStrategyTest {
             ),
         )
 
-        assertEquals(ObservationStage.NEAR_ENTRY, result.stage)
+        assertEquals(ObservationStage.OBSERVING, result.stage)
     }
 }

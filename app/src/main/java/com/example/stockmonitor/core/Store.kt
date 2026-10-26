@@ -3,6 +3,7 @@ package com.example.stockmonitor.core
 import android.content.Context
 import android.content.SharedPreferences
 import com.example.stockmonitor.analysis.PaperTradeRecord
+import com.example.stockmonitor.analysis.SectorStrengthDay
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -150,10 +151,26 @@ class Store(
         get() = FundFlowHistoryJson.decode(prefs.getString(KEY_FUND_FLOW_HISTORY, null))
         set(value) = prefs.edit().putString(KEY_FUND_FLOW_HISTORY, FundFlowHistoryJson.encode(value)).apply()
 
+    /** 板块每日强度快照；保留最近 10 个交易日，主线判定只读最近 5 个交易日。 */
+    var sectorStrengthHistory: List<SectorStrengthDay>
+        get() = SectorStrengthHistoryJson.decode(prefs.getString(KEY_SECTOR_STRENGTH_HISTORY, null))
+        set(value) =
+            prefs.edit()
+                .putString(KEY_SECTOR_STRENGTH_HISTORY, SectorStrengthHistoryJson.encode(value))
+                .apply()
+
     /** 观察池每日证据快照；只保留每只股票最近 30 个交易日。 */
     var observationSnapshots: List<ObservationSnapshot>
         get() = ObservationSnapshotJson.decode(prefs.getString(KEY_OBSERVATION_SNAPSHOTS, null))
         set(value) = prefs.edit().putString(KEY_OBSERVATION_SNAPSHOTS, ObservationSnapshotJson.encode(value)).apply()
+
+    /** 自选股与持仓股共用的技术趋势快照；只落最后结论，长历史仍在后台按日缓存。 */
+    var technicalTrendSnapshots: Map<String, com.example.stockmonitor.analysis.TechnicalTrendSnapshot>
+        get() = TechnicalTrendSnapshotJson.decode(prefs.getString(KEY_TECHNICAL_TREND_SNAPSHOTS, null))
+        set(value) =
+            prefs.edit()
+                .putString(KEY_TECHNICAL_TREND_SNAPSHOTS, TechnicalTrendSnapshotJson.encode(value))
+                .apply()
 
     /** 由观察池阶段变化生成的纸上交易记录。 */
     var paperTrades: List<PaperTradeRecord>
@@ -246,6 +263,43 @@ class Store(
     var tradeBook: TradeBook
         get() = TradeLotJson.decode(prefs.getString(KEY_TRADE_BOOK, null))
         set(value) = prefs.edit().putString(KEY_TRADE_BOOK, TradeLotJson.encode(value)).apply()
+
+    /** 已成功发送的通知正文记录。点击通知消失后仍可在应用内完整查看。 */
+    var alertRecords: List<AlertRecord>
+        get() = synchronized(prefs) {
+            val stored = AlertRecordBook.decode(prefs.getString(KEY_ALERT_RECORDS, null))
+            val pruned = AlertRecordBook.prune(stored, System.currentTimeMillis())
+            if (stored != pruned) {
+                prefs.edit().putString(KEY_ALERT_RECORDS, AlertRecordBook.encode(pruned)).commit()
+            }
+            pruned
+        }
+        set(value) {
+            synchronized(prefs) {
+                prefs.edit().putString(KEY_ALERT_RECORDS, AlertRecordBook.encode(value)).commit()
+            }
+        }
+
+    fun appendAlertRecord(record: AlertRecord): Boolean {
+        synchronized(prefs) {
+            val records = AlertRecordBook.append(alertRecords, record, System.currentTimeMillis())
+            return prefs.edit().putString(KEY_ALERT_RECORDS, AlertRecordBook.encode(records)).commit()
+        }
+    }
+
+    fun upsertAlertRecord(record: AlertRecord): Boolean {
+        synchronized(prefs) {
+            val records = AlertRecordBook.upsert(alertRecords, record, System.currentTimeMillis())
+            return prefs.edit().putString(KEY_ALERT_RECORDS, AlertRecordBook.encode(records)).commit()
+        }
+    }
+
+    fun removeAlertRecord(id: String): Boolean {
+        synchronized(prefs) {
+            val records = alertRecords.filterNot { it.id == id }
+            return prefs.edit().putString(KEY_ALERT_RECORDS, AlertRecordBook.encode(records)).commit()
+        }
+    }
 
     // ── 监控开关 ──
     var monitorEnabled: Boolean
@@ -480,7 +534,9 @@ class Store(
         private const val KEY_OBSERVATION_POOL = "observation_pool"
         private const val KEY_WATCHLIST_BUY_CANDIDATES = "watchlist_buy_candidates"
         private const val KEY_FUND_FLOW_HISTORY = "fund_flow_history"
+        private const val KEY_SECTOR_STRENGTH_HISTORY = "sector_strength_history"
         private const val KEY_OBSERVATION_SNAPSHOTS = "observation_snapshots"
+        private const val KEY_TECHNICAL_TREND_SNAPSHOTS = "technical_trend_snapshots"
         private const val KEY_PAPER_TRADES = "paper_trades"
         private const val KEY_SUMMARY_TEXT = "summary_text"
         private const val KEY_SUMMARY_GENERATED_AT = "summary_generated_at"
@@ -508,5 +564,6 @@ class Store(
         private const val KEY_AI_REPORT_TITLE = "ai_report_title"
         private const val KEY_AI_REPORT_AT = "ai_report_at"
         private const val KEY_TRADE_BOOK = "trade_book"
+        private const val KEY_ALERT_RECORDS = "alert_records"
     }
 }

@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Process
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.result.contract.ActivityResultContracts
@@ -14,6 +15,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import com.example.stockmonitor.R
+import com.example.stockmonitor.core.AlertRecord
+import com.example.stockmonitor.core.AlertRecordBook
 import com.example.stockmonitor.core.Store
 import com.example.stockmonitor.monitor.MonitorService
 import com.example.stockmonitor.monitor.Repo
@@ -32,6 +35,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        resetSelectionPagination(freshLaunch = savedInstanceState == null)
         setContentView(R.layout.activity_main)
         UiKit.applySystemBarInsets(
             findViewById(R.id.root),
@@ -51,6 +55,10 @@ class MainActivity : AppCompatActivity() {
                     }
                     R.id.action_summary -> {
                         openSummary()
+                        true
+                    }
+                    R.id.action_alert_history -> {
+                        startActivity(Intent(this@MainActivity, AlertHistoryActivity::class.java))
                         true
                     }
                     R.id.action_settings -> {
@@ -73,6 +81,32 @@ class MainActivity : AppCompatActivity() {
         if (store.monitorEnabled) MonitorService.start(this)
         Repo.notifyChanged()
         maybePromptBatteryOptimization()
+        handleAlertIntent(intent)
+    }
+
+    override fun onDestroy() {
+        if (isFinishing) clearSelectionPagination()
+        super.onDestroy()
+    }
+
+    private fun resetSelectionPagination(freshLaunch: Boolean) {
+        val session = getSharedPreferences("screen_session", Context.MODE_PRIVATE)
+        val processStart = Process.getStartElapsedRealtime()
+        val sameProcess = session.getLong("process_start_elapsed_realtime", -1L) == processStart
+        if (freshLaunch || !sameProcess) {
+            clearSelectionPagination()
+            session.edit().putLong("process_start_elapsed_realtime", processStart).apply()
+        }
+    }
+
+    private fun clearSelectionPagination() {
+        getSharedPreferences("screen_list_pages", Context.MODE_PRIVATE).edit().clear().apply()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleAlertIntent(intent)
     }
 
     private fun switchTab(itemId: Int) {
@@ -85,9 +119,15 @@ class MainActivity : AppCompatActivity() {
                 else -> MarketFragment()
             }
         }
-        supportFragmentManager.beginTransaction()
-            .replace(R.id.fragment_container, fragment)
-            .commitAllowingStateLoss()
+        val transaction = supportFragmentManager.beginTransaction()
+        fragments.values.filter { it != fragment && it.isAdded }.forEach { transaction.hide(it) }
+        if (fragment.isAdded) {
+            transaction.show(fragment)
+        } else {
+            transaction.add(R.id.fragment_container, fragment)
+        }
+        transaction.commitNowAllowingStateLoss()
+        (fragment as? BaseFragment)?.renderIfStale()
     }
 
     private fun openSummary() {
@@ -111,6 +151,59 @@ class MainActivity : AppCompatActivity() {
         if (!granted) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
+    private fun handleAlertIntent(intent: Intent?) {
+        intent ?: return
+        val recordId = intent.getStringExtra(EXTRA_ALERT_RECORD_ID) ?: return
+        val notificationId = intent.getIntExtra(EXTRA_ALERT_NOTIFICATION_ID, 0)
+        val persisted = AlertRecordBook.find(store.alertRecords, recordId)
+        val fallback = recordFromIntent(intent, recordId, notificationId)
+        val record = AlertRecordBook.replayRecord(persisted, fallback)
+        if (record == null) {
+            if (showAlertDialog(AlertDetailDialogFragment.newMissing(notificationId))) {
+                intent.removeExtra(EXTRA_ALERT_RECORD_ID)
+            }
+            return
+        }
+        if (persisted != record) store.upsertAlertRecord(record)
+        if (showAlertDialog(AlertDetailDialogFragment.newInstance(record))) {
+            intent.removeExtra(EXTRA_ALERT_RECORD_ID)
+        }
+    }
+
+    private fun recordFromIntent(
+        intent: Intent,
+        recordId: String,
+        notificationId: Int,
+    ): AlertRecord? {
+        val title = intent.getStringExtra(EXTRA_ALERT_TITLE)
+        val body = intent.getStringExtra(EXTRA_ALERT_BODY)
+        if (title.isNullOrBlank() || body.isNullOrBlank()) return null
+        return AlertRecord(
+            id = recordId,
+            notificationId = notificationId,
+            kind = intent.getStringExtra(EXTRA_ALERT_KIND).orEmpty(),
+            level = intent.getStringExtra(EXTRA_ALERT_LEVEL).orEmpty(),
+            triggerType = intent.getStringExtra(EXTRA_ALERT_TRIGGER_TYPE).orEmpty(),
+            title = title,
+            body = body,
+            createdAtMs = intent.getLongExtra(EXTRA_ALERT_CREATED_AT_MS, System.currentTimeMillis()),
+        )
+    }
+
+    private fun showAlertDialog(dialog: AlertDetailDialogFragment): Boolean {
+        val current =
+            supportFragmentManager.findFragmentByTag(AlertDetailDialogFragment.TAG)
+                as? AlertDetailDialogFragment
+        if (current?.replayKey == dialog.replayKey) return true
+        return runCatching {
+            supportFragmentManager.beginTransaction().apply {
+                current?.let(::remove)
+                add(dialog, AlertDetailDialogFragment.TAG)
+            }.commitNowAllowingStateLoss()
+            true
+        }.getOrDefault(false)
+    }
+
     /** 长时间挂后台时申请忽略电池优化，避免被系统冻结。 */
     private fun maybePromptBatteryOptimization() {
         if (store.batteryPromptDismissed) return
@@ -127,5 +220,16 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("以后再说") { _, _ -> store.batteryPromptDismissed = true }
             .show()
+    }
+
+    companion object {
+        const val EXTRA_ALERT_RECORD_ID = "alert_record_id"
+        const val EXTRA_ALERT_NOTIFICATION_ID = "alert_notification_id"
+        const val EXTRA_ALERT_TITLE = "alert_title"
+        const val EXTRA_ALERT_BODY = "alert_body"
+        const val EXTRA_ALERT_CREATED_AT_MS = "alert_created_at_ms"
+        const val EXTRA_ALERT_KIND = "alert_kind"
+        const val EXTRA_ALERT_LEVEL = "alert_level"
+        const val EXTRA_ALERT_TRIGGER_TYPE = "alert_trigger_type"
     }
 }

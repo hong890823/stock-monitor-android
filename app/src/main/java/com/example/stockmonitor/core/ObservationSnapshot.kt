@@ -19,6 +19,9 @@ data class ObservationSnapshot(
     val stopPrice: Double?,
     val reason: String,
     val evidence: ObservationEvidence = ObservationEvidence(),
+    val highestStage: ObservationStage = stage,
+    val highestStageDate: String = date,
+    val highestStageAtMs: Long = 0L,
 )
 
 object ObservationSnapshotHistory {
@@ -29,7 +32,32 @@ object ObservationSnapshotHistory {
         history: List<ObservationSnapshot>,
         snapshot: ObservationSnapshot,
     ): List<ObservationSnapshot> {
-        val replaced = history.filterNot { it.code == snapshot.code && it.date == snapshot.date } + snapshot
+        val previous = history.lastOrNull { it.code == snapshot.code && it.date == snapshot.date }
+        val merged = if (previous == null) {
+            snapshot
+        } else {
+            val highestStage = if (snapshot.highestStage.promotionRank >= previous.highestStage.promotionRank) {
+                snapshot.highestStage
+            } else {
+                previous.highestStage
+            }
+            val highestStageDate = if (snapshot.highestStage.promotionRank >= previous.highestStage.promotionRank) {
+                snapshot.highestStageDate
+            } else {
+                previous.highestStageDate
+            }
+            val highestStageAtMs = if (snapshot.highestStage.promotionRank >= previous.highestStage.promotionRank) {
+                snapshot.highestStageAtMs
+            } else {
+                previous.highestStageAtMs
+            }
+            snapshot.copy(
+                highestStage = highestStage,
+                highestStageDate = highestStageDate,
+                highestStageAtMs = highestStageAtMs,
+            )
+        }
+        val replaced = history.filterNot { it.code == snapshot.code && it.date == snapshot.date } + merged
         val grouped = replaced
             .groupBy { it.code }
             .flatMap { (_, items) -> items.sortedBy { it.date }.takeLast(MAX_DAYS_PER_STOCK) }

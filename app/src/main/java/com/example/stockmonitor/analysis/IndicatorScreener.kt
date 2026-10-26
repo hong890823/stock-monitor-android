@@ -192,7 +192,8 @@ class IndicatorScreener(private val sina: SinaClient) {
         return try {
             // 限速用 delay 而不是 Thread.sleep：不占死 IO 线程，四个并发槽位也更稳。
             delay(60)
-            val history = sina.kline(stock.code, 120)
+            // 420 根约覆盖 250 日线、24 个完整周 K 和 13 个完整月 K，统一技术分不能只看短历史。
+            val history = sina.kline(stock.code, 420)
             if (history.size < 35) return null
             // 快扫不算形态：513/趋势的判定和统计都跳过，结果里两档列表保持为空。
             val fiveOneThreeInspection = if (runPatterns) {
@@ -217,6 +218,12 @@ class IndicatorScreener(private val sina: SinaClient) {
                     elapsedTradingMinutes = elapsedTradingMinutes,
                 )
                 trendSetup.takeIf { it.type != EntrySetupType.NONE }?.let {
+                    val technical = TechnicalQualityPolicy.evaluateBars(
+                        history = bars,
+                        asOf = TimeUtils.todayText(),
+                        dailyEvidenceRatio = TechnicalQualityPolicy.dailyEvidenceRatio(bars, TimeUtils.todayText(), it),
+                        trendWeak = it.trendWeak,
+                    )
                     TrendScreenHit(
                         code = stock.code,
                         name = stock.name,
@@ -228,6 +235,9 @@ class IndicatorScreener(private val sina: SinaClient) {
                         },
                         volumeRatio = VolumeRatio.of(stock.volume, avgVolume20, elapsedTradingMinutes),
                         entrySetup = it,
+                        technicalScore = technical.score,
+                        weeklyTrendLabel = technical.weeklyTrend.label,
+                        monthlyTrendLabel = technical.monthlyTrend.label,
                     )
                 }
             } else {
@@ -286,6 +296,11 @@ class IndicatorScreener(private val sina: SinaClient) {
             val relaxedRsi = !latestRsi.isNaN() && latestRsi < 45
             val relaxedKdj = latestK > latestD && latestK < 50
             val relaxedScore = listOf(relaxedMacd, relaxedRsi, relaxedKdj).count { it }
+            val technical = TechnicalQualityPolicy.evaluateBars(
+                history = bars,
+                asOf = TimeUtils.todayText(),
+                dailyEvidenceRatio = relaxedScore / 3.0,
+            )
 
             Evaluated(
                 avgVolume20 = avgVolume20,
@@ -303,6 +318,9 @@ class IndicatorScreener(private val sina: SinaClient) {
                     rsiOk = relaxedRsi,
                     kdjOk = relaxedKdj,
                     relaxedTrendEligible = RelaxedScreenSelection.trendEligible(bars),
+                    technicalScore = technical.score,
+                    weeklyTrendLabel = technical.weeklyTrend.label,
+                    monthlyTrendLabel = technical.monthlyTrend.label,
                 ),
                 strict = strictMacd && strictRsi && strictKdj,
                 relaxed = relaxedMacd && (relaxedRsi || relaxedKdj),

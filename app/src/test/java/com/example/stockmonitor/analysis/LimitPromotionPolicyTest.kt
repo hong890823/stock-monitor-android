@@ -108,7 +108,7 @@ class LimitPromotionPolicyTest {
     }
 
     @Test
-    fun reliableSealQualityAdjustsPromotionScore() {
+    fun sealQualityDoesNotDoubleCountTechnicalScore() {
         val highQuality = ObservationPool.evaluate(
             sealedCandidate().copy(sealQualityScore = 80, sealQualityCoveragePct = 80),
             openSignal(evaluatedAtMs = 1_000L).copy(strongScore = 2),
@@ -118,8 +118,8 @@ class LimitPromotionPolicyTest {
             openSignal(evaluatedAtMs = 1_000L).copy(strongScore = 2),
         )
 
-        assertEquals(3, highQuality.score)
-        assertEquals(1, weakQuality.score)
+        assertEquals(2, highQuality.score)
+        assertEquals(2, weakQuality.score)
     }
 
     @Test
@@ -148,6 +148,22 @@ class LimitPromotionPolicyTest {
         val restored = ObservationPoolJson.decode(ObservationPoolJson.encode(listOf(original))).single()
 
         assertEquals(original, restored)
+    }
+
+    @Test
+    fun continuousObservationSurvivesOpeningAndResealing() {
+        val opened = ObservationPool.evaluate(
+            sealedCandidate().copy(observedDays = ObservationPool.MAX_OBSERVED_DAYS),
+            openSignal(evaluatedAtMs = 1_000L),
+        )
+        val resealed = ObservationPool.evaluate(
+            opened,
+            sealedSignal().copy(evaluatedAtMs = 1_900_000L),
+        )
+
+        assertTrue(opened.continuousObservation)
+        assertTrue(resealed.continuousObservation)
+        assertEquals(ObservationStage.OBSERVING, resealed.stage)
     }
 
     private fun limitStock(
