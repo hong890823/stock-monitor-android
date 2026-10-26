@@ -2,6 +2,7 @@ package com.example.stockmonitor.analysis
 
 import com.example.stockmonitor.core.Position
 import com.example.stockmonitor.core.Quote
+import com.example.stockmonitor.core.TradeBook
 import java.util.Locale
 
 /**
@@ -9,9 +10,10 @@ import java.util.Locale
  * （后者见 [DeepLossPolicy.floatingPnlPct] 与 [TradeCalculator]）。
  *
  * 口径（与券商 App 一致）：
- * - 单股今日盈亏 = (现价 − 昨收) × 持仓数量
+ * - 昨日已持有部分 = (现价 − 昨收) × 昨日数量
+ * - 今日新增部分 = (现价 − 今日买入成本) × 今日买入数量
  * - 组合今日盈亏 = Σ 单股今日盈亏
- * - 组合今日收益率 = 组合今日盈亏 ÷ Σ(昨收 × 数量)，**分母用昨日持仓市值**。
+ * - 组合今日收益率 = 组合今日盈亏 ÷ Σ(昨收 × 昨日数量)，**分母用昨日持仓市值**。
  *   用今日市值当分母的话，涨得多的日子分母跟着变大，收益率会被系统性压低。
  *
  * 缺行情（停牌 / 未拉到）或昨收无效的股票**不计入分子也不计入分母**，只计入 [Summary.missing]，
@@ -19,6 +21,12 @@ import java.util.Locale
  * 数量为 0 的观察股没有仓位，不进明细也不进合计。
  */
 object DayPnl {
+
+    /** 今日新增买入批次；[unitCost] 是这些股份的加权买入成本。 */
+    data class Acquisition(
+        val quantity: Double,
+        val unitCost: Double,
+    )
 
     /** 一只持仓的当日盈亏；[pnl] 为空表示这只算不出来（无行情 / 昨收无效）。 */
     data class Row(
@@ -31,7 +39,7 @@ object DayPnl {
         val pnl: Double?,
         /** 个股当日涨跌幅（百分数），与 [Quote.changePct] 同口径；算不出来时为 null。 */
         val changePct: Double?,
-        /** 该股昨日市值（昨收 × 数量）；算不出来时为 0，不参与合计。 */
+        /** 该股昨日仍持有部分的市值；今日新增股份不伪装成昨日仓位，算不出来时为 0。 */
         val prevMarketValue: Double,
     )
 
@@ -52,7 +60,29 @@ object DayPnl {
         val counted: Int get() = rows.count { it.pnl != null }
     }
 
-    fun summarize(positions: List<Position>, quotes: Map<String, Quote>): Summary {
+    fun acquisitions(book: TradeBook, date: String): Map<String, Acquisition> =
+        book.lots
+            .filter {
+                it.buyDate == date &&
+                    it.quantity.isFinite() && it.quantity > 0 &&
+                    it.unitCost.isFinite() && it.unitCost > 0
+            }
+            .groupBy { it.code }
+            .mapNotNull { (code, lots) ->
+                val quantity = lots.sumOf { it.quantity }
+                if (quantity <= 0) return@mapNotNull null
+                code to Acquisition(
+                    quantity = quantity,
+                    unitCost = lots.sumOf { it.quantity * it.unitCost } / quantity,
+                )
+            }
+            .toMap()
+
+    fun summarize(
+        positions: List<Position>,
+        quotes: Map<String, Quote>,
+        todayAcquisitions: Map<String, Acquisition> = emptyMap(),
+    ): Summary {
         val rows = mutableListOf<Row>()
         var totalPnl = 0.0
         var prevMarketValue = 0.0
@@ -80,8 +110,18 @@ object DayPnl {
                 )
                 continue
             }
-            val pnl = (price - prevClose) * position.quantity
-            val prevValue = prevClose * position.quantity
+            val acquisition = todayAcquisitions[position.code]
+            val acquiredQuantity = acquisition?.quantity
+                ?.takeIf { it.isFinite() && it > 0 }
+                ?.coerceAtMost(position.quantity)
+                ?: 0.0
+            val acquiredUnitCost = acquisition?.unitCost
+                ?.takeIf { it.isFinite() && it > 0 }
+                ?: position.cost
+            val priorQuantity = position.quantity - acquiredQuantity
+            val pnl = (price - prevClose) * priorQuantity +
+                (price - acquiredUnitCost) * acquiredQuantity
+            val prevValue = prevClose * priorQuantity
             totalPnl += pnl
             prevMarketValue += prevValue
             marketValue += price * position.quantity

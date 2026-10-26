@@ -587,6 +587,7 @@ object PortfolioAnalysis {
         market: MarketState? = null,
         swingPlan: SwingPlan? = null,
         quotes: Map<String, Quote> = emptyMap(),
+        todayAcquisitions: Map<String, DayPnl.Acquisition> = emptyMap(),
     ): List<String> = buildList {
         val availableCapital = portfolio.resolvedAvailableCapital()
         val holdings = portfolio.positions.filter { it.quantity.isFinite() && it.quantity > 0 }
@@ -617,7 +618,7 @@ object PortfolioAnalysis {
         val todayQuotes = quotes.filter { (code, quote) ->
             quote.code == code && quote.quoteDate == TimeUtils.todayText()
         }
-        val daily = DayPnl.summarize(holdings, todayQuotes)
+        val daily = DayPnl.summarize(holdings, todayQuotes, todayAcquisitions)
         add(todayPerformance(daily, todayQuotes["sh000001"]))
         add("大盘走势：" + when (market?.regime) {
             MarketRegime.BULL -> "此前分析显示整体向上"

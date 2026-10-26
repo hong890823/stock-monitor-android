@@ -2,7 +2,9 @@ package com.example.stockmonitor.ui
 
 import android.content.Context
 import com.example.stockmonitor.R
+import com.example.stockmonitor.analysis.DayPnl
 import com.example.stockmonitor.analysis.PortfolioAnalysis
+import com.example.stockmonitor.analysis.TimeUtils
 import com.example.stockmonitor.core.Store
 import com.example.stockmonitor.monitor.MonitorService
 import com.example.stockmonitor.monitor.Repo
@@ -21,7 +23,14 @@ internal fun portfolioBriefCard(context: Context, store: Store): UiKit.Card = Ui
     PortfolioAnalysis.todayBriefHighlights(results).forEach {
         addText(it, 13f, UiKit.color(context, R.color.warn))
     }
-    PortfolioAnalysis.todayBrief(results, portfolio, Repo.marketState, plan, Repo.quotes)
+    PortfolioAnalysis.todayBrief(
+        results = results,
+        portfolio = portfolio,
+        market = Repo.marketState,
+        swingPlan = plan,
+        quotes = Repo.quotes,
+        todayAcquisitions = DayPnl.acquisitions(store.tradeBook, TimeUtils.todayText()),
+    )
         .forEach { addText(it, 12f) }
     if (results.isEmpty()) {
         addText("暂无个股分析结果，最值得操作的股票需等分析完成后判断。", 11.5f)

@@ -3367,7 +3367,11 @@ class MonitorService : Service() {
                 PortfolioAnalysis.formatReport(
                     results,
                     TimeUtils.nowText(),
-                    DayPnl.summarize(portfolio.positions, liveQuotes),
+                    DayPnl.summarize(
+                        portfolio.positions,
+                        liveQuotes,
+                        DayPnl.acquisitions(store.tradeBook, TimeUtils.todayText()),
+                    ),
                     market = market,
                     swingPlan = swingPlan,
                     strongContinuationEvents = Repo.strongContinuationEvents.filter { it.date == TimeUtils.todayText() },

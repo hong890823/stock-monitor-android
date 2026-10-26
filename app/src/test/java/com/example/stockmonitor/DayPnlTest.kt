@@ -3,6 +3,8 @@ package com.example.stockmonitor
 import com.example.stockmonitor.analysis.DayPnl
 import com.example.stockmonitor.core.Position
 import com.example.stockmonitor.core.Quote
+import com.example.stockmonitor.core.TradeBook
+import com.example.stockmonitor.core.TradeLot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -44,6 +46,39 @@ class DayPnlTest {
         assertEquals(200.0, summary.totalPnl, 1e-9)
         assertEquals(8_600.0, summary.prevMarketValue, 1e-9)
         assertEquals(8_800.0, summary.marketValue, 1e-9)
+    }
+
+    @Test
+    fun todayAcquisitionUsesBuyCostInsteadOfPrevClose() {
+        val summary = DayPnl.summarize(
+            positions = listOf(Position("sz002421", "达实智能", 6_000.0, 3.517)),
+            quotes = mapOf("sz002421" to quote("sz002421", price = 3.44, prevClose = 3.43)),
+            todayAcquisitions = mapOf(
+                "sz002421" to DayPnl.Acquisition(quantity = 6_000.0, unitCost = 3.517),
+            ),
+        )
+
+        assertEquals(-462.0, summary.rows.single().pnl!!, 1e-9) // (3.44 - 3.517) × 6000
+        assertEquals(-462.0, summary.totalPnl, 1e-9)
+        assertEquals(0.0, summary.prevMarketValue, 1e-9)
+    }
+
+    @Test
+    fun acquisitionsAggregateSameDayLotsAtWeightedCost() {
+        val acquisitions = DayPnl.acquisitions(
+            TradeBook(
+                lots = listOf(
+                    TradeLot("sz002421", "达实智能", 2_000.0, 3.50, "2026-10-26"),
+                    TradeLot("sz002421", "达实智能", 4_000.0, 3.525, "2026-10-26"),
+                    TradeLot("sh600000", "浦发银行", 100.0, 10.0, "2026-10-23"),
+                ),
+            ),
+            date = "2026-10-26",
+        )
+
+        assertEquals(1, acquisitions.size)
+        assertEquals(6_000.0, acquisitions.getValue("sz002421").quantity, 1e-9)
+        assertEquals(3.5166666666666666, acquisitions.getValue("sz002421").unitCost, 1e-9)
     }
 
     @Test

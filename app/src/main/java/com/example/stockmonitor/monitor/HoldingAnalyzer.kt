@@ -2,6 +2,7 @@ package com.example.stockmonitor.monitor
 
 import android.util.Log
 import com.example.stockmonitor.analysis.DailyReview
+import com.example.stockmonitor.analysis.DayPnl
 import com.example.stockmonitor.analysis.EnvContext
 import com.example.stockmonitor.analysis.EventCoil
 import com.example.stockmonitor.analysis.FundamentalHealthPolicy
@@ -377,6 +378,7 @@ object HoldingAnalyzer {
                         recentAnnouncements = Repo.recentAnnouncements,
                         // 利好窗口要回溯到上一交易日（周一复盘才收得进周五盘后与周末的公告）。
                         tradingDates = benchmark.orEmpty().map { it.date },
+                        todayAcquisitions = DayPnl.acquisitions(store.tradeBook, today),
                     ),
                 )
             Repo.dailyReviewText = text

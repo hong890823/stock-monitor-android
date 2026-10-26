@@ -104,6 +104,8 @@ object DailyReview {
          * 「今天+昨天」会漏掉周五盘后和周末的公告。缺表时退回自然日两天。
          */
         val tradingDates: List<String> = emptyList(),
+        /** 今日新增买入批次；今日盈亏按这些股份的买入成本计算，不沿用昨收。 */
+        val todayAcquisitions: Map<String, DayPnl.Acquisition> = emptyMap(),
     )
 
     /**
@@ -237,7 +239,11 @@ object DailyReview {
             ).joinToString("\n")
         }
 
-        val dayPnl = DayPnl.summarize(inputs.positions, inputs.quotes)
+        val dayPnl = DayPnl.summarize(
+            inputs.positions,
+            inputs.quotes,
+            inputs.todayAcquisitions,
+        )
         val aggregates = aggregate(inputs.positions, dayPnl, inputs.portfolio, inputs.indexQuote, inputs.results)
         val reviewDate = inputs.analyzedAt.substringBefore(' ')
 
