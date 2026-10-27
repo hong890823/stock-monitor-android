@@ -13,6 +13,10 @@ object PromotionEnvironmentPolicy {
     private const val BOARD_WEAK_PCT = -1.0
     private const val LIMIT_DOWN_BREADTH_COUNT = 20
 
+    /**
+     * 板块标签存在来源与粒度误差，只作为排序/辅助证据；不再单独阻断候选晋级。
+     * 真正的掉档仍由个股趋势、关键位、量价和市场风险共振决定。
+     */
     fun gate(input: PromotionEnvironmentInput): String? {
         val indexes = listOf(input.shanghaiChangePct, input.shenzhenChangePct)
             .filterNotNull()
@@ -24,10 +28,6 @@ object PromotionEnvironmentPolicy {
         val down = input.limitDownCount
         if (up != null && down != null && down >= LIMIT_DOWN_BREADTH_COUNT && down > up) {
             return "跌停数量明显偏多，市场承接转弱，暂缓候选晋级"
-        }
-        val boards = input.boardChanges.filterNotNull().filter { it.isFinite() }
-        if (boards.isNotEmpty() && boards.all { it <= BOARD_WEAK_PCT }) {
-            return "所属板块同步转弱，暂缓候选晋级"
         }
         return null
     }

@@ -127,7 +127,6 @@ object HighPositionPolicy {
         val candidate = volumeConfirmed >= REBOUND_VOLUME_RATIO &&
             closesRising &&
             evidence.marketHealthy &&
-            evidence.sectorHealthy &&
             trendCanEnter
         return if (candidate) {
             decision(

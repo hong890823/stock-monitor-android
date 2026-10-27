@@ -3309,6 +3309,7 @@ class MonitorService : Service() {
             higherLows,
         ).count { it }
         val postLimitDailyBaseEntry = candidate.limitStreak?.let { it >= 2 } == true &&
+            relativeStrength?.let { it >= ObservationEntryPolicy.RELATIVE_STRENGTH_PCT } == true &&
             trend?.type == EntrySetupType.M20_PULLBACK && trend.confirmed && trend.canBuy &&
             trend.volumeConfirmed && trend.ma20SlopePct?.let { it > 0.0 } == true &&
             ma20SupportByAtr && stopConfirmations >= 2 && !limitUpBlocked && !limitUpShrinkAcceleration
@@ -3375,8 +3376,9 @@ class MonitorService : Service() {
                     riskFlag = trend?.trendWeak == true,
                     fundFlow = fundFlow?.let { FundFlowPolicy.assess(quote.changePct, it) },
                     fundFlowWindow = fundFlowWindow,
-                    environmentGate = promotionEnvironment.blockReason,
-                    environmentTightened = promotionEnvironment.tightened,
+                    environmentGate = promotionEnvironment.blockReason
+                        ?.takeUnless { promotionEnvironment.allowsHighQualityException },
+                    environmentTightened = promotionEnvironment.tightened || promotionEnvironment.allowsHighQualityException,
                     evaluatedAtMs = System.currentTimeMillis(),
                     quoteVolume = quote.volume,
                     technicalScore = technicalSnapshot?.technicalScore,
@@ -3454,8 +3456,9 @@ class MonitorService : Service() {
                     riskFlag = riskFlag,
                     fundFlow = fundFlow?.let { FundFlowPolicy.assess(quote.changePct, it) },
                     fundFlowWindow = fundFlowWindow,
-                    environmentGate = promotionEnvironment.blockReason,
-                    environmentTightened = promotionEnvironment.tightened,
+                    environmentGate = promotionEnvironment.blockReason
+                        ?.takeUnless { promotionEnvironment.allowsHighQualityException },
+                    environmentTightened = promotionEnvironment.tightened || promotionEnvironment.allowsHighQualityException,
                     evaluatedAtMs = System.currentTimeMillis(),
                     quoteVolume = quote.volume,
                     technicalScore = technicalSnapshot?.technicalScore,
@@ -3506,12 +3509,16 @@ class MonitorService : Service() {
     private data class CandidatePromotionEnvironment(
         val blockReason: String? = null,
         val tightened: Boolean = false,
+        /** 非系统性弱市下，仅允许二波或强相对强度的日线承接作为高质量例外。 */
+        val allowsHighQualityException: Boolean = false,
     )
 
     private fun promotionEnvironmentGate(candidate: ObservationCandidate): CandidatePromotionEnvironment {
         if (!promotionEnvironmentGateEnabled) return CandidatePromotionEnvironment()
         val quotes = Repo.quotes
-        candidateMarketRiskGate(candidate.code, quotes).let { if (it.blockReason != null || it.tightened) return it }
+        candidateMarketRiskGate(candidate.code, quotes).let {
+            if (it.blockReason != null || it.tightened || it.allowsHighQualityException) return it
+        }
         val limits = Repo.limits
         val conceptChanges = Repo.conceptSummary?.sectors?.associateBy({ it.name }, { it.change }).orEmpty()
         val sectorChanges = Repo.sectors?.all?.associateBy({ it.name }, { it.change }).orEmpty()
@@ -3546,8 +3553,14 @@ class MonitorService : Service() {
         val growthCandidate = code.startsWith("sz30") || code.startsWith("sh68")
         return when {
             severeCount >= 3 -> CandidatePromotionEnvironment(blockReason = "三指数严重动态风险，暂停普通候选晋级")
-            coreRisk.isNotEmpty() && growthRisk.isNotEmpty() -> CandidatePromotionEnvironment(blockReason = "核心与成长指数同步动态风险，暂停普通候选晋级")
-            coreRisk.size >= 2 -> CandidatePromotionEnvironment(blockReason = "上证与深成指同步动态风险，暂停普通候选晋级")
+            coreRisk.isNotEmpty() && growthRisk.isNotEmpty() -> CandidatePromotionEnvironment(
+                blockReason = "核心与成长指数同步动态风险，仅保留弱市抱团高质量例外",
+                allowsHighQualityException = true,
+            )
+            coreRisk.size >= 2 -> CandidatePromotionEnvironment(
+                blockReason = "上证与深成指同步动态风险，仅保留弱市抱团高质量例外",
+                allowsHighQualityException = true,
+            )
             coreRisk.isNotEmpty() -> CandidatePromotionEnvironment(tightened = true)
             growthRisk.isNotEmpty() && growthCandidate -> CandidatePromotionEnvironment(tightened = true)
             else -> CandidatePromotionEnvironment()
