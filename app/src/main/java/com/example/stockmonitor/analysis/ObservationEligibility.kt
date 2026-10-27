@@ -233,26 +233,42 @@ object ObservationEligibility {
                 it == ObservationSection.LIMIT_CONTINUOUS
         }.filterValues { it.isNotEmpty() }
 
-    /**
-     * 展示层保留同一股票的不同策略路线，避免封板路线的暂缓状态覆盖另一条已确认的启动路线。
-     * 同一路线若因缓存出现重复，才按现有代表项规则折叠。
-     */
     private fun deduplicateByStrategy(candidates: List<ObservationCandidate>): List<ObservationCandidate> =
         candidates.groupBy { it.code to it.strategy }.values.flatMap(::deduplicateCandidates)
 
-    fun forDisplay(candidates: List<ObservationCandidate>, quotes: Map<String, Quote>): List<ObservationCandidate> =
-        deduplicateByStrategy(candidates).filter { it.stage != ObservationStage.ELIMINATED }
+    /**
+     * 内部状态按“代码 + 策略”独立保存；UI 每只股票只显示一行。
+     * 选择可参与的非暂缓路线优先，封板/缩量路线不能覆盖同代码的有效启动路线。
+     */
+    fun forDisplay(candidates: List<ObservationCandidate>, quotes: Map<String, Quote>): List<ObservationCandidate> {
+        val routed = deduplicateByStrategy(candidates).filter { it.stage != ObservationStage.ELIMINATED }
             .map { applyQuoteGate(it, quotes[it.code]) }
-            .sortedWith(
+        return routed.groupBy { it.code }.mapNotNull { (_, routes) ->
+            val selectable = routes.filterNot { isLimitUpDeferred(it, quotes[it.code]) }
+                .ifEmpty { routes }
+            selectable.maxWithOrNull(
                 compareBy<ObservationCandidate> {
-                    when {
-                        isLimitUpDeferred(it, quotes[it.code]) -> 2
-                        it.stage == ObservationStage.BUY_CANDIDATE -> 0
-                        it.stage == ObservationStage.NEAR_ENTRY -> 1
-                        else -> 3
+                    when (it.stage) {
+                        ObservationStage.BUY_CANDIDATE -> 0
+                        ObservationStage.NEAR_ENTRY -> 1
+                        ObservationStage.OBSERVING -> 2
+                        ObservationStage.ELIMINATED -> 3
                     }
                 }.thenByDescending { it.score }
                     .thenByDescending { it.lastEvaluatedDate ?: it.addedDate }
-                    .thenBy { it.code },
+                    .thenBy { it.strategy.ordinal },
             )
+        }.sortedWith(
+            compareBy<ObservationCandidate> {
+                when {
+                    isLimitUpDeferred(it, quotes[it.code]) -> 2
+                    it.stage == ObservationStage.BUY_CANDIDATE -> 0
+                    it.stage == ObservationStage.NEAR_ENTRY -> 1
+                    else -> 3
+                }
+            }.thenByDescending { it.score }
+                .thenByDescending { it.lastEvaluatedDate ?: it.addedDate }
+                .thenBy { it.code },
+        )
+    }
 }

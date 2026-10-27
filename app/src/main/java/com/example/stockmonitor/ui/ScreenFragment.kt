@@ -650,7 +650,13 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
             fun observationRow(item: com.example.stockmonitor.core.ObservationCandidate): SelectionRowData {
                 val quote = Repo.quotes[item.code]
                 val limitUpDeferred = isLimitUpDeferred(item)
-                val routeLabel = item.strategy.label
+                val stockStrategies = Repo.observationPool
+                    .filter { it.code == item.code }
+                    .map { it.strategy }
+                    .toSet()
+                val routeLabel = ObservationStrategy.entries
+                    .filter { it in stockStrategies }
+                    .joinToString("＋") { it.label }
                 val statusLabel = when {
                     item.limitUpShrinkAcceleration ->
                         "⚠ 缩量加速风险"
@@ -697,7 +703,7 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                     null
                 }
                 return SelectionRowData(
-                    key = "observation:${item.code}:${item.strategy.name}",
+                    key = "observation:${item.code}",
                     name = item.name,
                     code = item.code,
                     price = String.format(Locale.CHINA, "%.2f", quote?.price ?: item.lastPrice),

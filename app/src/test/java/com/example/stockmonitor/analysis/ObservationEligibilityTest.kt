@@ -150,10 +150,7 @@ class ObservationEligibilityTest {
             .sections(listOf(leaderBuy, limitWatch), emptyMap())
             .values
             .flatten()
-        assertEquals(
-            listOf(ObservationStrategy.LEADER, ObservationStrategy.LIMIT_UP_CONTINUATION),
-            displayed.map { it.strategy },
-        )
+        assertEquals(listOf(ObservationStrategy.LEADER), displayed.map { it.strategy })
     }
 
     @Test
