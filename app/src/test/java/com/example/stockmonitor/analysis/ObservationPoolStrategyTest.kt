@@ -106,14 +106,14 @@ class ObservationPoolStrategyTest {
     }
 
     @Test
-    fun staleLimitHistoryDoesNotExtendConfirmationOrReuseOldSealRisk() {
-        val staleHighBoard = candidate(ObservationStrategy.LIMIT_UP_CONTINUATION).copy(
+    fun threeBoardIdentityKeepsThreeFreshConfirmationRoundsAfterOpening() {
+        val formerThreeBoard = candidate(ObservationStrategy.LIMIT_UP_CONTINUATION).copy(
             limitStreak = 3,
             sealQualityScore = 20,
             sealQualityCoveragePct = 100,
         )
         val first = ObservationPool.evaluate(
-            staleHighBoard,
+            formerThreeBoard,
             entry.copy(
                 strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
                 recentLimitUpDays = 0,
@@ -127,10 +127,18 @@ class ObservationPoolStrategyTest {
                 evaluatedAtMs = 1_900_000L,
             ),
         )
+        val third = ObservationPool.evaluate(
+            second,
+            entry.copy(
+                strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
+                recentLimitUpDays = 0,
+                evaluatedAtMs = 2_800_000L,
+            ),
+        )
 
-        assertEquals(2, first.entryConfirmationRequiredRounds)
-        assertEquals(3, first.score)
-        assertEquals(ObservationStage.BUY_CANDIDATE, second.stage)
+        assertEquals(3, first.entryConfirmationRequiredRounds)
+        assertEquals(ObservationStage.NEAR_ENTRY, second.stage)
+        assertEquals(ObservationStage.BUY_CANDIDATE, third.stage)
     }
 
     @Test

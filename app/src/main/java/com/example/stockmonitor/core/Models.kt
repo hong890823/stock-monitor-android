@@ -598,6 +598,10 @@ data class ObservationCandidate(
     val stage: ObservationStage,
     val score: Int,
     val weakDays: Int,
+    /** 最近一次以尾盘稳定窗口结算弱势日的交易日期；盘中走弱不直接累计跨日淘汰。 */
+    val weakDaysSettledDate: String? = null,
+    /** 当日两板及以上 MA20 承接已确认；供实时门控和通知识别独立日线参与路径。 */
+    val dailyBaseEntryConfirmed: Boolean = false,
     val technicalScore: Int? = null,
     val weeklyTrendLabel: String? = null,
     val monthlyTrendLabel: String? = null,
@@ -693,10 +697,17 @@ data class ObservationSignal(
     val breakoutRisk: BreakoutRiskDecision? = null,
     val fundFlow: com.example.stockmonitor.analysis.FundFlowAssessment? = null,
     val fundFlowWindow: com.example.stockmonitor.analysis.FundFlowWindowAssessment? = null,
+    /** 完全暂停晋级的环境原因；非空时不能形成普通买点。 */
     val environmentGate: String? = null,
+    /** 环境风险只提高普通晋级门槛时为 true，二波/日线承接等高质量结构仍可继续确认。 */
+    val environmentTightened: Boolean = false,
     val technicalScore: Int? = null,
     val weeklyTrendLabel: String? = null,
     val monthlyTrendLabel: String? = null,
+    /** 仅在尾盘稳定窗口结算跨日弱势天数；盘中走弱只用于实时降档。 */
+    val settlesWeakDay: Boolean = false,
+    /** 两板及以上强势后回踩 MA20 缩量止跌确认，可缩短为日线结构参与路径。 */
+    val postLimitDailyBaseEntry: Boolean = false,
 )
 
 /**

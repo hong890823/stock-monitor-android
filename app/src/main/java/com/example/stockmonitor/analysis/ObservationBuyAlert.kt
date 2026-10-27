@@ -19,6 +19,7 @@ object ObservationBuyAlert {
     ): Boolean = previous.stage != ObservationStage.BUY_CANDIDATE &&
         canNotify(current) &&
         (current.strategy == ObservationStrategy.PRE_BREAKOUT ||
+            current.dailyBaseEntryConfirmed ||
             current.entryConfirmationRounds >= ObservationPool.requiredConfirmationRounds(current))
 
     fun title(candidate: ObservationCandidate): String =
@@ -56,6 +57,8 @@ object ObservationBuyAlert {
         )
         append("｜现价")
         append(String.format(Locale.CHINA, "%.2f", candidate.lastPrice))
+        append("｜")
+        append(candidate.reason.ifBlank { "买点结构已确认" })
         append("｜")
         append(guardedText)
         candidate.stopPrice?.let {

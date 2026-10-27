@@ -89,6 +89,20 @@ object TradingCalendar {
     /** 跌幅预警只在盘中推送，避免非交易时段用旧数据误报。 */
     fun inMarketHoursForAlert(calendar: Calendar = TimeUtils.nowCalendar()): Boolean = isMarketOpen(calendar)
 
+    /** 候选池当日参与信号窗口：避开开盘噪声，14:45 后不再推送新的当日参与机会。 */
+    fun inObservationBuySignalWindow(calendar: Calendar = TimeUtils.nowCalendar()): Boolean {
+        if (TimeUtils.isWeekend(calendar)) return false
+        val minutes = TimeUtils.minuteOfDay(calendar)
+        return minutes in (9 * 60 + 45)..(14 * 60 + 45)
+    }
+
+    /** 尾盘只在仍有执行时间的 14:30～14:45 补做候选复核。 */
+    fun inTailObservationReviewWindow(calendar: Calendar = TimeUtils.nowCalendar()): Boolean {
+        if (!inObservationBuySignalWindow(calendar)) return false
+        val minutes = TimeUtils.minuteOfDay(calendar)
+        return minutes in (14 * 60 + 30)..(14 * 60 + 45)
+    }
+
     fun tradingMinutesElapsed(calendar: Calendar = TimeUtils.nowCalendar()): Int {
         val minutes = TimeUtils.minuteOfDay(calendar)
         return when {

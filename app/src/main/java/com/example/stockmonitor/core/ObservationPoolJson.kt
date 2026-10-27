@@ -20,6 +20,8 @@ object ObservationPoolJson {
                     item.weeklyTrendLabel?.let { put("weekly_trend", it) }
                     item.monthlyTrendLabel?.let { put("monthly_trend", it) }
                     put("weak_days", item.weakDays)
+                    item.weakDaysSettledDate?.let { put("weak_days_settled_date", it) }
+                    put("daily_base_entry_confirmed", item.dailyBaseEntryConfirmed)
                     put("observed_days", item.observedDays)
                     put("last_price", item.lastPrice)
                     put("stop_price", item.stopPrice)
@@ -88,6 +90,8 @@ object ObservationPoolJson {
                     weeklyTrendLabel = item.optString("weekly_trend").takeIf { it.isNotBlank() },
                     monthlyTrendLabel = item.optString("monthly_trend").takeIf { it.isNotBlank() },
                     weakDays = item.optInt("weak_days", 0),
+                    weakDaysSettledDate = item.optString("weak_days_settled_date").takeIf { it.isNotBlank() },
+                    dailyBaseEntryConfirmed = item.optBoolean("daily_base_entry_confirmed", false),
                     observedDays = item.optInt("observed_days", 0),
                     lastPrice = item.optDouble("last_price", 0.0),
                     stopPrice = item.optDouble("stop_price", Double.NaN).takeUnless { it.isNaN() },

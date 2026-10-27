@@ -26,7 +26,7 @@ object ObservationPool {
     fun requiredConfirmationRounds(
         candidate: ObservationCandidate,
         signal: ObservationSignal,
-    ): Int = requiredConfirmationRounds(candidate, signal.recentLimitUpDays)
+    ): Int = requiredConfirmationRounds(candidate, candidate.limitStreak ?: signal.recentLimitUpDays)
 
     private fun requiredConfirmationRounds(
         candidate: ObservationCandidate,
@@ -45,10 +45,11 @@ object ObservationPool {
         if (candidate.stage == ObservationStage.ELIMINATED) return candidate
         val sameDay = candidate.lastEvaluatedDate == signal.date
         val observedDays = if (sameDay) candidate.observedDays else candidate.observedDays + 1
+        val settlesWeakDay = signal.settlesWeakDay && candidate.weakDaysSettledDate != signal.date
         val weakDays = when {
-            sameDay -> candidate.weakDays
-            signal.trendWeak -> candidate.weakDays + 1
-            else -> 0
+            settlesWeakDay && signal.trendWeak -> candidate.weakDays + 1
+            settlesWeakDay -> 0
+            else -> candidate.weakDays
         }
         val baseScore = when (candidate.strategy) {
             ObservationStrategy.PRE_BREAKOUT -> if (signal.setupScore > 0) {
@@ -126,13 +127,41 @@ object ObservationPool {
             softRisk -> (candidate.softRiskRounds + 1).coerceAtMost(2)
             else -> 0
         }
-        val eligible = breakoutRisk?.risk != true && trendGate == null && signal.confirmedEntry && signal.canBuy &&
+        val secondWaveEntry = signal.highPosition?.phase == HighPositionPhase.SECOND_WAVE_CONFIRMED &&
+            signal.highPosition.allowSecondWaveEntry && signal.highPosition.allowBuy
+        val postLimitDailyBaseEntry = signal.postLimitDailyBaseEntry
+        // 二波确认和两板以上回踩 MA20 的日线承接均可作为独立结构；
+        // 不改变普通 BREAKOUT 仅观察的全局规则。
+        val entryConfirmed = signal.confirmedEntry || secondWaveEntry
+        val entryCanBuy = signal.canBuy || secondWaveEntry
+        val environmentTightened = signal.environmentTightened
+        val eligible = breakoutRisk?.risk != true && trendGate == null && entryConfirmed && entryCanBuy &&
+            (!environmentTightened || secondWaveEntry || postLimitDailyBaseEntry) &&
             !signal.riskFlag && !signal.trendWeak &&
             !signal.limitUpBlocked && !signal.limitUpShrinkAcceleration && !fundFlowDelay
         val leader = candidate.strategy == ObservationStrategy.LEADER ||
             candidate.strategy == ObservationStrategy.LIMIT_UP_CONTINUATION
+        // 仅在两板及以上、回踩 MA20 缩量止跌已确认时缩短高连板的盘中轮次；
+        // 单纯开板或横盘仍保留常规两/三轮确认，避免把高位整理直接当买点。
+        val leaderNeedsRounds = leader && !postLimitDailyBaseEntry
         val sealedContinuous = candidate.strategy == ObservationStrategy.LIMIT_UP_CONTINUATION &&
             candidate.continuousObservation && signal.limitUpBlocked
+        // 已确认过买点的候选，在趋势未破时允许回踩/环境暂缓，不因一轮短暂波动直接消失。
+        val previouslyConfirmed = (candidate.highestStage ?: candidate.stage) == ObservationStage.BUY_CANDIDATE
+        val trendIntact = !signal.trendWeak &&
+            signal.trendAssessment?.major != MajorTrend.DOWN &&
+            signal.highPosition?.riskPriority != true &&
+            !signal.limitUpShrinkAcceleration
+        val nearStructureGate = signal.trendAssessment?.major == MajorTrend.BOTTOMING ||
+            signal.highPosition?.phase in setOf(
+                HighPositionPhase.SECOND_WAVE_CANDIDATE,
+                HighPositionPhase.CONSOLIDATION,
+            ) ||
+            signal.boxRange?.state in setOf(
+                BoxRangeState.BOX_RANGE,
+                BoxRangeState.BREAKOUT_CANDIDATE,
+            )
+        val promotionBlocked = trendGate != null && !nearStructureGate && !softRisk
         val requiredConfirmationRounds = requiredConfirmationRounds(candidate, signal)
         val elapsed = signal.evaluatedAtMs - candidate.entryConfirmedAtMs
         val validSample = signal.evaluatedAtMs > 0
@@ -140,52 +169,62 @@ object ObservationPool {
             elapsed in 0..ENTRY_CONFIRMATION_MAX_MS
         val freshRound = continuing && elapsed >= ENTRY_CONFIRMATION_MIN_MS
         val rounds = when {
-            !leader || !eligible || !validSample -> 0
+            !leaderNeedsRounds || !eligible || !validSample -> 0
             !continuing -> 1
             freshRound -> (candidate.entryConfirmationRounds + 1).coerceAtMost(requiredConfirmationRounds)
             else -> candidate.entryConfirmationRounds
         }
-        val confirmed = eligible && (!leader || rounds >= requiredConfirmationRounds)
+        val confirmed = eligible && (!leaderNeedsRounds || rounds >= requiredConfirmationRounds)
         val continuousOpeningGrace = candidate.continuousObservation &&
             candidate.limitUpBlocked && !signal.limitUpBlocked
         val stage = when {
             sealedContinuous -> ObservationStage.OBSERVING
-            !sealedContinuous && !continuousOpeningGrace && weakDays >= MAX_WEAK_DAYS ->
+            // 封板期间不参与；开板首轮由 continuousOpeningGrace 保留，等待后续重新确认。
+            signal.limitUpBlocked -> ObservationStage.OBSERVING
+            // 三日走弱和十日未确认只淘汰从未确认过买点的候选；已确认候选走结构失效/降档路径。
+            !previouslyConfirmed && !sealedContinuous && !continuousOpeningGrace && weakDays >= MAX_WEAK_DAYS ->
                 ObservationStage.ELIMINATED
-            !sealedContinuous && !continuousOpeningGrace &&
+            !previouslyConfirmed && !sealedContinuous && !continuousOpeningGrace &&
                 observedDays >= MAX_OBSERVED_DAYS && !confirmed -> ObservationStage.ELIMINATED
             hardRisk && candidate.stage == ObservationStage.BUY_CANDIDATE -> ObservationStage.NEAR_ENTRY
             hardRisk -> ObservationStage.OBSERVING
-            signal.riskFlag && candidate.stage == ObservationStage.BUY_CANDIDATE ->
-                ObservationStage.NEAR_ENTRY
+            signal.riskFlag && candidate.stage == ObservationStage.BUY_CANDIDATE -> ObservationStage.NEAR_ENTRY
             signal.riskFlag -> ObservationStage.OBSERVING
+            // 第二轮及以后仍出现突破下杀风险，说明回踩未完成修复，降至第四档继续观察。
+            softRisk && softRiskRounds >= 2 -> ObservationStage.OBSERVING
+            // 第一轮突破风险给已确认且趋势未破的候选一次回踩/反抽复评机会。
+            softRisk && previouslyConfirmed && trendIntact -> ObservationStage.NEAR_ENTRY
             softRisk && candidate.stage == ObservationStage.BUY_CANDIDATE && softRiskRounds < 2 ->
                 ObservationStage.NEAR_ENTRY
             softRisk -> ObservationStage.OBSERVING
-            signal.trendAssessment?.major == MajorTrend.BOTTOMING -> ObservationStage.NEAR_ENTRY
-            signal.highPosition?.phase == HighPositionPhase.SECOND_WAVE_CANDIDATE -> ObservationStage.NEAR_ENTRY
-            signal.highPosition?.phase == HighPositionPhase.CONSOLIDATION -> ObservationStage.NEAR_ENTRY
-            signal.boxRange?.state in setOf(
-                BoxRangeState.BOX_RANGE,
-                BoxRangeState.BREAKOUT_CANDIDATE,
-            ) -> ObservationStage.NEAR_ENTRY
-            fundFlowDelay && candidate.stage == ObservationStage.BUY_CANDIDATE ->
-                ObservationStage.NEAR_ENTRY
+            promotionBlocked && previouslyConfirmed && trendIntact -> ObservationStage.NEAR_ENTRY
+            promotionBlocked -> ObservationStage.OBSERVING
+            environmentTightened && !secondWaveEntry && !postLimitDailyBaseEntry -> ObservationStage.NEAR_ENTRY
+            nearStructureGate -> ObservationStage.NEAR_ENTRY
+            fundFlowDelay && previouslyConfirmed && trendIntact -> ObservationStage.NEAR_ENTRY
+            fundFlowDelay && candidate.stage == ObservationStage.BUY_CANDIDATE -> ObservationStage.NEAR_ENTRY
             fundFlowDelay -> ObservationStage.OBSERVING
             confirmed -> ObservationStage.BUY_CANDIDATE
             score >= 2 || signal.confirmedEntry -> ObservationStage.NEAR_ENTRY
             else -> ObservationStage.OBSERVING
         }
         val stageReason = when (stage) {
-            ObservationStage.BUY_CANDIDATE -> if (candidate.strategy != ObservationStrategy.PRE_BREAKOUT) {
-                "强势资格与缩量回踩企稳条件连续${requiredConfirmationRounds}轮通过；仅为技术候选，不代表资金承接已获证实"
-            } else signal.signalReason.ifBlank { "趋势入场已确认，等待执行纪律与仓位检查" }
+            ObservationStage.BUY_CANDIDATE -> when {
+                secondWaveEntry ->
+                    "${signal.highPosition?.reason ?: "二波突破确认"}；按二波结构首次轻仓参与，回踩不破关键位再评估追加"
+                postLimitDailyBaseEntry ->
+                    "两板及以上强势后回踩 MA20 缩量止跌确认；按日线承接结构首次轻仓参与，跌破 MA20 或止损参考即停止追加"
+                candidate.strategy != ObservationStrategy.PRE_BREAKOUT ->
+                    "强势资格与缩量回踩企稳条件连续${requiredConfirmationRounds}轮通过；仅为技术候选，不代表资金承接已获证实"
+                else -> signal.signalReason.ifBlank { "趋势入场已确认，等待执行纪律与仓位检查" }
+            }
             ObservationStage.NEAR_ENTRY -> when {
                 sealedContinuous -> ObservationEligibility.CONTINUOUS_LIMIT_WAIT_REASON
                 softRisk && candidate.stage == ObservationStage.BUY_CANDIDATE && softRiskRounds < 2 ->
                     "${breakoutRisk.reason}｜风险缓冲1/2，暂降等待确认"
                 signal.riskFlag -> "${signal.signalReason.ifBlank { "风险信号" }}｜风险未解除，不晋级"
                 trendGate != null -> trendGate
+                environmentTightened -> "市场风险提高普通候选晋级门槛，等待更强的日线承接或二波确认"
                 fundFlowDelay -> fundFlowDelayReason(signal)
                 signal.limitUpBlocked -> ObservationEligibility.LIMIT_WAIT_REASON
                 leader && eligible -> "回踩条件初步满足，等待下一轮新行情复评（$rounds/$requiredConfirmationRounds）"
@@ -222,6 +261,8 @@ object ObservationPool {
             weeklyTrendLabel = signal.weeklyTrendLabel,
             monthlyTrendLabel = signal.monthlyTrendLabel,
             weakDays = weakDays,
+            weakDaysSettledDate = if (settlesWeakDay) signal.date else candidate.weakDaysSettledDate,
+            dailyBaseEntryConfirmed = postLimitDailyBaseEntry,
             observedDays = observedDays,
             lastPrice = signal.price,
             stopPrice = signal.stopPrice,

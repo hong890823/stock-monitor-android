@@ -301,6 +301,41 @@ class Store(
         }
     }
 
+    /** 已发送过候选买点通知的“交易日:代码”集合；实时与尾盘复核共享，避免同一买点重复打扰。 */
+    var candidateBuyAlertKeys: Set<String>
+        get() = prefs.getStringSet(KEY_CANDIDATE_BUY_ALERT_KEYS, emptySet()).orEmpty().toSet()
+        set(value) = prefs.edit().putStringSet(KEY_CANDIDATE_BUY_ALERT_KEYS, value.toSet()).apply()
+
+    /**
+     * 原子占用候选买点通知键。通知调用前同步落盘，保证重启后同一交易日同一代码不重复推送。
+     */
+    fun reserveCandidateBuyAlertKey(key: String, today: String): Boolean = synchronized(prefs) {
+        val existing = prefs.getStringSet(KEY_CANDIDATE_BUY_ALERT_KEYS, emptySet()).orEmpty()
+            .filter { it.startsWith("$today:") }
+            .toMutableSet()
+        if (key in existing) return@synchronized false
+        existing += key
+        prefs.edit().putStringSet(KEY_CANDIDATE_BUY_ALERT_KEYS, existing).commit()
+    }
+
+    /** 已发送过尾盘候选复核的“交易日:代码”集合，独立于通用通知历史，防止历史裁剪或重启造成重复推送。 */
+    var tailObservationAlertKeys: Set<String>
+        get() = prefs.getStringSet(KEY_TAIL_OBSERVATION_ALERT_KEYS, emptySet()).orEmpty().toSet()
+        set(value) = prefs.edit().putStringSet(KEY_TAIL_OBSERVATION_ALERT_KEYS, value.toSet()).apply()
+
+    /**
+     * 原子占用尾盘候选复核键。通知调用前同步落盘，保证进程重启后同一交易日同一代码不重复推送。
+     * 一旦占用即不重试，优先保证“至多一次”而非在系统通知失败时反复打扰用户。
+     */
+    fun reserveTailObservationAlertKey(key: String, today: String): Boolean = synchronized(prefs) {
+        val existing = prefs.getStringSet(KEY_TAIL_OBSERVATION_ALERT_KEYS, emptySet()).orEmpty()
+            .filter { it.startsWith("$today:") }
+            .toMutableSet()
+        if (key in existing) return@synchronized false
+        existing += key
+        prefs.edit().putStringSet(KEY_TAIL_OBSERVATION_ALERT_KEYS, existing).commit()
+    }
+
     // ── 监控开关 ──
     var monitorEnabled: Boolean
         get() = prefs.getBoolean(KEY_MONITOR_ENABLED, true)
@@ -565,5 +600,7 @@ class Store(
         private const val KEY_AI_REPORT_AT = "ai_report_at"
         private const val KEY_TRADE_BOOK = "trade_book"
         private const val KEY_ALERT_RECORDS = "alert_records"
+        private const val KEY_CANDIDATE_BUY_ALERT_KEYS = "candidate_buy_alert_keys"
+        private const val KEY_TAIL_OBSERVATION_ALERT_KEYS = "tail_observation_alert_keys"
     }
 }

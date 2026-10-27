@@ -129,7 +129,8 @@ class ObservationPoolTest {
             ),
         )
 
-        assertEquals(ObservationStage.NEAR_ENTRY, blocked.stage)
+        // 2026-10-22 规格约束：封板期间不进 NEAR_ENTRY（非涨停价条件），停 OBSERVING 等开板。
+        assertEquals(ObservationStage.OBSERVING, blocked.stage)
         assertTrue(blocked.reason.contains("涨停封板"))
 
         val reopened = ObservationPool.evaluate(
@@ -165,6 +166,7 @@ class ObservationPoolTest {
                     trendWeak = true,
                     stopPrice = null,
                     changePct = -1.0,
+                    settlesWeakDay = true,
                 ),
             )
         }
@@ -177,11 +179,13 @@ class ObservationPoolTest {
     fun sameTradingDayDoesNotAccumulateWeakDaysTwice() {
         val first = ObservationPool.evaluate(
             candidate(),
-            ObservationSignal("2026-10-13", 9.8, false, false, false, true, null, -1.0),
+            ObservationSignal("2026-10-13", 9.8, false, false, false, true, null, -1.0,
+                settlesWeakDay = true),
         )
         val second = ObservationPool.evaluate(
             first,
-            ObservationSignal("2026-10-13", 9.7, false, false, false, true, null, -2.0),
+            ObservationSignal("2026-10-13", 9.7, false, false, false, true, null, -2.0,
+                settlesWeakDay = true),
         )
 
         assertEquals(1, second.weakDays)
@@ -246,7 +250,9 @@ class ObservationPoolTest {
             ObservationSignal("2026-10-14", 11.0, true, true, true, false, 9.6, 10.0,
                 limitUpBlocked = true),
         )
-        assertEquals(ObservationStage.NEAR_ENTRY, result.stage)
+        // 封板把已确认的买点压回观察（2026-10-22 规格：Sealed never enters NEAR_ENTRY/BUY_CANDIDATE），
+        // 开板后按新一轮评估重新确认。
+        assertEquals(ObservationStage.OBSERVING, result.stage)
     }
 
     @Test
@@ -288,8 +294,8 @@ class ObservationPoolTest {
 
         assertEquals(ObservationStage.OBSERVING, secondRisk.stage)
         assertEquals(2, secondRisk.softRiskRounds)
-        assertTrue(ObservationBreakoutRiskAlert.shouldNotify(original, secondRisk))
-        assertFalse(ObservationBreakoutRiskAlert.shouldNotify(secondRisk, secondRisk))
+        assertTrue(ObservationBreakoutRiskAlert.shouldNotify(original, risk))
+        assertFalse(ObservationBreakoutRiskAlert.shouldNotify(risk, secondRisk))
     }
 
     @Test

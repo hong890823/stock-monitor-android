@@ -41,7 +41,7 @@ class MarketAlertEngineTest {
         else -> "创业板指"
     }
 
-    private fun snapshot(code: String, changePct: Double) =
+    private fun snapshot(code: String, changePct: Double, dailyVolatilityPct: Double? = null) =
         MarketAlertEngine.IndexSnapshot(
             code = code,
             name = nameOf(code),
@@ -50,6 +50,7 @@ class MarketAlertEngineTest {
             turnover = 1_000_000.0,
             timestamp = 60 * 60_000L,
             turnoverRatio = null,
+            dailyVolatilityPct = dailyVolatilityPct,
         )
 
     private val flatSnapshots = listOf(
@@ -244,36 +245,28 @@ class MarketAlertEngineTest {
     }
 
     @Test
-    fun dailyPointEightNeedsWeakBreadthOrExpandedTurnover() {
+    fun dynamicCoreRiskDoesNotNeedBreadthConfirmation() {
         val engine = MarketAlertEngine()
         val bars = mapOf(
             "sh000001" to series("sh000001", List(10) { 3000.0 }),
             "sz399001" to series("sz399001", List(10) { 3000.0 }),
             "sz399006" to series("sz399006", List(10) { 3000.0 }),
         )
-        val weakDay = listOf(
-            snapshot("sh000001", -0.85),
-            snapshot("sz399001", -0.90),
-            snapshot("sz399006", 0.20),
+        val riskDay = listOf(
+            snapshot("sh000001", -1.00, dailyVolatilityPct = 0.60),
+            snapshot("sz399001", -1.00, dailyVolatilityPct = 0.60),
+            snapshot("sz399006", 0.20, dailyVolatilityPct = 0.60),
         )
 
-        assertTrue(
-            engine.update(
-                weakDay,
-                bars,
-                "2026-10-23",
-                MarketAlertEngine.MarketBreadth(0.70, 0.68),
-            ).isEmpty(),
+        val alerts = engine.update(
+            riskDay,
+            bars,
+            "2026-10-23",
+            MarketAlertEngine.MarketBreadth(0.70, 0.68),
         )
-        val alerts =
-            engine.update(
-                weakDay.map { it.copy(timestamp = it.timestamp + 60_000L) },
-                bars,
-                "2026-10-23",
-                MarketAlertEngine.MarketBreadth(0.32, 0.34),
-            )
 
         assertEquals(MarketAlertScope.MARKET, alerts.single().scope)
+        assertTrue(alerts.single().type.contains("core_market"))
     }
 
     @Test

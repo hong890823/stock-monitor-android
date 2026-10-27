@@ -602,7 +602,7 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
             addText("1️⃣ ✅ 可参与候选（买点已确认）")
             addText("2️⃣ 🔥 强势观察（强而未确认）")
             addText("3️⃣ 🕐 等待确认（条件未齐）")
-            addText("4️⃣ ⏸ 其他观察（偏弱/风险）")
+            addText("4️⃣ ⏸ 其他观察（封板 / 缩量 / 风险 / 数据不足）")
             val observationDetails = buildString {
                 appendLine("历史最高")
                 appendLine("买点已确认 ${highestBuy}只｜买点待确认 ${highestNear}只｜个股详情保留首次达到时间与状态变化")
@@ -611,7 +611,7 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                 appendLine("${active.size}只｜涨停持续观察 ${limitContinuations.size}只｜强势龙头 ${leaders.size}只｜启动前潜力 ${preBreakout.size}只")
                 appendLine()
                 appendLine("晋级规则")
-                appendLine("启动前潜力：趋势/风险门槛通过｜强势龙头：连续2轮复评｜涨停持续：封板只看、开板确认（3板3轮）｜3日走弱/10日未确认淘汰")
+                appendLine("启动前潜力：趋势启动确认可参与｜强势龙头：连续2轮复评｜涨停持续：封板只看、开板确认（3板3轮）｜从未确认者3日走弱/10日未确认淘汰；已确认且趋势未破则保留回踩复评")
                 appendLine()
                 appendLine("排序标记")
                 appendLine("强势板块决定强势观察档位；容量中军、情绪核心提高综合质量分。")
@@ -650,13 +650,7 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
             fun observationRow(item: com.example.stockmonitor.core.ObservationCandidate): SelectionRowData {
                 val quote = Repo.quotes[item.code]
                 val limitUpDeferred = isLimitUpDeferred(item)
-                val stockStrategies = Repo.observationPool
-                    .filter { it.code == item.code }
-                    .map { it.strategy }
-                    .toSet()
-                val routeLabel = ObservationStrategy.entries
-                    .filter { it in stockStrategies }
-                    .joinToString("＋") { it.label }
+                val routeLabel = item.strategy.label
                 val statusLabel = when {
                     item.limitUpShrinkAcceleration ->
                         "⚠ 缩量加速风险"
@@ -703,7 +697,7 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                     null
                 }
                 return SelectionRowData(
-                    key = "observation:${item.code}",
+                    key = "observation:${item.code}:${item.strategy.name}",
                     name = item.name,
                     code = item.code,
                     price = String.format(Locale.CHINA, "%.2f", quote?.price ?: item.lastPrice),
@@ -799,7 +793,7 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
             )
             addStatusGroup(
                 title = "⏸ 其他暂缓 / 封板 / 观察（${otherWaitItems.size}只）",
-                description = "强度偏弱或有风险：封板、缩量加速或尚未形成入场结构；本组不是直接买入列表。",
+                description = "封板、缩量加速、环境/趋势风险或数据不足；本组不是直接买入列表。",
                 items = otherWaitItems,
                 pageKey = "observation:status:wait",
                 titleColor = R.color.text_secondary,

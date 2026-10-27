@@ -20,6 +20,10 @@ enum class MarketAlertScope(val priority: Int) {
  * 5 分钟速度证据只接受已完成、不重叠的 K 线；单指数转弱只观察，不返回通知。
  * 指数风险、市场风险和系统性风险分开命名，避免把创业板等单一指数异动叫成市场风险。
  */
+/** 同级风险提醒的冷却窗：满 60 分钟后允许同级再报（升级仍即时，见 shouldEmit）。 */
+private const val SAME_LEVEL_REARM_MS = 60L * 60_000L
+/** 仅用最新完成5分钟柱一致的指数做速度组合；落后缓存不能拉低其它指数的处理时点。 */
+
 class MarketAlertEngine {
     data class IndexSnapshot(
         val code: String,
@@ -29,6 +33,8 @@ class MarketAlertEngine {
         val turnover: Double,
         val timestamp: Long,
         val turnoverRatio: Double? = null,
+        /** 近20个已完成交易日的稳健日波动率（百分点）；缺失时策略退回指数最低容差。 */
+        val dailyVolatilityPct: Double? = null,
     )
 
     data class IndexBar(
@@ -102,9 +108,11 @@ class MarketAlertEngine {
     )
 
     private var tradingDay: String? = null
-    private var lastBarTimestamp: Long? = null
+    /** 已评估的分钟组合批次，包含时间与参与指数集合；同窗迟到指数补齐时允许重新判断组合。 */
+    private var lastSpeedBatchKey: String? = null
     private var emittedLevel: MarketAlertLevel? = null
     private var emittedScope: MarketAlertScope? = null
+    private var lastEmitAtMs: Long = 0L
 
     fun update(
         snapshots: List<IndexSnapshot>,
@@ -121,62 +129,122 @@ class MarketAlertEngine {
             bars.mapValues { (_, values) ->
                 values.filter { it.valid }.distinctBy { it.timestamp }.sortedBy { it.timestamp }
             }.filterValues { it.isNotEmpty() }
-        val newestBarTimestamp =
-            preparedBars.values
-                .mapNotNull { it.lastOrNull()?.timestamp }
-                .minOrNull()
-        val newBarBatch = newestBarTimestamp != null && newestBarTimestamp != lastBarTimestamp
-        if (newestBarTimestamp != null) lastBarTimestamp = newestBarTimestamp
+        // 某一指数分钟线短暂滞后时，不让它冻结其它至少两条指数的新速度证据。
+        val latestKnownTimestamp = preparedBars.values.mapNotNull { it.lastOrNull()?.timestamp }.maxOrNull()
+        val marketSpeedBars = latestKnownTimestamp?.let { latest ->
+            preparedBars.filterValues { values -> values.lastOrNull()?.timestamp == latest }
+        }.orEmpty()
+        val newestBarTimestamp = latestKnownTimestamp?.takeIf { marketSpeedBars.size >= 2 }
+        val speedBatchKey = newestBarTimestamp?.let { timestamp ->
+            "$timestamp:${marketSpeedBars.keys.sorted().joinToString(",")}"
+        }
+        val newBarBatch = speedBatchKey != null && speedBatchKey != lastSpeedBatchKey
+        if (speedBatchKey != null) lastSpeedBatchKey = speedBatchKey
 
         val daily = dailyCandidate(current, breadth)
         val speed = newestBarTimestamp
             ?.takeIf { newBarBatch }
-            ?.let { speedCandidate(preparedBars, breadth, it) }
+            ?.let { speedCandidate(marketSpeedBars, breadth, it) }
         val candidate = listOfNotNull(daily, speed).maxWithOrNull(candidateComparator())
         if (candidate == null) {
             if (isRearmed(current)) resetState()
             return emptyList()
         }
-        if (!shouldEmit(candidate)) return emptyList()
+        // 日线候选只依赖实时快照，冷却也必须使用同一批行情的时间；不能因5分钟K线暂缺而永不重报。
+        val notificationTimestamp = current.maxOfOrNull { it.timestamp }
+        if (!shouldEmit(candidate, notificationTimestamp)) return emptyList()
         emittedLevel = candidate.level
         emittedScope = candidate.scope
+        notificationTimestamp?.let { lastEmitAtMs = it }
         return listOf(buildAlert(current, breadth, candidate))
     }
 
     fun reset() {
         tradingDay = null
-        lastBarTimestamp = null
+        lastSpeedBatchKey = null
         resetState()
     }
 
     private fun resetState() {
         emittedLevel = null
         emittedScope = null
+        lastEmitAtMs = 0L
     }
 
     private fun dailyCandidate(
         snapshots: List<IndexSnapshot>,
         breadth: MarketBreadth,
     ): Candidate? {
-        val riskCount = snapshots.count { it.changePct <= -MarketRiskPolicy.RISK_WARNING_PCT }
-        val severeCount = snapshots.count { it.changePct <= -MarketRiskPolicy.SEVERE_WARNING_PCT }
-        val expandedTurnover = snapshots.mapNotNull { it.turnoverRatio }.maxOrNull()
-            ?.let { it >= MarketRiskPolicy.EXPANDED_VOLUME_RATIO } == true
+        val risks = snapshots.filter { snapshot ->
+            snapshot.changePct <= -MarketRiskPolicy.dailyRiskThresholdPct(
+                snapshot.code,
+                snapshot.dailyVolatilityPct,
+            )
+        }
+        val severe = snapshots.filter { snapshot ->
+            snapshot.changePct <= -MarketRiskPolicy.dailySevereThresholdPct(
+                snapshot.code,
+                snapshot.dailyVolatilityPct,
+            )
+        }
+        val coreCodes = setOf(MarketRiskPolicy.SHANGHAI_CODE, MarketRiskPolicy.SHENZHEN_CODE)
+        val growthCodes = setOf(MarketRiskPolicy.CHINEXT_CODE, MarketRiskPolicy.SCI_TECH_50_CODE)
+        val coreRisk = risks.filter { it.code in coreCodes }
+        val growthRisk = risks.filter { it.code in growthCodes }
+        val individual = risks.maxByOrNull { snapshot ->
+            -snapshot.changePct / MarketRiskPolicy.dailyRiskThresholdPct(
+                snapshot.code,
+                snapshot.dailyVolatilityPct,
+            )
+        }
         return when {
-            severeCount >= 2 && breadth.veryWeak ->
+            severe.size >= 3 ->
                 Candidate(
                     MarketAlertLevel.CRASH,
                     MarketAlertScope.SYSTEMIC,
-                    "systemic_day",
-                    "至少两个指数日跌幅达到严重风险区间，且市场宽度极弱",
+                    "systemic_dynamic_day",
+                    "三个及以上核心/成长指数跌幅超过各自近期正常波动的严重区间；市场宽度作为辅助证据，不阻断系统性风险升级",
                 )
-            riskCount >= 2 && (breadth.weak || expandedTurnover) ->
+            coreRisk.isNotEmpty() && growthRisk.isNotEmpty() ->
                 Candidate(
                     MarketAlertLevel.DANGER,
                     MarketAlertScope.MARKET,
-                    "market_day",
-                    "至少两个指数日跌幅达到 -0.8%，并出现普跌或放量确认",
+                    "cross_style_dynamic_day",
+                    "核心宽基与成长风格指数同步跌入各自异常区间，风险跨风格扩散",
                 )
+            coreRisk.size >= 2 ->
+                Candidate(
+                    MarketAlertLevel.DANGER,
+                    MarketAlertScope.MARKET,
+                    "core_market_dynamic_day",
+                    "上证与深成指同步跌入各自异常区间，核心宽基市场走弱",
+                )
+            growthRisk.size >= 2 ->
+                Candidate(
+                    MarketAlertLevel.DANGER,
+                    MarketAlertScope.MARKET,
+                    "growth_style_dynamic_day",
+                    "创业板与科创50同步跌入各自异常区间，成长风格风险提升",
+                )
+            individual != null -> {
+                val threshold = MarketRiskPolicy.dailyRiskThresholdPct(
+                    individual.code,
+                    individual.dailyVolatilityPct,
+                )
+                Candidate(
+                    MarketAlertLevel.DANGER,
+                    MarketAlertScope.INDEX,
+                    "index_dynamic_day:${individual.code}",
+                    String.format(
+                        Locale.CHINA,
+                        "%s 日跌幅 %+.2f%%，超过近期20日正常波动风险线 %.2f%%",
+                        individual.name,
+                        individual.changePct,
+                        threshold,
+                    ),
+                    indexName = individual.name,
+                )
+            }
             else -> null
         }
     }
@@ -350,12 +418,18 @@ class MarketAlertEngine {
         return if (median > 0.0) bars[index].volume / median else 1.0
     }
 
-    private fun shouldEmit(candidate: Candidate): Boolean {
+    private fun shouldEmit(candidate: Candidate, nowMs: Long?): Boolean {
         val previousLevel = emittedLevel ?: return true
         if (candidate.level.priority > previousLevel.priority) return true
         if (candidate.level.priority < previousLevel.priority) return false
         val previousScope = emittedScope ?: return true
-        return candidate.scope.priority > previousScope.priority
+        if (candidate.scope.priority > previousScope.priority) return true
+        // 同级冷却：原本同级当日只报一次，且 rearm 只在风险完全消退时解锁——弱势持续
+        // 一整天时（daily candidate 一直非 null，isRearmed 永不执行），下午的同级二次
+        // 急跌会永远静默。距上次同级提醒满 60 分钟即允许再报；升级（更高级别/范围）仍即时。
+        val now = nowMs ?: return false
+        if (lastEmitAtMs <= 0L) return true
+        return now - lastEmitAtMs >= SAME_LEVEL_REARM_MS
     }
 
     private fun isRearmed(snapshots: List<IndexSnapshot>): Boolean =

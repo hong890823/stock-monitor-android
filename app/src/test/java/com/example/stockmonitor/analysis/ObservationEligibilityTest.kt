@@ -150,7 +150,10 @@ class ObservationEligibilityTest {
             .sections(listOf(leaderBuy, limitWatch), emptyMap())
             .values
             .flatten()
-        assertEquals(listOf("sz003021"), displayed.map { it.code })
+        assertEquals(
+            listOf(ObservationStrategy.LEADER, ObservationStrategy.LIMIT_UP_CONTINUATION),
+            displayed.map { it.strategy },
+        )
     }
 
     @Test
@@ -216,13 +219,13 @@ class ObservationEligibilityTest {
     }
 
     @Test
-    fun shrinkRiskPersistsUntilFreshVolumeEvidenceAndFullEvaluation() {
+    fun shrinkRiskClearsAfterOpeningAndFreshEvidence() {
         assertTrue(ObservationEligibility.isLimitUpShrinkAcceleration(true, 10.0, 0.8))
         assertFalse(ObservationEligibility.isLimitUpShrinkAcceleration(true, 10.0, 1.1))
         assertFalse(ObservationEligibility.isLimitUpShrinkAcceleration(true, 10.0, -1.0))
         assertFalse(ObservationEligibility.isLimitUpShrinkAcceleration(false, -0.2, 0.6))
-        assertTrue(ObservationEligibility.isLimitUpShrinkAcceleration(false, 8.0, 0.6, true))
-        assertTrue(ObservationEligibility.isLimitUpShrinkAcceleration(false, 8.0, null, true))
+        assertFalse(ObservationEligibility.isLimitUpShrinkAcceleration(false, 8.0, 0.6, true))
+        assertFalse(ObservationEligibility.isLimitUpShrinkAcceleration(false, 8.0, null, true))
     }
 
     @Test
@@ -247,7 +250,8 @@ class ObservationEligibilityTest {
                 false, 9.6, 10.0, setupScore = 3, strongScore = 3,
                 limitUpBlocked = true, limitUpShrinkAcceleration = true)
             val blocked = ObservationPool.evaluate(original, blockedSignal)
-            assertEquals(ObservationStage.NEAR_ENTRY, blocked.stage)
+            // 2026-10-22 规格：封板期间不进 NEAR_ENTRY（NEAR_ENTRY 需要非涨停价条件）。
+            assertEquals(ObservationStage.OBSERVING, blocked.stage)
             assertFalse(ObservationBuyAlert.shouldNotify(original, blocked))
             val restored = ObservationPoolJson.decode(ObservationPoolJson.encode(listOf(blocked))).single()
             assertTrue(restored.limitUpShrinkAcceleration)

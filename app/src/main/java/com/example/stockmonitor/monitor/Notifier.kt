@@ -454,6 +454,110 @@ object Notifier {
         if (posted && shouldVibrateReminder(status)) vibrateSignal(context)
     }
 
+    /** 尾盘候选复核：与实时买点同通道，但用独立 triggerType 做跨重启的每日去重。 */
+    fun tailObservation(
+        context: Context,
+        id: Int,
+        title: String,
+        text: String,
+        triggerType: String,
+    ): Boolean {
+        val store = Store(context)
+        if (!store.alertsEnabled || !store.intradaySignalEnabled) return false
+        ensureChannels(context)
+        val record = newAlertRecord(
+            notificationId = id,
+            kind = "tail_observation",
+            title = title,
+            text = text,
+            level = "SIGNAL",
+            triggerType = triggerType,
+        )
+        val notification = buildRecordedNotification(
+            context = context,
+            record = record,
+            channelId = CHANNEL_SIGNAL,
+            priority = NotificationCompat.PRIORITY_HIGH,
+            category = NotificationCompat.CATEGORY_ALARM,
+        )
+        val status = signalStatus(context)
+        val posted = postRecordedNotification(context, record, notification, CHANNEL_SIGNAL, "尾盘候选通知发送失败")
+        if (posted && shouldVibrateReminder(status)) vibrateSignal(context)
+        return posted
+    }
+
+    /** 普通量价异动：中性信息级通知，不沿用买卖点的强震动语义。 */
+    fun volumePriceAnomaly(
+        context: Context,
+        id: Int,
+        title: String,
+        text: String,
+    ) {
+        if (!Store(context).alertsEnabled) return
+        ensureChannels(context)
+        val record =
+            newAlertRecord(
+                notificationId = id,
+                kind = "volume_price_anomaly",
+                title = title,
+                text = text,
+                level = "INFO",
+                triggerType = "volume_price_anomaly",
+            )
+        postRecordedNotification(
+            context,
+            record,
+            buildRecordedNotification(
+                context = context,
+                record = record,
+                channelId = CHANNEL_ALERT,
+                priority = NotificationCompat.PRIORITY_DEFAULT,
+            ),
+            CHANNEL_ALERT,
+            "量价异动通知发送失败",
+        )
+    }
+
+    /**
+     * 真正的盘中点火强提醒。
+     *
+     * 不受买卖点开关拦截，但仍受总提醒开关控制；使用高优先级信号通道并直接震动，
+     * 保证用户关闭交易动作提示后仍能及时看到高质量盘面事件。
+     */
+    fun intradayIgnition(
+        context: Context,
+        id: Int,
+        title: String,
+        text: String,
+    ) {
+        if (!Store(context).alertsEnabled) return
+        ensureChannels(context)
+        val record =
+            newAlertRecord(
+                notificationId = id,
+                kind = "intraday_ignition",
+                title = title,
+                text = text,
+                level = "STRONG",
+                triggerType = "intraday_ignition",
+            )
+        val posted =
+            postRecordedNotification(
+                context,
+                record,
+                buildRecordedNotification(
+                    context = context,
+                    record = record,
+                    channelId = CHANNEL_SIGNAL,
+                    priority = NotificationCompat.PRIORITY_HIGH,
+                    category = NotificationCompat.CATEGORY_ALARM,
+                ),
+                CHANNEL_SIGNAL,
+                "盘中点火强提醒发送失败",
+            )
+        if (posted && shouldVibrateReminder(signalStatus(context))) vibrateSignal(context)
+    }
+
     @Suppress("DEPRECATION")
     private fun vibrateSignal(context: Context) {
         val vibrator = context.getSystemService(Vibrator::class.java) ?: return

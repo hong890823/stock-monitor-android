@@ -75,7 +75,11 @@ class ScreenListUiTest {
 
         assertTrue(source.contains("\"状态总览\""))
         assertTrue(source.contains("\"强弱顺序\""))
-        assertTrue(source.contains("由强到弱：1️⃣ ✅ 可参与候选（买点已确认）→ 2️⃣ 🔥 强势观察（强而未确认）→ 3️⃣ 🕐 等待确认（条件未齐）→ 4️⃣ ⏸ 其他观察（偏弱/风险）"))
+        // c428c62 起四个档位从单行拼接改为逐行 addText 分层展示。
+        assertTrue(source.contains("addText(\"1️⃣ ✅ 可参与候选（买点已确认）\")"))
+        assertTrue(source.contains("addText(\"2️⃣ 🔥 强势观察（强而未确认）\")"))
+        assertTrue(source.contains("addText(\"3️⃣ 🕐 等待确认（条件未齐）\")"))
+        assertTrue(source.contains("addText(\"4️⃣ ⏸ 其他观察（封板 / 缩量 / 风险 / 数据不足）\")"))
         assertTrue(source.contains("val observationDetails = buildString"))
         assertTrue(source.contains("text = \"查看观察池详情 ›\""))
         assertTrue(source.contains("appendLine(\"策略路线\")"))
