@@ -11,76 +11,51 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class TradeNotificationTest {
-    @Test fun estimatesPartialSalesWithoutRoundingUpOrInventingSellableShares() {
-        assertEquals(300.0, TradeNotification.sellQuantity(1000.0, false), 0.0)
-        assertEquals(100.0, TradeNotification.sellQuantity(500.0, false), 0.0)
-        assertEquals(0.0, TradeNotification.sellQuantity(200.0, false), 0.0)
-        assertEquals(0.0, TradeNotification.sellQuantity(Double.NaN, false), 0.0)
-        assertEquals(0.0, TradeNotification.sellQuantity(-100.0, false), 0.0)
-        assertEquals(1000.0, TradeNotification.sellQuantity(1050.0, true), 0.0)
-        assertEquals(0.0, TradeNotification.sellQuantity(50.0, true), 0.0)
-        assertTrue(
-            TradeNotification.exit(HoldingExitStage.EXIT, 50.0, 18.0, 19.0)
-                .contains("不足100股"),
+    @Test
+    fun sellEstimateIncludesCostPnlRecoveryAndRemainingPosition() {
+        val estimate = TradeNotification.estimateSell(
+            holdingQuantity = 1_000.0,
+            averageCost = 10.0,
+            price = 12.0,
+            quantity = 300.0,
+            feeRate = 0.001,
+            minimumFee = 5.0,
+        )!!
+
+        assertEquals(10.0, estimate.referenceCost, 0.000001)
+        assertEquals(300.0, estimate.quantity, 0.000001)
+        assertEquals(5.0, estimate.estimatedFee, 0.000001)
+        assertEquals(595.0, estimate.estimatedRealizedPnl, 0.000001)
+        assertEquals(3_595.0, estimate.recoveredFunds, 0.000001)
+        assertEquals(700.0, estimate.remainingQuantity, 0.000001)
+        assertTrue(TradeNotification.sellEstimateText(estimate).contains("参考成本 10.00元"))
+        assertTrue(TradeNotification.sellEstimateText(estimate).contains("卖后剩余 700股"))
+    }
+
+    @Test
+    fun invalidSellEstimateDoesNotInventNumbers() {
+        assertNull(
+            TradeNotification.estimateSell(
+                holdingQuantity = 100.0,
+                averageCost = 10.0,
+                price = 12.0,
+                quantity = 101.0,
+            ),
         )
     }
+    // 卖量取整/封顶/T+1 语义随 TradeNotification.exit() 一并删除（旧短信文案路径已无生产调用），
+    // 数量与文案断言迁移到 core/TradeActionGuardTest（现有生产路径）。
 
-    @Test fun sellQuantityIsCappedByTodaysSellableShares() {
-        assertEquals(100.0, TradeNotification.sellQuantity(600.0, 500.0, false), 0.0)
-        assertEquals(500.0, TradeNotification.sellQuantity(600.0, 500.0, true), 0.0)
-    }
-
-    @Test fun riskCopySeparatesSameDayLockedSharesFromSellableShares() {
-        val text = TradeNotification.exit(
-            HoldingExitStage.REDUCE,
-            totalQuantity = 600.0,
-            sellableQuantity = 500.0,
-            price = 18.8,
-            support = 19.0,
-            lockedToday = 100.0,
-        )
-
-        assertTrue(text.contains("原有可卖500股"))
-        assertTrue(text.contains("今日新增100股受T+1锁定"))
-        assertFalse(text.contains("卖出约600"))
-    }
-
-    @Test fun sameDayOnlyRiskSaysStopAddingAndDeferDisposal() {
-        val text = TradeNotification.exit(
-            HoldingExitStage.REDUCE,
-            totalQuantity = 100.0,
-            sellableQuantity = 0.0,
-            price = 18.8,
-            support = 19.0,
-            lockedToday = 100.0,
-        )
-
-        assertTrue(text.contains("停止加仓"))
-        assertTrue(text.contains("下一交易日复核处置"))
-        assertFalse(text.contains("卖出"))
-    }
-
-    @Test fun saleTextDistinguishesRiskExitFromSmallTPosition() {
-        val partial = TradeNotification.exit(HoldingExitStage.REDUCE, 1000.0, 18.8, 19.0)
-        assertTrue(partial, partial.contains("300股"))
-        assertTrue(partial, partial.contains("估算") && partial.contains("实际可卖"))
-        assertFalse(partial.contains("基本面"))
-        assertTrue(partial.length <= 120)
-        val small = TradeNotification.exit(HoldingExitStage.REDUCE, 200.0, 18.8, 19.0)
-        assertFalse(small.contains("卖出约200"))
-        assertTrue(small.contains("不足100股"))
-        val exit = TradeNotification.exit(HoldingExitStage.EXIT, 1050.0, 18.0, 19.0)
-        assertTrue(exit.contains("1000股"))
-        assertTrue(exit.contains("退出"))
-    }
-
-    @Test fun everyHoldingNotificationIsBriefAndOmitsFundamentalProse() {
+    @Test fun notificationsDoNotEchoUntrustedSignalBodyOrFundamentalProse() {
         val input = IntradayTactics.Input("sz000001", "测试", 20.0, 3.0, 1.5, 10.0,
             19.0, 21.0, 3, 1000.0, 22.0, 100000.0, 20000.0, 5.0, 20.0)
         IntradaySignalType.values().forEach { type ->
             val text = TradeNotification.intraday(input, IntradaySignal(type, "测试", "基本面亮红灯：旧长文"))
             assertFalse("$type: $text", text.contains("基本面") || text.contains("旧长文"))
-            assertTrue("$type: $text", text.length <= 120)
+            if (type == IntradaySignalType.EXIT_POSITION) {
+                assertTrue(text.contains("重大风险待复核"))
+                assertFalse(text.contains("分批离场"))
+            }
             assertTrue("$type: $text", text.contains("观察") || text.contains("风险"))
         }
         val buy = TradeNotification.intraday(input, IntradaySignal(IntradaySignalType.T_BUY, "", ""))
@@ -102,8 +77,9 @@ class TradeNotificationTest {
                 ),
             )
         val text = TradeNotification.intraday(input, IntradaySignal(IntradaySignalType.T_SELL, "", ""))
-        assertTrue(text.contains("最多减300股"))
-        assertTrue(text.contains("T+1"))
+        assertTrue(text.contains("仅观察"))
+        assertTrue(text.contains("做T预计净收益未通过双边费用、滑点及最低收益门槛校验"))
+        assertFalse(text.contains("最多减"))
     }
 
     @Test fun intradayRiskCopyUsesLedgerAvailabilityInsteadOfTotalPosition() {
@@ -113,6 +89,7 @@ class TradeNotificationTest {
         ).copy(
             sellableQuantity = 500.0,
             lockedQuantity = 100.0,
+            positionAllocation = com.example.stockmonitor.core.PositionAllocationConfig.normal(300.0),
             tradeDate = "2026-10-23",
             timeframeEvidence = TimeframeEvidence(
                 riskComplete = true,
@@ -168,19 +145,8 @@ class TradeNotificationTest {
         assertEquals(GuardedAction.HOLD, trend.action)
     }
 
-    @Test fun legacyNoticeCopyDoesNotGenerateDeterministicSellQuantity() {
-        val text = TradeNotification.exit(
-            HoldingExitStage.NOTICE,
-            totalQuantity = 1000.0,
-            sellableQuantity = 900.0,
-            price = 18.8,
-            support = 19.0,
-        )
-
-        assertTrue(text.contains("破位风险提示"))
-        assertTrue(text.contains("去留自定"))
-        assertFalse(text.contains("股"))
-    }
+    // NOTICE「去留自定、不生成确定性卖量」的语义由
+    // pureObservationAndNoticeDoNotBecomeActionableIntradayActions 在生产路径（intradayGuarded）上覆盖。
 
     @Test fun reduceStyleIntradaySignalsNeverUpgradeToFullExit() {
         val input = IntradayTactics.Input(
@@ -189,6 +155,8 @@ class TradeNotificationTest {
         ).copy(
             tradeDate = "2026-10-23",
             sellableQuantity = 900.0,
+            positionAllocation = com.example.stockmonitor.core.PositionAllocationConfig.normal(700.0),
+            ledgerConsistent = true,
             timeframeEvidence = TimeframeEvidence(
                 riskComplete = true,
                 riskConfirmed = true,
@@ -205,7 +173,7 @@ class TradeNotificationTest {
         ).forEach { type ->
             val guarded = TradeNotification.intradayGuarded(input, IntradaySignal(type, "", ""))
             assertEquals(type.name, GuardedAction.RISK_REDUCE, guarded.action)
-            assertEquals(type.name, 300.0, guarded.maxSellQuantity, 0.0)
+            assertEquals(type.name, 100.0, guarded.maxSellQuantity, 0.0)
         }
     }
 
@@ -251,9 +219,9 @@ class TradeNotificationTest {
             IntradaySignal(IntradaySignalType.RECLAIM_SUPPORT, "测试·站回支撑", ""),
         )
 
-        assertTrue(text.contains("失效价19.00"))
-        assertTrue(text.contains("跌破即停止执行"))
-        assertFalse(text.contains("取消"))
+        assertTrue(text.contains("仅观察"))
+        assertTrue(text.contains("接回尚未通过支撑、MA5/MA20、短周期、市场板块及完成15分钟K的回踩阶段量能确认"))
+        assertFalse(text.contains("可接回约"))
     }
 
     @Test fun monitoringCopyExplainsT1DualTimeframeAndLeaderReferenceBoundary() {
@@ -264,43 +232,13 @@ class TradeNotificationTest {
         assertTrue(text.contains("30分钟"))
         assertTrue(text.contains("板块状态参考"))
         assertTrue(text.contains("非买卖指令"))
+        assertTrue(text.contains("重大风险待复核"))
+        assertTrue(text.contains("不自动清仓"))
+        assertFalse(text.contains("结构失效时退出"))
     }
 
-    /** 回归：手工加仓没记批次的残股不能说成「今天买入的」，它不会自动解锁。 */
-    @Test fun untrackedLockedSharesAreNotCalledTodaysBuys() {
-        val text = TradeNotification.exit(
-            HoldingExitStage.REDUCE,
-            totalQuantity = 300.0,
-            sellableQuantity = 0.0,
-            price = 18.8,
-            support = 19.0,
-            lockedToday = 300.0,
-            untrackedQuantity = 300.0,
-        )
-
-        assertTrue(text.contains("未记录买入日期"))
-        assertTrue(text.contains("补记买入日期"))
-        assertFalse(text.contains("今天买入的"))
-        assertFalse(text.contains("今日新增"))
-        assertFalse(text.contains("下一交易日复核处置"))
-    }
-
-    @Test fun mixedLockedCopyNamesBothSourcesSeparately() {
-        val text = TradeNotification.exit(
-            HoldingExitStage.REDUCE,
-            totalQuantity = 700.0,
-            sellableQuantity = 400.0,
-            price = 18.8,
-            support = 19.0,
-            lockedToday = 300.0,
-            untrackedQuantity = 200.0,
-        )
-
-        assertTrue(text.contains("原有可卖400股"))
-        assertTrue(text.contains("今日新增100股"))
-        assertTrue(text.contains("未记录买入日期200股"))
-    }
-
+    // 「锁定残股不能说成今天买入」与「混同锁定要分开点名」的断言迁移到
+    // core/TradeActionGuardTest（生产路径 TradeActionGuard.nextDay 的同一口径文案）。
     @Test fun intradayT1BlockedCopyDistinguishesUntrackedFromTodaysBuy() {
         val input = IntradayTactics.Input(
             "sz000001", "测试", 18.8, -3.0, 1.5, 10.0,
@@ -322,5 +260,40 @@ class TradeNotificationTest {
 
         assertTrue(text.contains("未记录买入日期"))
         assertFalse(text.contains("今天买入的"))
+    }
+
+    @Test fun riskReminderKeepsCostRecoveryAndConfirmedAllocationSeparateFromTechnicalRisk() {
+        val input = IntradayTactics.Input(
+            "sh600111", "北方稀土", 32.31, -6.0, 1.5, 10.0,
+            34.09, 37.38, -7, 600.0, 50.80, 100_000.0, 20_000.0, 5.0, 20.0,
+        ).copy(
+            tradeDate = "2026-11-17",
+            sellableQuantity = 600.0,
+            positionAllocation = com.example.stockmonitor.core.PositionAllocationConfig.normal(400.0),
+            ledgerConsistent = true,
+            timeframeEvidence = TimeframeEvidence(riskComplete = true, riskConfirmed = true, riskConfirmations = 2),
+        )
+        val decision = TradeNotification.intradayGuarded(
+            input, IntradaySignal(IntradaySignalType.REDUCE_POSITION, "确认破位", ""),
+        )
+        assertTrue(decision.text.contains("成本参考50.80"))
+        assertTrue(decision.text.contains("距离回本参考价"))
+        assertTrue(decision.text.contains("底仓目标400股"))
+        assertTrue(decision.text.contains("技术风险不等于持有价值判断"))
+        assertTrue(decision.text.contains("不代表已成交"))
+        assertTrue(decision.maxSellQuantity <= 200.0)
+    }
+
+    @Test fun unsetAllocationIsNotRenderedAsAnAcceptedZeroCorePlan() {
+        val input = IntradayTactics.Input(
+            "sh600111", "北方稀土", 32.31, -6.0, 1.5, 10.0,
+            34.09, 37.38, -7, 600.0, 50.80, 100_000.0, 20_000.0, 5.0, 20.0,
+        ).copy(tradeDate = "2026-11-17", timeframeEvidence = TimeframeEvidence(riskConfirmations = 2))
+        val decision = TradeNotification.intradayGuarded(
+            input, IntradaySignal(IntradaySignalType.REDUCE_POSITION, "确认破位", ""),
+        )
+        assertTrue(decision.text.contains("分仓尚未配置"))
+        assertFalse(decision.text.contains("底仓目标0股"))
+        assertEquals(GuardedActionLevel.OBSERVATION, decision.level)
     }
 }

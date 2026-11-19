@@ -157,6 +157,20 @@ class FundamentalsClientTest {
     }
 
     @Test
+    fun balanceHistoryParsesContractLiabilitiesAndSortsNewestFirst() {
+        val text = """{"result":{"data":[""" +
+            """{"REPORT_DATE":"2025-12-31 00:00:00","TOTAL_ASSETS":1000,"TOTAL_LIABILITIES":500,"CONTRACT_LIAB":120},""" +
+            """{"REPORT_DATE":"2026-06-30 00:00:00","TOTAL_ASSETS":1100,"TOTAL_LIABILITIES":550,"ADVANCE_RECEIPTS":180}""" +
+            """]},"success":true}"""
+
+        val balances = FundamentalsClient.parseBalances(text)
+
+        assertEquals(listOf("2026-06-30", "2025-12-31"), balances.map { it.date })
+        assertEquals(180.0, balances[0].contractLiabilities!!, 1e-6)
+        assertEquals(120.0, balances[1].contractLiabilities!!, 1e-6)
+    }
+
+    @Test
     fun peerMediansIgnoreLossMakingCompanies() {
         val text = """{"result":{"data":[""" +
             """{"SECURITY_CODE":"688825","PE_TTM":48.0,"PB_MRQ":29.5,"TOTAL_MARKET_CAP":3979000.0},""" +

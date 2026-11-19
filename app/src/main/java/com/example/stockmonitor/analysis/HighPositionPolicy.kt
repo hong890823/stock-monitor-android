@@ -16,6 +16,8 @@ data class HighPositionEvidence(
     val price: Double,
     val rangeHigh: Double,
     val rangeLow: Double,
+    /** 与 [PricePosition] 同源的近60日位置；有值时高位风险必须遵循它。 */
+    val priceLocation: PriceLocation? = null,
     val atrPct: Double,
     val gain5Pct: Double,
     val volumeRatio: Double?,
@@ -25,7 +27,8 @@ data class HighPositionEvidence(
     val recentCloses: List<Double>,
     val support: Double,
     val marketHealthy: Boolean,
-    val sectorHealthy: Boolean,
+    /** null = 板块数据暂缺；false = 已知板块偏弱，仅提示不阻断。 */
+    val sectorHealthy: Boolean?,
     val dualTimeframeAllowed: Boolean,
     val trend: TrendAssessment,
 )
@@ -58,7 +61,10 @@ object HighPositionPolicy {
                 riskPriority = false,
             )
         }
-        val highPosition = evidence.price >= evidence.rangeHigh * HIGH_RANGE_RATIO
+        // 自选、持仓和候选池统一使用 PricePosition 的「60日区间上方1/3 + 累计涨幅≥20%」高位口径。
+        // 未提供位置的旧调用保留原有 95% 区间高点兼容逻辑，避免无位置数据被误判为低位。
+        val highPosition = evidence.priceLocation?.let { it == PriceLocation.HIGH }
+            ?: (evidence.price >= evidence.rangeHigh * HIGH_RANGE_RATIO)
         if (!highPosition) {
             return decision(
                 phase = HighPositionPhase.NONE,
@@ -79,7 +85,7 @@ object HighPositionPolicy {
         if (breakout) {
             return decision(
                 phase = HighPositionPhase.SECOND_WAVE_CONFIRMED,
-                reason = "放量突破高位区间上沿，15/30分钟条件允许执行",
+                reason = "放量突破高位区间上沿，15/30分钟条件允许执行" + sectorHealthNote(evidence),
                 allowBuy = true,
                 allowSecondWaveEntry = true,
                 allowHoldBase = true,
@@ -131,7 +137,7 @@ object HighPositionPolicy {
         return if (candidate) {
             decision(
                 phase = HighPositionPhase.SECOND_WAVE_CANDIDATE,
-                reason = "高位缩量整理后出现量能配合的抬高低点，等待突破确认",
+                reason = "高位缩量整理后出现量能配合的抬高低点，等待突破确认" + sectorHealthNote(evidence),
                 allowBuy = false,
                 allowSecondWaveEntry = false,
                 allowHoldBase = true,
@@ -140,7 +146,7 @@ object HighPositionPolicy {
         } else {
             decision(
                 phase = HighPositionPhase.CONSOLIDATION,
-                reason = "高位回踩缩量且低点抬高，先保留底仓等待突破",
+                reason = "高位回踩缩量且低点抬高，先保留底仓等待突破" + sectorHealthNote(evidence),
                 allowBuy = false,
                 allowSecondWaveEntry = false,
                 allowHoldBase = true,
@@ -161,6 +167,9 @@ object HighPositionPolicy {
             dualTimeframeAllowed = dualTimeframeAllowed,
         ),
     )
+
+    private fun sectorHealthNote(evidence: HighPositionEvidence): String =
+        if (evidence.sectorHealthy == false) "；所属板块偏弱，延续性打折" else ""
 
     private fun valid(evidence: HighPositionEvidence): Boolean {
         val finitePositive = listOf(

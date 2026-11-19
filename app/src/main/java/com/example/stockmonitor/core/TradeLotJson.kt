@@ -17,7 +17,9 @@ object TradeLotJson {
                         .put("date", entry.date)
                         .put("quantity", entry.quantity)
                         .put("price", entry.price)
-                        .put("source", entry.source.name),
+                        .put("source", entry.source.name)
+                        .put("fee", entry.fee)
+                        .put("bookkeeping_only", entry.bookkeepingOnly),
                 )
             }
         })
@@ -33,6 +35,18 @@ object TradeLotJson {
                 )
             }
         })
+        .put("adjustments", JSONArray().also { array ->
+            book.adjustments.forEach { adjustment ->
+                array.put(
+                    JSONObject()
+                        .put("code", adjustment.code)
+                        .put("name", adjustment.name)
+                        .put("date", adjustment.date)
+                        .put("quantity_delta", adjustment.quantityDelta)
+                        .put("reason", adjustment.reason),
+                )
+            }
+        })
         .toString()
 
     fun decode(raw: String?): TradeBook {
@@ -45,6 +59,7 @@ object TradeLotJson {
         return TradeBook(
             entries = decodeEntries(root.optJSONArray("entries")),
             lots = decodeLots(root.optJSONArray("lots")),
+            adjustments = decodeAdjustments(root.optJSONArray("adjustments")),
         )
     }
 
@@ -58,14 +73,35 @@ object TradeLotJson {
             val date = item.optString("date")
             val quantity = item.optDouble("quantity", Double.NaN)
             val price = item.optDouble("price", Double.NaN)
+            val fee = item.optDouble("fee", 0.0)
+            val bookkeepingOnly = item.optBoolean("bookkeeping_only", false)
             val side = enumValueOrNull<TradeSide>(item.optString("side")) ?: return@mapNotNull null
             val source = enumValueOrNull<TradeSource>(item.optString("source")) ?: return@mapNotNull null
             if (id.isBlank() || code.isBlank() || name.isBlank() || date.isBlank() ||
-                !quantity.isFinite() || quantity <= 0.0 || !price.isFinite() || price <= 0.0
+                !quantity.isFinite() || quantity <= 0.0 || !price.isFinite() || price <= 0.0 ||
+                !fee.isFinite() || fee < 0.0
             ) {
                 return@mapNotNull null
             }
-            TradeRecord(id, code, name, side, date, quantity, price, source)
+            TradeRecord(id, code, name, side, date, quantity, price, source, fee, bookkeepingOnly)
+        }
+    }
+
+    private fun decodeAdjustments(array: JSONArray?): List<PositionAdjustment> {
+        if (array == null) return emptyList()
+        return (0 until array.length()).mapNotNull { index ->
+            val item = array.optJSONObject(index) ?: return@mapNotNull null
+            val code = item.optString("code")
+            val name = item.optString("name")
+            val date = item.optString("date")
+            val quantityDelta = item.optDouble("quantity_delta", Double.NaN)
+            val reason = item.optString("reason")
+            if (code.isBlank() || name.isBlank() || date.isBlank() || reason.isBlank() ||
+                !quantityDelta.isFinite() || quantityDelta == 0.0
+            ) {
+                return@mapNotNull null
+            }
+            PositionAdjustment(code, name, date, quantityDelta, reason)
         }
     }
 

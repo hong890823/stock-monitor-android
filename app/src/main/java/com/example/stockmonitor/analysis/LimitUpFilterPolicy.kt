@@ -44,6 +44,26 @@ object LimitUpFilterPolicy {
         }
     }
 
+    /**
+     * 候选池按股票所属涨跌停制度分组，不要求它当前处于涨停池。
+     * 这与 [matches] 的“当前涨停筛选”不同，避免普通候选在 10cm/20cm/30cm 下被全部隐藏。
+     */
+    fun matchesMarketBand(option: Option, stock: Stock): Boolean {
+        if (option == Option.ALL) return true
+        return bandOf(stock) == when (option) {
+            Option.LIMIT_10 -> LimitBand.LIMIT_10
+            Option.LIMIT_20 -> LimitBand.LIMIT_20
+            Option.LIMIT_30 -> LimitBand.LIMIT_30
+            Option.ALL -> return true
+        }
+    }
+
+    fun <T> filterByMarketBand(
+        items: List<T>,
+        option: Option,
+        snapshotOf: (T) -> Stock,
+    ): List<T> = items.filter { matchesMarketBand(option, snapshotOf(it)) }
+
     fun filter(stocks: List<Stock>, option: Option): List<Stock> =
         stocks.filter { matches(option, it) }
 

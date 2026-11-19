@@ -1,6 +1,7 @@
 package com.example.stockmonitor
 
 import com.example.stockmonitor.analysis.StockAnalysis
+import com.example.stockmonitor.analysis.TechnicalAssessmentPolicy
 import com.example.stockmonitor.analysis.TechnicalSummary
 import com.example.stockmonitor.core.DayBar
 import com.example.stockmonitor.core.Quote
@@ -25,6 +26,18 @@ class TechnicalSummaryTest {
         assertTrue(summary.action.contains("暂以观察为主"))
         // 摘要带一行量价背离结论
         assertTrue(summary.divergence.contains("底背离"))
+    }
+
+    @Test
+    fun unifiedAdviceReplacesTheFourTierTemplateWithPriceContext() {
+        val result = StockAnalysis.analyze(bars(), "sh600089", "特变电工", liveQuote())
+
+        val advice = TechnicalAssessmentPolicy.unifiedAdviceFor(result, bars())
+
+        // 统一口径：不再是「技术面偏弱：无持仓不宜主动介入…」四档模板（都以「技术面」开头），
+        // 而是 TechnicalAssessmentPolicy 的分支建议（减仓/暂不补仓/持有观察/…），带价位上下文。
+        assertTrue(advice.isNotBlank())
+        assertTrue(!advice.startsWith("技术面"))
     }
 
     private fun bars(): List<DayBar> =

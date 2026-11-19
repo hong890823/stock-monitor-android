@@ -57,6 +57,9 @@ object ObservationEvidenceFactory {
         }
 
         if (signal.trendWeak) counter += "当前趋势走弱"
+        if (signal.postLimitHighHoldCandidate) {
+            supporting += "炸板后仍守在涨停高位线附近，按平台承接观察"
+        }
         if (signal.riskFlag) counter += "出现高位分歧风险"
         if (signal.limitUpBlocked) counter += "当前涨停封板，暂不介入；开板后重新确认"
         if (signal.limitUpShrinkAcceleration) {

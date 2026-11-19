@@ -215,11 +215,53 @@ class PortfolioSwingTest {
         val result = PortfolioSwing.evaluate(config, evidence, market, date, now)
         assertEquals(2, result.rows.size)
         assertEquals(stock.code, result.preferredCode)
-        assertEquals(1, result.rows.count { it.addQuantity > 0 })
+        assertEquals(2, result.rows.count { it.addQuantity > 0 })
         val incomplete = PortfolioSwing.evaluate(config, evidence - second.code, market, date, now)
         assertNull(incomplete.preferredCode)
         assertTrue(incomplete.reportLines().joinToString().contains("缺少持仓现价"))
     }
+
+    @Test
+    fun allocatesAtMostThreeQualifiedHoldings() {
+        val positions = listOf(stock, secondPosition(), thirdPosition(), fourthPosition())
+        val config = portfolio.copy(availableCapital = 75_000.0, positions = positions.toMutableList())
+        val evidence = positions.associate { position -> position.code to evidence(position.code) }
+
+        val result = PortfolioSwing.evaluate(config, evidence, market, date, now)
+
+
+        assertEquals(3, result.rows.count { it.addQuantity > 0.0 })
+        assertTrue(result.rows.count { it.addQuantity > 0.0 } <= PortfolioSwing.MAX_FOCUS_POSITIONS)
+        assertTrue(result.rows.sumOf { it.estimatedCash } <= result.allocationCapital!! + 0.01)
+    }
+
+    @Test
+    fun fourthQualifiedHoldingRemainsAZeroQuantityCandidate() {
+        val positions = listOf(stock, secondPosition(), thirdPosition(), fourthPosition())
+        val config = portfolio.copy(availableCapital = 75_000.0, positions = positions.toMutableList())
+        val evidence = positions.associate { position -> position.code to evidence(position.code) }
+
+        val result = PortfolioSwing.evaluate(config, evidence, market, date, now)
+        val fourth = result.rows.first { it.code == fourthPosition().code }
+
+        assertEquals(0.0, fourth.addQuantity, 0.0)
+        assertTrue(fourth.reason.contains("3"))
+    }
+
+    @Test
+    fun headlineListsAllFundedFocusHoldings() {
+        val positions = listOf(stock, secondPosition(), thirdPosition(), fourthPosition())
+        val config = portfolio.copy(availableCapital = 75_000.0, positions = positions.toMutableList())
+        val evidence = positions.associate { position -> position.code to evidence(position.code) }
+        val result = PortfolioSwing.evaluate(config, evidence, market, date, now)
+
+        assertTrue(result.headline().contains("重点"))
+        assertTrue(result.reportLines().any { it.contains("重点1") })
+    }
+
+    private fun secondPosition() = stock.copy(code = "sz000001", name = "第二只")
+    private fun thirdPosition() = stock.copy(code = "sz000002", name = "第三只")
+    private fun fourthPosition() = stock.copy(code = "sz000003", name = "第四只")
 
     @Test
     fun boardMinimumsAndUnitsAreRespected() {

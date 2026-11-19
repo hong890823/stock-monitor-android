@@ -79,6 +79,7 @@ data class TechnicalResult(
     val fundFlowScoreDelta: Int = 0,
     val fundFlowWindowAssessment: FundFlowWindowAssessment? = null,
     val fundFlowWindowNote: String? = null,
+    val dataDate: String = "",
 ) {
     val intradayScore: Int
         get() = score - fundFlowScoreDelta
@@ -210,6 +211,7 @@ object StockAnalysis {
             price = price,
             rangeHigh = high.takeLast(60).maxOrNull() ?: resistance,
             rangeLow = low.takeLast(60).minOrNull() ?: support,
+            priceLocation = location,
             atrPct = if (price > 0) atrValue / price * 100 else 0.0,
             gain5Pct = if (close.size >= 6) (price / close[close.lastIndex - 5] - 1.0) * 100 else 0.0,
             volumeRatio = volumeRatio,
@@ -219,7 +221,7 @@ object StockAnalysis {
             recentCloses = close.takeLast(4),
             support = support,
             marketHealthy = false,
-            sectorHealthy = false,
+            sectorHealthy = null,
             dualTimeframeAllowed = false,
             trend = trendAssessment,
         )
@@ -424,6 +426,7 @@ object StockAnalysis {
             code = code,
             name = name,
             asOf = TimeUtils.nowText(),
+            dataDate = bars.last().date,
             rows = bars.size,
             price = price,
             priceSource = if (live != null) "实时行情" else "历史日线收盘价（非实时）",
@@ -505,7 +508,12 @@ object StockAnalysis {
      * 传了才做两件事：报告头写清环境，以及**就地改写**那些在塌陷期会说反话的结论
      * （「回踩不破均线可以继续持有」在系统性下跌里正好是错的建议）。
      */
-    fun formatReport(result: TechnicalResult, env: EnvContext? = null): String {
+    fun formatReport(
+        result: TechnicalResult,
+        env: EnvContext? = null,
+        /** 统一口径操作建议（TechnicalAssessmentPolicy.primaryAdvice）；缺省退回旧的四档模板。 */
+        unifiedAdvice: String? = null,
+    ): String {
         val volumeRatio = result.volumeRatio
         val volumeText = when {
             volumeRatio == null -> "暂无成交量"
@@ -620,7 +628,7 @@ object StockAnalysis {
             appendLine("技术评分：${scoreText(result.score)}｜当前价：${price(result.price)}（${result.priceSource}）｜较前一日：${pct(result.priceChange)}")
             // 只有状态快照说明得了「现在在哪」，这句话才说「这次比上次变了什么」。
             env?.let { appendLine(previousChangeNote(it.prev, result)) }
-            appendLine("结论（无持仓假设）：${result.action}${noHoldingCaveat(env)}")
+            appendLine("结论（无持仓假设）：${unifiedAdvice ?: result.action}${noHoldingCaveat(env)}")
             appendLine()
             appendLine("二、量价关系")
             appendLine(volumeText)
@@ -739,7 +747,8 @@ object StockAnalysis {
             appendLine(
                 "· 关键价位：支撑 ${red(price(result.support))} 元" +
                     "｜压力 ${red(price(result.resistance))} 元" +
-                    "｜MA20 ${red(price(result.ma20))} 元"
+                    "｜MA20 ${red(price(result.ma20))} 元" +
+                    "｜MA60 ${red(price(result.ma60))} 元"
             )
             appendLine("· 入场结构：${result.entrySetup.conciseText()}")
             result.entrySetup.stopPrice?.let {
@@ -750,7 +759,7 @@ object StockAnalysis {
                     "（约占现价 ${red(String.format(Locale.CHINA, "%.2f", result.volatility.atrPct ?: 0.0))}%），" +
                     "做 T、止损的幅度按这个量级留余地"
             )
-            appendLine("· 操作（无持仓假设）：${result.action}")
+            appendLine("· 操作（无持仓假设）：${unifiedAdvice ?: result.action}")
             appendLine()
             appendLine("⚠️ 本报告基于历史行情技术计算，不构成投资建议；筹码峰为成交量加权估算。")
         }
@@ -778,27 +787,45 @@ object StockAnalysis {
      * 最后半句是用户真正要用的：离压力近就别追，离支撑近跌破就是明确信号。
      */
     private fun maConclusion(result: TechnicalResult): String {
-        val trend = when {
-            result.price > result.ma20 && result.ma20 > result.ma60 -> "价格在 MA20、MA60 上方，中期趋势偏强"
-            result.price < result.ma20 && result.ma20 < result.ma60 -> "价格在 MA20、MA60 下方，中期趋势偏弱"
-            else -> "均线相互交错，中期趋势还没确认"
-        }
-        val short = when {
-            result.ma5 > result.ma10 && result.ma10 > result.ma20 -> "，短期均线多头排列"
-            result.ma5 < result.ma10 && result.ma10 < result.ma20 -> "，短期均线空头排列"
-            else -> "，短期均线缠绕，没有明确方向"
+        val movingAverageTrend = MovingAverageTrendPolicy.evaluate(
+            price = result.price,
+            ma5 = result.ma5,
+            ma20 = result.ma20,
+            ma60 = result.ma60,
+        )
+        val trend = when (movingAverageTrend) {
+            MovingAverageTrend.STRONG_BULLISH ->
+                "短中期均线多头共振，价格站上 MA5、MA20、MA60，短线可顺势但不追高"
+            MovingAverageTrend.SHORT_BULLISH_MID_WEAK ->
+                "短期均线已转强，但 MA20 尚未站上 MA60，中期仍待修复，只按观察仓对待"
+            MovingAverageTrend.MID_BULLISH_SHORT_PULLBACK ->
+                "MA20 高于 MA60，中期趋势未破；价格或 MA5 正在回踩，短期先等止跌确认"
+            MovingAverageTrend.SHORT_REBOUND_BELOW_MA20 ->
+                "短期出现反弹但尚未站上 MA20，中期仍偏弱，不把反弹直接当成加仓信号"
+            MovingAverageTrend.STRONG_BEARISH ->
+                "短中期均线空头共振，价格跌破 MA5、MA20、MA60，优先控制仓位"
+            MovingAverageTrend.MID_WEAK_SHORT_WEAK ->
+                "MA20 未站上 MA60且短线走弱，中短期偏空，等待重新站上 MA20"
+            MovingAverageTrend.MIXED -> "MA5、MA20、MA60相互交错，短中期方向尚未确认"
         }
         if (result.price <= 0 || result.resistance <= result.price || result.support >= result.price) {
-            return "$trend$short。"
+            return "$trend。"
         }
         val upRoom = (result.resistance / result.price - 1) * 100
         val downRoom = (1 - result.support / result.price) * 100
-        val advice = if (upRoom < downRoom) {
-            "离压力更近，向上的空间不如向下的缓冲大，追高的性价比不高。"
-        } else {
-            "离支撑更近，跌破支撑就是明确的转弱信号。"
+        val advice = when {
+            movingAverageTrend == MovingAverageTrend.STRONG_BULLISH && upRoom < downRoom ->
+                "但离压力更近，向上空间不如向下缓冲，短线不宜追高。"
+            movingAverageTrend == MovingAverageTrend.MID_BULLISH_SHORT_PULLBACK && downRoom <= 3.0 ->
+                "靠近支撑，只有回踩企稳并重新站上 MA5 后才考虑顺中期趋势操作。"
+            movingAverageTrend in setOf(
+                MovingAverageTrend.STRONG_BEARISH,
+                MovingAverageTrend.MID_WEAK_SHORT_WEAK,
+            ) -> "上方压力更重要，跌破支撑应继续按转弱处理。"
+            upRoom < downRoom -> "离压力更近，先等突破确认，不直接追入。"
+            else -> "离支撑更近，跌破支撑就是明确的转弱信号。"
         }
-        return String.format(Locale.CHINA, "$trend$short。现价上方 %.1f%% 是压力、下方 %.1f%% 是支撑，$advice", upRoom, downRoom)
+        return String.format(Locale.CHINA, "$trend。现价上方 %.1f%% 是压力、下方 %.1f%% 是支撑，$advice", upRoom, downRoom)
     }
 
     /** 波动结论：ATR 占现价的量级放最前，因为做 T 和止损都直接按它定幅度。 */

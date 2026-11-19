@@ -1,6 +1,7 @@
 package com.example.stockmonitor.analysis
 
 import com.example.stockmonitor.core.ObservationCandidate
+import com.example.stockmonitor.core.ObservationAlertState
 import com.example.stockmonitor.core.ObservationStage
 import com.example.stockmonitor.core.ObservationStrategy
 import com.example.stockmonitor.analysis.WatchlistBuyCandidatePool
@@ -99,7 +100,7 @@ class ObservationBuyAlertTest {
     }
 
     @Test
-    fun threeBoardCandidateRequiresThreeRoundsBeforeAlert() {
+    fun ordinaryThreeBoardCandidateCanAlertAfterTwoRounds() {
         val previous = candidate(ObservationStage.NEAR_ENTRY).copy(
             strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
             limitStreak = 3,
@@ -107,6 +108,26 @@ class ObservationBuyAlertTest {
         val twoRounds = candidate(ObservationStage.BUY_CANDIDATE).copy(
             strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
             limitStreak = 3,
+            entryConfirmationRounds = 2,
+        )
+        val threeRounds = twoRounds.copy(entryConfirmationRounds = 3)
+
+        assertTrue(ObservationBuyAlert.shouldNotify(previous, twoRounds))
+    }
+
+    @Test
+    fun weakSealThreeBoardCandidateRequiresThreeRoundsBeforeAlert() {
+        val previous = candidate(ObservationStage.NEAR_ENTRY).copy(
+            strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
+            limitStreak = 3,
+            sealQualityScore = 20,
+            sealQualityCoveragePct = 100,
+        )
+        val twoRounds = candidate(ObservationStage.BUY_CANDIDATE).copy(
+            strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
+            limitStreak = 3,
+            sealQualityScore = 20,
+            sealQualityCoveragePct = 100,
             entryConfirmationRounds = 2,
         )
         val threeRounds = twoRounds.copy(entryConfirmationRounds = 3)
@@ -121,5 +142,40 @@ class ObservationBuyAlertTest {
         val limit = leader.copy(strategy = ObservationStrategy.LIMIT_UP_CONTINUATION)
 
         assertEquals(ObservationBuyAlert.alertKey(leader), ObservationBuyAlert.alertKey(limit))
+    }
+
+    @Test
+    fun confirmedBuyWithBlockedExecutionStillBuildsCautionAlert() {
+        val confirmed = candidate(ObservationStage.BUY_CANDIDATE)
+
+        val title = ObservationBuyAlert.title(confirmed, executionReady = false)
+        val body = ObservationBuyAlert.body(
+            confirmed,
+            "仅观察：个股量能证据不足，仅观察，不执行买入。",
+            executionReady = false,
+        )
+
+        assertTrue(title.contains("执行条件待满足"))
+        assertTrue(body.contains("买点结构已确认"))
+        assertTrue(body.contains("个股量能证据不足"))
+        assertFalse(body.contains("仅观察：个股量能"))
+    }
+
+    @Test
+    fun deliveryTextExplainsBlockedAndCautionNotifications() {
+        val blocked = candidate(ObservationStage.BUY_CANDIDATE).copy(
+            alertState = ObservationAlertState.BLOCKED,
+            alertDetail = "不在 09:45–14:45 买点提醒时段",
+            alertUpdatedAtMs = 1_000_000L,
+        )
+        val caution = blocked.copy(
+            alertState = ObservationAlertState.SENT_CAUTION,
+            alertDetail = "仓位边界不允许至少一手",
+        )
+
+        assertTrue(ObservationBuyAlert.deliveryText(blocked).contains("未通知"))
+        assertTrue(ObservationBuyAlert.deliveryText(blocked).contains("09:45–14:45"))
+        assertTrue(ObservationBuyAlert.deliveryText(caution).contains("执行条件待满足"))
+        assertTrue(ObservationBuyAlert.deliveryText(caution).contains("仓位边界"))
     }
 }

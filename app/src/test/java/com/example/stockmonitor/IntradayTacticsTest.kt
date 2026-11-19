@@ -375,6 +375,8 @@ class IntradayTacticsTest {
         availableCapital = availableCapital,
         initialEntryPct = initialEntryPct,
         maxPositionPct = maxPositionPct,
+        sellableQuantity = quantity,
+        positionAllocation = com.example.stockmonitor.core.PositionAllocationConfig.normal(0.0),
         entrySetup = entrySetup,
         ma20 = ma20,
         fundamentalHealth = fundamentalHealth,
@@ -858,7 +860,7 @@ class IntradayTacticsTest {
                 .copy(todayTurnoverYi = 0.0001)
         )!!
 
-        assertEquals(IntradaySignalType.T_SELL, signal.type)
+        assertEquals(IntradaySignalType.T_SELL_DEFERRED, signal.type)
         assertTrue(signal.body.contains("流动性不足"))
         assertFalse(signal.body.contains("可先减约"))
     }
@@ -974,23 +976,17 @@ class IntradayTacticsTest {
 
     @Test
     fun tBuyFiresOnPullbackThatHoldsSupport() {
-        val signal = IntradayTactics.evaluate(
+        assertNull(IntradayTactics.evaluate(
             input(price = 19.10, changePct = -3.6, volumeRatio = 0.8, support = 19.0, quantity = 2_000.0)
-        )!!
-        assertEquals(IntradaySignalType.T_BUY, signal.type)
-        assertTrue(signal.body.contains("真实减出记录"))
-        assertFalse(signal.body.contains("600 股"))
+        ))
     }
 
     @Test
     fun tBuyDegradesWhenAvailableCapitalIsShort() {
-        val signal = IntradayTactics.evaluate(
+        assertNull(IntradayTactics.evaluate(
             input(price = 19.10, changePct = -3.6, volumeRatio = 0.8, support = 19.0,
                 quantity = 2_000.0, availableCapital = 1_000.0)
-        )!!
-        assertEquals(IntradaySignalType.T_BUY, signal.type)
-        assertTrue(signal.body.contains("可用资金"))
-        assertFalse(signal.body.contains("补资金"))
+        ))
     }
 
     @Test
@@ -1002,8 +998,8 @@ class IntradayTacticsTest {
                 holdingTObservation = HoldingTObservation(18.95, 19.3, 0.1, 0.0, rising = false, falling = false),
                 reboundConfirmed = true,
             )
-        val signal = IntradayTactics.evaluate(base)!!
-        assertEquals(IntradaySignalType.T_BUY, signal.type)
+        val signal = IntradayTactics.evaluate(base)
+        assertNull(signal)
     }
 
     @Test
@@ -1127,7 +1123,7 @@ class IntradayTacticsTest {
     }
 
     @Test
-    fun breakingSupportDeepLossWithRedFundamentalsGivesExitPriority() {
+    fun breakingSupportDeepLossWithRedFundamentalsStaysDeepLossWatchWithVerification() {
         val health = FundamentalHealth(
             level = HealthLevel.ALERT,
             score = 40,
@@ -1141,9 +1137,11 @@ class IntradayTacticsTest {
                 .copy(breakObservation = com.example.stockmonitor.analysis.HoldingBreakObservation(30.5, 29.89, true))
         )!!
         assertTrue(signal.body.contains("亮红灯"))
-        assertEquals(IntradaySignalType.EXIT_POSITION, signal.type)
-        assertTrue(signal.body.contains("清仓退出"))
-        assertFalse(signal.body.contains("保留底仓"))
+        // 统一优先级合约：基本面红灯只进核实层，不把确认破位自动升级成清仓指令；
+        // 深套+红灯保持深套口径（做T降本），正文仍提示结构失效或核实后的基本面风险才优先退出。
+        assertEquals(IntradaySignalType.BREAK_SUPPORT, signal.type)
+        assertTrue(signal.body.contains("优先退出"))
+        assertFalse(signal.body.contains("清仓退出"))
         assertFalse(signal.body.contains("剧本①"))
     }
 
@@ -1181,9 +1179,11 @@ class IntradayTacticsTest {
                 fundamentalHealth = health)
                 .copy(breakObservation = com.example.stockmonitor.analysis.HoldingBreakObservation(30.5, 29.89, true))
         )!!
-        assertEquals(IntradaySignalType.EXIT_POSITION, signal.type)
+        // 红灯不再把确认破位升级成清仓：浅亏按减仓评估，红灯核实提示附加其上。
+        assertEquals(IntradaySignalType.REDUCE_POSITION, signal.type)
         assertTrue(signal.body.contains("亮红灯"))
-        assertTrue(signal.body.contains("不再只减1/3"))
+        assertTrue(signal.body.contains("另叠加基本面红灯"))
+        assertTrue(signal.body.contains("分批减仓"))
     }
 
     @Test
@@ -1335,8 +1335,7 @@ class IntradayTacticsTest {
             input(price = 19.2, changePct = -3.5, quantity = 2_000.0, marketRegime = MarketRegime.COLLAPSE),
         )
 
-        assertNotNull(neutral)
-        assertEquals(IntradaySignalType.T_BUY, neutral!!.type)
+        assertNull(neutral)
         assertNull(collapse)
     }
 
@@ -1437,7 +1436,10 @@ class IntradayTacticsTest {
         assertTrue(signal.body.contains("龙头转弱"))
         assertFalse(signal.body.contains("可先减约"))
         assertFalse(signal.type.isRisk)
-        assertEquals(2, IntradayTactics.confirmationRounds(signal.type))
+        // f7a00e6 起「冲高回落·暂缓做T」归入纯观察状态：属参考不属动作，不进通知
+        // （confirmationRounds=0），不再是需连续两轮确认的可执行信号。
+        assertTrue(signal.type.isPureObservation)
+        assertEquals(0, IntradayTactics.confirmationRounds(signal.type))
     }
 
     @Test

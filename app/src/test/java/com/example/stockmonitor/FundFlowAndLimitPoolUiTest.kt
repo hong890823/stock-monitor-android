@@ -68,9 +68,9 @@ class FundFlowAndLimitPoolUiTest {
             .source("com/example/stockmonitor/ui/ScreenFragment.kt")
             .readText()
 
-        assertTrue(source.contains("LimitReport.fundFlowSummary(currentFlow)"))
-        assertTrue(source.contains("flowWindow.summary"))
-        assertTrue(source.contains("UiKit.DetailRow(\"多日资金流\", flowWindow.reason)"))
+        assertTrue(source.contains("FundFlowDisplayPolicy.candidateSummary(currentFlow, flowWindow)"))
+        assertTrue(source.contains("UiKit.DetailRow(\"资金流\", flowSummary.ifBlank { \"暂无\" })"))
+        assertTrue(!source.contains("UiKit.DetailRow(\"多日资金流\""))
     }
 
     private fun limitStock() = LimitStock(

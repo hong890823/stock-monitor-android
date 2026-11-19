@@ -34,6 +34,8 @@ data class BalanceSheetSnapshot(
     val totalLiabilities: Double,
     val parentEquity: Double,
     val minorityEquity: Double,
+    /** 合同负债/预收款；接口没有该字段时为 null，不能当作 0。 */
+    val contractLiabilities: Double? = null,
 ) {
     /** 有息负债：短期借款 + 长期借款 + 应付债券 + 租赁负债。 */
     val interestBearingDebt: Double get() = shortLoan + longLoan + bondPayable + leaseLiability
@@ -230,6 +232,10 @@ data class FundamentalResult(
     /** 最新一份报告期的累计值（原始口径，未差分），用于展示「最近报告期」这一行。 */
     val latest: FinancialPeriod?,
     val balance: BalanceSheetSnapshot?,
+    /** 用于计算存货、应收账款等跨期变化的资产负债表序列。 */
+    val balanceHistory: List<BalanceSheetSnapshot> = emptyList(),
+    /** 财务质量规则的明细证据。 */
+    val financialQuality: FinancialQualityAssessment = FinancialQualityAssessment(),
     /** 主营业务分产品构成（按收入降序，已过滤到最近一期）。 */
     val mainBusiness: List<MainBusinessItem>,
     /** 近半年公告里需要重点解释的条目（质押、处罚、问询、重组等）。 */
@@ -350,6 +356,7 @@ object Fundamentals {
     data class Input(
         val periods: List<FinancialPeriod>,
         val balance: BalanceSheetSnapshot?,
+        val balanceHistory: List<BalanceSheetSnapshot> = emptyList(),
         val valuations: List<ValuationPoint>,
         val totalShares: Double,
         val price: Double,
@@ -378,6 +385,7 @@ object Fundamentals {
         val quarters = quarters(input.periods, QUARTERS)
         val ttm = ttmOf(input.periods)
         val balance = input.balance
+        val balanceHistory = input.balanceHistory.ifEmpty { listOfNotNull(balance) }
         val shares = input.totalShares.takeIf { it > 0 }
         // 金融企业不参与工业口径的现金/负债检查：数据缺失时本就拿不到，
         // 数据碰巧拿到时也会把「发债+客户资金」误判成存贷双高，直接置空走中性分。
@@ -398,6 +406,14 @@ object Fundamentals {
         } else {
             null
         }
+        val financialQuality = FinancialQualityPolicy.assess(
+            periods = input.periods,
+            balances = balanceHistory,
+            deductRatio = deductRatio,
+            ttmOperatingCashFlow = ttm?.operatingCashFlow,
+            financial = financial,
+            announcements = input.announcements,
+        )
 
         val governance = Governance.scan(
             items = input.announcements,
@@ -406,6 +422,16 @@ object Fundamentals {
         val financialDate = listOfNotNull(input.periods.maxByOrNull { it.date }?.date, balance?.date).minOrNull()
         val risks = riskScan(input, deductRatio, ocfToProfit, cashToRevenue, netCashRatio, roe, financial)
             .map { it.copy(evidenceDate = financialDate) }.toMutableList()
+        financialQuality.warnings
+            .filterNot { it.startsWith("扣非归母净利润/归母净利润") }
+            .forEach { warning ->
+                val level = if (warning.startsWith("存货增速") || warning.startsWith("应收账款增速")) {
+                    RiskLevel.WATCH
+                } else {
+                    RiskLevel.ALERT
+                }
+                risks.add(RiskItem(level, warning, financialDate))
+            }
         // 公告里的重大风险（立案、处罚、冻结）直接进风险清单；提示类只留在公告一节，避免刷屏。
         governance.filter { it.level == RiskLevel.ALERT }.forEach {
             risks.add(RiskItem(RiskLevel.ALERT, "公告提示：${it.title}（${it.date}）", it.date, announcement = true))
@@ -477,6 +503,8 @@ object Fundamentals {
             currentPb = currentPb,
             latest = input.periods.maxByOrNull { it.date },
             balance = balance,
+            balanceHistory = balanceHistory,
+            financialQuality = financialQuality,
             mainBusiness = mainBusinessOf(input.mainBusiness),
             governance = governance,
             shareholder = input.shareholder,

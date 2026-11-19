@@ -63,6 +63,8 @@ class StockAlertScopeTest {
         assertTrue(StockAlertScope.shouldNotifyPortfolioSignal("减仓风险", HoldingExitStage.REDUCE))
         assertTrue(StockAlertScope.shouldNotifyPortfolioSignal("减仓风险", HoldingExitStage.EXIT))
         assertFalse(StockAlertScope.shouldNotifyPortfolioSignal("减仓风险", HoldingExitStage.NOTICE))
+        // NOTICE 缓释档的 signal 文案已改为「破位提示」，同样不进持仓信号通知。
+        assertFalse(StockAlertScope.shouldNotifyPortfolioSignal("破位提示", HoldingExitStage.NOTICE))
         assertFalse(StockAlertScope.shouldNotifyPortfolioSignal("减仓风险", HoldingExitStage.DEEP_T))
         assertFalse(StockAlertScope.shouldNotifyPortfolioSignal("趋势转弱观察", null))
     }

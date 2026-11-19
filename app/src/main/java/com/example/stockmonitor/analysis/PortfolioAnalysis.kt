@@ -2,8 +2,10 @@ package com.example.stockmonitor.analysis
 
 import com.example.stockmonitor.core.Portfolio
 import com.example.stockmonitor.core.Position
+import com.example.stockmonitor.core.PositionAllocationConfig
 import com.example.stockmonitor.core.Quote
 import com.example.stockmonitor.core.RowSnapshot
+import com.example.stockmonitor.core.TradeBook
 import com.example.stockmonitor.core.resolvedAvailableCapital
 import java.util.Locale
 import kotlin.math.abs
@@ -60,11 +62,37 @@ data class PositionResult(
     val impulse: ImpulseContext? = null,
     val fundFlowScoreDelta: Int = 0,
     val analysisDate: String = "",
+    val priorityEvidenceDate: String = "",
+    val priorityRiskConfirmed: Boolean = false,
+    val priorityExitTriggered: Boolean = false,
+    val priorityExitAudit: String = "",
+    val priorityBuyApproved: Boolean = false,
     val fiveDayNoNewLow: Boolean? = null,
     val closesBelowMa20: Int = 0,
 ) {
     val intradayScore: Int
         get() = score - fundFlowScoreDelta
+}
+
+data class TodayPriorityAdvice(
+    val code: String,
+    val name: String,
+    val state: PriorityState,
+    val fresh: Boolean,
+    val reason: String,
+    val action: String? = null,
+    val technicalAdvice: String? = null,
+) {
+    val displayText: String
+        get() = buildString {
+            append("今日单股建议：$name｜${state.label}｜$reason")
+            if (!fresh) {
+                append("；行情或技术数据尚未同日确认，先刷新后再判断")
+            } else {
+                action?.takeIf { it.isNotBlank() }?.let { append("；持仓建议：$it") }
+                technicalAdvice?.takeIf { it.isNotBlank() }?.let { append("；趋势参考：$it") }
+            }
+        }
 }
 
 object PortfolioAnalysis {
@@ -200,7 +228,10 @@ object PortfolioAnalysis {
                 // 破位是风险事件，口径优先于「趋势转弱」的通用观察话术（深套股几乎都跌破 M20，
                 // 否则破位信息会被转弱分支盖住；转弱信息作为前缀补上。
                 exitDecision != null -> {
-                    signal = "减仓风险"
+                    // NOTICE 是三项缓释档（基本面无红灯、价格低位、仓位轻），与 UI 详情的
+                    // exitStage.label「破位风险提示」同口径；统一写成「减仓风险」会让同一只
+                    // 持仓在信号、详情、报告里出现三种说法，缓释档被读成命令卖出。
+                    signal = if (exitDecision.stage == HoldingExitStage.NOTICE) "破位提示" else "减仓风险"
                     val breakAction = exitDecision.action
                     action = if (trendWeak) {
                         "$facts。已有效跌破 M20（$ma20Label）、趋势转弱，不加仓、不摊平。$breakAction"
@@ -210,7 +241,17 @@ object PortfolioAnalysis {
                 }
                 trendWeak -> {
                     signal = "趋势转弱观察"
-                    action = "$facts。已有效跌破 M20（$ma20Label）或出现失败结构，趋势转弱。" +
+                    // trendWeak 有两个成因（有效跌破 M20 / 失败结构），按现价位置写实是哪个，
+                    // 不写「或」让读者自己猜。
+                    val weakCause =
+                        if (technical.ma20.isFinite() && technical.ma20 > 0 && price < technical.ma20) {
+                            "已有效跌破 M20（$ma20Label，现价低 " +
+                                String.format(Locale.CHINA, "%.1f%%", (1.0 - price / technical.ma20) * 100.0) +
+                                "）"
+                        } else {
+                            "出现失败结构，价格仍在 M20（$ma20Label）上方"
+                        }
+                    action = "$facts。$weakCause，趋势转弱。" +
                         "不加仓、不摊平，站回 $ma20Label 并企稳前不动。" + envNote(envContext, changePct)
                 }
                 breakout && score >= 2 -> {
@@ -338,6 +379,8 @@ object PortfolioAnalysis {
             rhythm = rhythm,
             impulse = technical.impulse,
             fundFlowScoreDelta = technical.fundFlowScoreDelta,
+            analysisDate = live?.quoteDate?.take(10).orEmpty(),
+            priorityEvidenceDate = technical.dataDate.take(10),
         )
     }
 
@@ -403,10 +446,10 @@ object PortfolioAnalysis {
             }
         )
         if (support > 0 && price > 0) {
-            parts.add(String.format(Locale.CHINA, "较支撑 %+.1f%%", (price / support - 1) * 100))
+            parts.add(String.format(Locale.CHINA, "距支撑 %+.1f%%", (price / support - 1) * 100))
         }
         if (resistance > 0 && price > 0) {
-            parts.add(String.format(Locale.CHINA, "距压力 %.1f%%", (resistance / price - 1) * 100))
+            parts.add(String.format(Locale.CHINA, "距压力 %+.1f%%", (resistance / price - 1) * 100))
         }
         return parts.joinToString("，")
     }
@@ -470,14 +513,19 @@ object PortfolioAnalysis {
         }
         if (prev.price > 0 && support > 0 && prev.support > 0) {
             when {
-                prev.price < prev.support && support > 0 && signal != "减仓风险" -> diffs.add("已站回支撑上方")
-                prev.signal != "减仓风险" && signal == "减仓风险" -> diffs.add("跌破支撑")
+                // 「破位提示」是 NOTICE 缓释档拆出的新 signal 文案，统计口径与「减仓风险」
+                // 同属破位信号（isBreakSignal），行为不随改名漂移。
+                prev.price < prev.support && support > 0 && !isBreakSignal(signal) -> diffs.add("已站回支撑上方")
+                !isBreakSignal(prev.signal) && isBreakSignal(signal) -> diffs.add("跌破支撑")
             }
         }
         return if (diffs.isEmpty()) "与昨日无变化" else "较昨日：" + diffs.joinToString("｜")
     }
 
     private fun pct(value: Double): String = String.format(Locale.CHINA, "%.1f%%", value)
+
+    /** 破位类 signal：「减仓风险」与 NOTICE 缓释档的「破位提示」同属一族，统计口径不随文案拆分漂移。 */
+    private fun isBreakSignal(signal: String): Boolean = signal == "减仓风险" || signal == "破位提示"
 
     private fun signed(value: Int): String = String.format(Locale.CHINA, "%+d", value)
 
@@ -497,7 +545,10 @@ object PortfolioAnalysis {
         swingPlan: SwingPlan? = null,
     ): List<String> {
         val lines = mutableListOf<String>()
-        highestPriorityAction(results)?.let { lines.add(it) }
+        // 算一次复用：头行在 ① 前展示，后三行在 ④ 后展示；overallAdvice 的正文不再内嵌
+        // 摘要（否则「当前优先事项/风险核实/买入机会/排序口径」在 brief 里各出现两遍）。
+        val priority = prioritySummary(results)
+        lines.add(priority.first())
 
         // ① 今日结果：钱 + 相对大盘 + 主要来自哪只
         val resultLine = buildString {
@@ -539,11 +590,12 @@ object PortfolioAnalysis {
         lines.add(envLine)
 
         // ③ 要做什么：按信号分档点名，没动作的也要说「不用动」——否则用户会以为都得处理
-        lines.add("持仓整体操作建议：\n" + overallAdvice(results, swingPlan).joinToString("\n"))
+        lines.add("持仓整体操作建议：\n" + adviceBody(results, swingPlan).joinToString("\n"))
 
         // ④ 风险点
         val risks = briefRisks(results, dayPnl)
         lines.add(if (risks.isEmpty()) "风险点：无明显风险" else "风险点：${risks.joinToString("；")}")
+        lines.addAll(priority.drop(1))
         return lines
     }
 
@@ -555,27 +607,91 @@ object PortfolioAnalysis {
         results.filter { it.quantity.isFinite() && it.quantity > 0 && it.eventCoil != null }
             .map { result -> "🔥 事件后蓄势｜${result.name}：${result.eventCoil!!.brief}" }
 
-    /** 持仓页与复盘报告共用的最高优先级操作，只挑一条，避免用户面对一堆同等重要的建议。 */
-    fun highestPriorityAction(results: List<PositionResult>): String? {
-        val current = results.filter { it.quantity.isFinite() && it.quantity > 0 }
-            .sortedWith(compareBy<PositionResult> { operationPriority(it) }.thenBy { it.name })
-            .firstOrNull() ?: return null
-        val action = current.action.ifBlank { current.signal }
-        return "最高优先级操作：${current.name}｜$action"
+    fun priorityInput(result: PositionResult): PriorityInput = PriorityInput(
+        code = result.code, name = result.name, quantity = result.quantity,
+        price = result.price, support = result.support, ma20 = result.ma20,
+        quoteDate = result.analysisDate, evidenceDate = result.priorityEvidenceDate,
+        riskConfirmed = result.priorityRiskConfirmed, exitTriggered = result.priorityExitTriggered,
+        highRisk = result.highPosition?.phase == HighPositionPhase.DISTRIBUTION_RISK,
+        fundamentalAlert = result.fundamentalHealth?.level == HealthLevel.ALERT,
+        fundamentalReason = result.fundamentalHealth?.reasons?.joinToString("；").orEmpty(),
+        buyApproved = result.priorityBuyApproved,
+    )
+
+    fun prioritySummary(results: List<PositionResult>, asOf: String = TimeUtils.todayText()): List<String> =
+        PortfolioPriorityPolicy.summary(results.map(::priorityInput), asOf)
+
+    fun priorityDecision(result: PositionResult, asOf: String = TimeUtils.todayText()): PortfolioPriorityDecision =
+        PortfolioPriorityPolicy.evaluate(priorityInput(result), asOf)
+
+    fun priorityOrdered(results: List<PositionResult>, asOf: String = TimeUtils.todayText()): List<PositionResult> {
+        val order = PortfolioPriorityPolicy.rank(results.map(::priorityInput), asOf)
+            .mapIndexed { index, decision -> decision.input.code to index }.toMap()
+        return results.sortedWith(compareBy<PositionResult> { order[it.code] ?: Int.MAX_VALUE }.thenBy { it.code })
     }
 
-    private fun operationPriority(result: PositionResult): Int = when {
-        result.signal == "减仓风险" -> 0
-        result.exitDecision?.stage in setOf(
-            HoldingExitStage.EXIT,
-            HoldingExitStage.REDUCE,
-            HoldingExitStage.HIGH_REDUCE,
-        ) -> 1
-        result.signal == "趋势转弱观察" -> 2
-        result.signal == "持有/止盈观察" -> 3
-        result.signal in setOf("买入确认", "买入观察") || result.entrySetup.canBuy -> 4
-        else -> 5
+    /**
+     * 今日要点和 AI 共用的单股优先建议。
+     *
+     * 排序只复用 [PortfolioPriorityPolicy]：确认退出/减仓优先于风险观察，
+     * 再到买入候选；不让无持仓语境的技术文案覆盖持仓风险优先级。
+     */
+    fun todayPriorityAdvice(
+        results: List<PositionResult>,
+        technicalTrends: Map<String, TechnicalTrendSnapshot> = emptyMap(),
+        asOf: String = TimeUtils.todayText(),
+        /** 传入时只接受与当前持仓代码、数量、成本一致的结果，避免缓存旧仓位进入 AI 建议。 */
+        currentPositions: List<Position>? = null,
+    ): TodayPriorityAdvice? {
+        val eligibleResults = currentPositions?.let { positions ->
+            val byCode = results.associateBy { it.code }
+            positions.filter { it.quantity.isFinite() && it.quantity > 0 }.mapNotNull { position ->
+                byCode[position.code]?.takeIf {
+                    it.quantity == position.quantity && it.cost == position.cost
+                }
+            }
+        } ?: results
+        val ranked = priorityOrdered(eligibleResults, asOf)
+        val selected = ranked.firstNotNullOfOrNull { result ->
+            val decision = priorityDecision(result, asOf)
+            (result to decision).takeIf { decision.order < PriorityState.HOLD.order }
+        } ?: return null
+        val (result, decision) = selected
+        val fundamentalReview = decision.input.fundamentalAlert && !decision.actionConfirmed
+        val reason = if (fundamentalReview) {
+            decision.input.fundamentalReason.ifBlank { "基本面风险待核实，先查看最新财报或公告，不急于加仓" }
+        } else {
+            decision.reason
+        }
+        val technicalAdvice = technicalTrends[result.code]
+            ?.takeIf { decision.fresh && it.asOf.take(10) == asOf }
+            ?.primaryAdvice
+        return TodayPriorityAdvice(
+            code = result.code,
+            name = result.name,
+            state = decision.state,
+            fresh = decision.fresh,
+            reason = reason,
+            action = result.action.takeIf { decision.fresh },
+            technicalAdvice = technicalAdvice,
+        )
     }
+
+    /** 只在存在同日有效的明确处置或买入候选时，追加到今日要点的整体建议。 */
+    private fun actionableTodayPriorityDetail(
+        results: List<PositionResult>,
+        technicalTrends: Map<String, TechnicalTrendSnapshot>,
+        asOf: String = TimeUtils.todayText(),
+    ): String? {
+        val advice = todayPriorityAdvice(results, technicalTrends, asOf) ?: return null
+        if (!advice.fresh || advice.state !in setOf(PriorityState.EXIT, PriorityState.REDUCE, PriorityState.BUY)) {
+            return null
+        }
+        val detail = advice.technicalAdvice ?: advice.action ?: return null
+        return "；今日优先处理『${advice.name}』（${advice.state.label}）：${advice.reason}；趋势/操作条件：$detail"
+    }
+
+    fun highestPriorityAction(results: List<PositionResult>): String = prioritySummary(results).first()
 
     /**
      * 持仓 Tab 的精简今日要点。它和 [brief] 分开，避免把账户快照带进完整持仓报告。
@@ -587,13 +703,19 @@ object PortfolioAnalysis {
         market: MarketState? = null,
         swingPlan: SwingPlan? = null,
         quotes: Map<String, Quote> = emptyMap(),
+        tradeBook: TradeBook = TradeBook(),
         todayAcquisitions: Map<String, DayPnl.Acquisition> = emptyMap(),
+        technicalTrends: Map<String, TechnicalTrendSnapshot> = emptyMap(),
     ): List<String> = buildList {
         val availableCapital = portfolio.resolvedAvailableCapital()
         val holdings = portfolio.positions.filter { it.quantity.isFinite() && it.quantity > 0 }
         val byCode = results.filter { it.quantity.isFinite() && it.quantity > 0 }
             .associateBy { it.code }
-        highestPriorityAction(results)?.let { add(it) }
+        val activeResults = holdings.mapNotNull { position ->
+            byCode[position.code]?.takeIf { it.quantity == position.quantity }?.let {
+                if (it.cost == position.cost) it else it.copy(priorityBuyApproved = false)
+            }
+        }
         val complete = holdings.all { position ->
             val result = byCode[position.code]
             val quoteValue = quotes[position.code]?.let { quote ->
@@ -614,95 +736,107 @@ object PortfolioAnalysis {
         } else {
             "账户总盈亏：暂无法计算（总资金、剩余资金或持仓行情不完整）"
         }
-        add(accountLine)
         val todayQuotes = quotes.filter { (code, quote) ->
             quote.code == code && quote.quoteDate == TimeUtils.todayText()
         }
-        val daily = DayPnl.summarize(holdings, todayQuotes, todayAcquisitions)
-        add(todayPerformance(daily, todayQuotes["sh000001"]))
-        add("大盘走势：" + when (market?.regime) {
+        val daily = DayPnl.summarize(holdings, todayQuotes)
+        val accountDaily = DayPnl.accountSummary(holdings, todayQuotes, tradeBook, TimeUtils.todayText())
+        val marketLine = "大盘走势：" + when (market?.regime) {
             MarketRegime.BULL -> "此前分析显示整体向上"
             MarketRegime.WEAK -> "此前分析显示整体走弱，买入要更谨慎"
             MarketRegime.COLLAPSE -> "此前分析显示下跌风险较大，先别急着买"
             MarketRegime.NEUTRAL -> "此前分析没有明显方向，先观察"
             null -> "还没有分析结果"
-        })
-
-        add("最值得操作：" + mostActionable(holdings.mapNotNull { byCode[it.code] }, swingPlan))
-        add("整体建议：" + accountSuggestion(holdings.mapNotNull { byCode[it.code] }, portfolio))
+        }
+        if (results.isEmpty()) {
+            // 等待盘中分析：账户盈亏、今日持仓与大盘走势不依赖个股结果，能算照算；
+            // 「当前优先事项/风险核实/买入机会/排序口径」在无结果时全是「暂无」占位，
+            // 等结果出来再渲染，别让等待态出现整屏「暂无」。
+            add(accountLine)
+            add(todayPerformance(daily, accountDaily, todayQuotes["sh000001"]))
+            add(marketLine)
+            if (holdings.isNotEmpty()) {
+                add("个股分析尚未完成：优先事项、风险与买入机会等分析后生成（每 30 分钟一个槽位，可点「立即分析」重跑）。")
+            }
+            return@buildList
+        }
+        if (activeResults.size < holdings.size) {
+            add("数据核实：部分持仓未分析或持仓已变化，请重新分析；不推算缺失持仓的动作")
+        }
         val currentResults = holdings.mapNotNull { byCode[it.code] }
+        val priorityDetail = actionableTodayPriorityDetail(activeResults, technicalTrends)
+        add(accountLine)
+        add(todayPerformance(daily, accountDaily, todayQuotes["sh000001"]))
+        add(marketLine)
+        add("整体建议：" + accountSuggestion(currentResults, portfolio) + priorityDetail.orEmpty())
+        swingPlan?.rows
+            ?.filter { row ->
+                row.addQuantity > 0 && activeResults.firstOrNull { it.code == row.code }
+                    ?.let { priorityDecision(it).state == PriorityState.BUY } == true
+            }
+            ?.take(PortfolioSwing.MAX_FOCUS_POSITIONS)
+            ?.forEachIndexed { index, row ->
+                add("追加买入机会${index + 1}：${row.name}｜${row.action()}｜${row.reason}")
+            }
         val risks = buildList {
-            val broken = currentResults.count { it.signal == "减仓风险" && it.exitDecision?.stage != HoldingExitStage.HIGH_REDUCE }
+            val broken = currentResults.count { isBreakSignal(it.signal) && it.exitDecision?.stage != HoldingExitStage.HIGH_REDUCE }
             val high = currentResults.count { it.exitDecision?.stage == HoldingExitStage.HIGH_REDUCE }
             val deep = currentResults.count { DeepLossPolicy.isDeepLoss(it.cost, it.price, it.volatility.atrPct) }
+            val fundamentalAlerts = currentResults.filter { it.fundamentalHealth?.level == HealthLevel.ALERT }
             if (broken > 0) add("$broken 只跌破关键价位")
             if (high > 0) add("$high 只涨到高处后开始走弱")
             if (deep > 0) add("$deep 只比买入成本跌得较多，别急着补钱")
+            if (fundamentalAlerts.isNotEmpty()) {
+                add(
+                    "基本面风险：" + fundamentalAlerts.joinToString("；") { result ->
+                        val reasons = result.fundamentalHealth?.reasons.orEmpty().joinToString("、")
+                        "${result.name}：${reasons.ifBlank { "具体原因待核实" }}"
+                    },
+                )
+            }
             if (currentResults.size < holdings.size) add("部分持仓还没分析，不能判断全部风险")
         }
         add(if (risks.isEmpty()) "需要留意：现有分析未提示额外风险，不代表没有风险" else "需要留意：${risks.joinToString("；")}")
     }
 
-    private fun todayPerformance(daily: DayPnl.Summary, index: Quote?): String {
+    private fun todayPerformance(
+        daily: DayPnl.Summary,
+        account: DayPnl.AccountSummary,
+        index: Quote?,
+    ): String {
         val indexPct = index?.takeIf { it.price.isFinite() && it.price > 0 && it.prevClose.isFinite() && it.prevClose > 0 }
             ?.changePct?.takeIf { it.isFinite() }
         val indexText = indexPct?.let { "沪指 ${DayPnl.pct(it)}" } ?: "沪指今日行情暂缺"
         if (daily.rows.isEmpty()) return "今日持仓：没有持仓，不计算涨跌比例；$indexText"
-        val pct = daily.totalPct?.takeIf { it.isFinite() }
-        if (pct == null || !daily.totalPnl.isFinite()) return "今日持仓：暂时算不出，缺少今日现价或昨收；$indexText"
-        val amount = "${DayPnl.money(daily.totalPnl)}元（${DayPnl.pct(pct)}）"
-        if (daily.missing > 0) return "今日持仓：已获取的${daily.counted}只持仓 $amount；${daily.missing}只缺少今日有效行情，暂不作整体对比；$indexText"
+        val holdingPct = daily.totalPct?.takeIf { it.isFinite() }
+        if (holdingPct == null || !daily.totalPnl.isFinite()) {
+            return "今日持仓：暂时算不出，缺少今日现价或昨收；$indexText"
+        }
+        val holdingAmount = "${DayPnl.money(daily.totalPnl)}元（${DayPnl.pct(holdingPct)}）"
+        if (daily.missing > 0) {
+            return "今日持仓：已获取的${daily.counted}只持仓 $holdingAmount；${daily.missing}只缺少今日有效行情，暂不作整体对比；$indexText"
+        }
+        if (!account.complete) {
+            return "今日持仓：$holdingAmount；账户今日盈亏数据不足（${account.reasons.joinToString("；")}）；$indexText"
+        }
+        val accountTotal = account.totalPnl ?: daily.totalPnl
+        val accountPct = account.totalPct ?: holdingPct
+        val accountHasTradeImpact = account.holdingsPnl != daily.totalPnl ||
+            account.realizedPnl != 0.0 || account.fees != 0.0
+        val amount = if (accountHasTradeImpact) {
+            "账户今日 ${DayPnl.money(accountTotal)}元（${DayPnl.pct(accountPct)}）" +
+                "｜当前持仓 $holdingAmount" +
+                "｜已实现 ${DayPnl.money(account.realizedPnl ?: 0.0)}元" +
+                "｜费用 ${String.format(Locale.CHINA, "%.2f", account.fees ?: 0.0)}元"
+        } else {
+            holdingAmount
+        }
         val comparison = indexPct?.let {
-            val gap = pct - it
+            val gap = accountPct - it
             if (abs(gap) < 0.005) "，与沪指基本持平"
             else "，${if (gap > 0) "跑赢" else "跑输"}${String.format(Locale.CHINA, "%.2f", abs(gap))}个百分点"
         }.orEmpty()
-        return "今日持仓：$amount；$indexText$comparison（按当前股数较昨收估算）"
-    }
-
-    private fun mostActionable(results: List<PositionResult>, swingPlan: SwingPlan?): String {
-        val candidate = results.maxWithOrNull(compareBy<PositionResult> { actionPriority(it) }
-            .thenByDescending { if (it.marketValue.isFinite()) it.marketValue else 0.0 })
-        if (candidate != null && actionPriority(candidate) > 0) {
-            val action = when (candidate.exitDecision?.stage) {
-                HoldingExitStage.EXIT -> "卖出风险条件已触发，核对分析依据后优先考虑退出"
-                HoldingExitStage.HIGH_REDUCE -> "涨到高处后开始走弱，优先分批卖出一部分"
-                HoldingExitStage.REDUCE -> "跌破关键价位后未能站回，优先分批卖出一部分"
-                HoldingExitStage.WATCH -> "刚跌破关键价位，先别加仓，看能否站回"
-                HoldingExitStage.NOTICE -> "跌破关键价位，但基本面未亮红灯、位置低、仓位轻，去留按自己的风险偏好决定"
-                HoldingExitStage.DEEP_T -> "亏损较深，别再补钱；等反弹时评估卖出一小部分，再等回落稳住后考虑接回"
-                else -> when {
-                    candidate.fundamentalHealth?.level == HealthLevel.ALERT -> {
-                        val reason = candidate.fundamentalHealth.reasons.firstOrNull { it.isNotBlank() }
-                            ?: "财务或公告分析提示风险，但具体原因未提供"
-                        "$reason；先别加仓，查看最新财报或公告，不是让你马上卖出"
-                    }
-                    candidate.signal == "趋势转弱观察" -> "走势变弱，先别继续买，等价格稳住"
-                    candidate.signal == "持有/止盈观察" -> "结构未失效时保留观察仓等待二波，不因已有浮盈卖出"
-                    else -> "先保持不动"
-                }
-            }
-            return "${candidate.name}：$action"
-        }
-        val preferred = swingPlan?.preferredCode?.let { code ->
-            results.firstOrNull { it.code == code }
-        }
-        return if (preferred != null) "${preferred.name}：已有买入条件，可按最新分析的价格和数量考虑少量买入，不追高"
-        else "目前没有哪只需要优先买卖，不必勉强操作"
-    }
-
-    private fun actionPriority(result: PositionResult): Int = when {
-        result.exitDecision?.stage == HoldingExitStage.EXIT -> 100
-        result.exitDecision?.stage == HoldingExitStage.HIGH_REDUCE -> 90
-        result.exitDecision?.stage == HoldingExitStage.REDUCE -> 85
-        result.exitDecision?.stage == HoldingExitStage.WATCH -> 80
-        result.fundamentalHealth?.level == HealthLevel.ALERT -> 75
-        result.signal == "趋势转弱观察" -> 70
-        // 破位但三项缓释（基本面没红灯/低位/轻仓）：提一句即可，不该抢「最值得操作」的头条。
-        result.exitDecision?.stage == HoldingExitStage.NOTICE -> 65
-        result.exitDecision?.stage == HoldingExitStage.DEEP_T -> 60
-        result.signal == "持有/止盈观察" -> 40
-        else -> 0
+        return "今日持仓：$amount；$indexText$comparison（账户口径含真实当日成交与费用）"
     }
 
     private fun accountSuggestion(results: List<PositionResult>, portfolio: Portfolio): String {
@@ -714,16 +848,16 @@ object PortfolioAnalysis {
             (top.marketValue / totalValue >= 0.5 ||
                 (portfolio.totalCapital > 0 && top.marketValue / portfolio.totalCapital * 100 > portfolio.maxPositionPct))
         return when {
-            results.any { it.exitDecision?.stage == HoldingExitStage.EXIT } ->
+            results.any { priorityDecision(it).state == PriorityState.EXIT } ->
                 "先处理已经触发卖出风险条件的股票，别急着再买。"
             results.any { it.fundamentalHealth?.level == HealthLevel.ALERT } ->
-                "有股票的财务或公告分析提示风险，先查看具体原因，别急着加仓或卖出后接回。"
-            results.any { it.exitDecision?.stage in setOf(HoldingExitStage.HIGH_REDUCE, HoldingExitStage.REDUCE) } &&
+                "有股票的财务或公告分析提示风险，先别加仓，查看最新财报或公告；别急着卖出后接回。"
+            results.any { priorityDecision(it).state == PriorityState.REDUCE } &&
                 (topConcentrated || totalPositionPct != null && totalPositionPct >= 80) ->
                 "买入的股票较多，或钱集中在少数股票上；先减少已确认走弱的持仓，别继续买。"
-            results.any { it.exitDecision?.stage in setOf(HoldingExitStage.HIGH_REDUCE, HoldingExitStage.REDUCE) } ->
+            results.any { priorityDecision(it).state == PriorityState.REDUCE } ->
                 "先分批卖出一部分已确认走弱的股票，其他持仓先观察，别追着买。"
-            results.any { it.exitDecision?.stage in setOf(HoldingExitStage.WATCH, HoldingExitStage.NOTICE) } ->
+            results.any { priorityDecision(it).state == PriorityState.WATCH } ->
                 "先别继续买入，看能否站回关键价位；不能只因刚跌破就急着卖。"
             totalPositionPct != null && totalPositionPct >= 80 ->
                 "较多资金已经买了股票，先别继续买，留些现金应对波动。"
@@ -735,55 +869,34 @@ object PortfolioAnalysis {
         }
     }
 
-    fun overallAdvice(results: List<PositionResult>, swingPlan: SwingPlan? = null): List<String> = buildList {
-        val holdings = results.filter { it.quantity.isFinite() && it.quantity > 0 }
-        val groups = holdings.groupBy { result ->
-            when {
-                result.exitDecision?.stage == HoldingExitStage.EXIT -> "exit"
-                result.exitDecision?.stage == HoldingExitStage.HIGH_REDUCE -> "highReduce"
-                result.exitDecision?.stage == HoldingExitStage.REDUCE -> "reduce"
-                result.fundamentalHealth?.level == HealthLevel.ALERT -> "fundamental"
-                result.exitDecision?.stage == HoldingExitStage.NOTICE -> "notice"
-                result.exitDecision?.stage == HoldingExitStage.WATCH -> "watchBreak"
-                DeepLossPolicy.isDeepLoss(result.cost, result.price, result.volatility.atrPct) -> "deep"
-                result.signal == "减仓风险" -> "broken"
-                result.signal == "趋势转弱观察" -> "weak"
-                result.signal == "持有/止盈观察" -> "profit"
-                result.action.contains("保留观察仓等待二波") -> "secondWaveHold"
-                result.code == swingPlan?.preferredCode -> "preferred"
-                else -> "hold"
-            }
+    fun overallAdvice(results: List<PositionResult>, swingPlan: SwingPlan? = null): List<String> =
+        prioritySummary(results) + adviceBody(results, swingPlan)
+
+    /**
+     * 整体建议正文（风险观察/现有仓位/深套处理/资金检查），不含统一优先级摘要：
+     * brief 头尾各展示一次摘要，这里再内嵌就会重复两遍；formatReport/DailyReview 走
+     * [overallAdvice] 拿完整版。
+     */
+    private fun adviceBody(results: List<PositionResult>, swingPlan: SwingPlan? = null): List<String> = buildList {
+        val ranked = PortfolioPriorityPolicy.rank(results.map(::priorityInput), TimeUtils.todayText())
+        val watching = ranked.filter { it.state == PriorityState.WATCH }
+        if (watching.isNotEmpty()) add("风险观察：" + watching.joinToString("、") { it.input.name } + "；按证据核实，不自动卖出")
+        val holding = ranked.filter { it.state == PriorityState.HOLD && !it.input.fundamentalAlert }
+        if (holding.isNotEmpty()) add("现有仓位：" + holding.joinToString("、") { it.input.name } + "以持有观察为主，暂不主动调仓")
+        val deepLoss = results.filter {
+            it.quantity > 0 && DeepLossPolicy.isDeepLoss(it.cost, it.price, it.volatility.atrPct)
         }
-        fun names(rows: List<PositionResult>): String = rows.take(3).joinToString("、") { it.name } +
-            if (rows.size > 3) "等${rows.size}只" else ""
-        val riskParts = buildList {
-            groups["exit"]?.let { add("${names(it)}退出优先，核对依据后以清仓退出为目标，不再等待反弹做T") }
-            groups["highReduce"]?.let { add("${names(it)}高位转弱，优先分批减仓，暂停加仓和做T接回；不因高位直接清仓") }
-            groups["reduce"]?.let { add("${names(it)}确认破位，优先分批减仓；失守风险参考且趋势转弱时升级退出") }
-            groups["notice"]?.let { add("${names(it)}已破位，但基本面未亮红灯、位置低、仓位轻，去留自定；若减仓可分批约1/3") }
-            groups["watchBreak"]?.let { add("${names(it)}破位待确认，暂不加仓；持续未收回则减仓") }
-            groups["fundamental"]?.let { add("${names(it)}基本面亮红灯，先核实风险，暂停加仓和机械做T接回") }
-            groups["broken"]?.let { add("${names(it)}已破位，确认未收回则减仓；持有依据失效时退出") }
-            groups["weak"]?.let { add("${names(it)}趋势转弱，暂不加仓，等重新企稳") }
+        if (deepLoss.isNotEmpty()) {
+            // 行动清单要点名：只说「浮亏不自动升级」没有可执行对象，列出是谁深套。
+            add("深套处理：${deepLoss.joinToString("、") { it.name }}（深套口径），浮亏不自动升级或豁免风险；不因深套延后退出评估，不自动补仓或做T")
         }
-        if (riskParts.isNotEmpty()) add("风险优先：${riskParts.joinToString("；")}")
-        groups["deep"]?.let {
-            add("深套处理：${names(it)}深套不盲目补仓；机动仓做T需等反弹减出、回踩企稳后再评估接回，不保证降本或解套")
-        }
-        val positionParts = buildList {
-            groups["secondWaveHold"]?.let { add("${names(it)}MA20仍上行且回踩未破坏结构，保留观察仓等待二波，不因已有浮盈卖出") }
-            groups["profit"]?.let { add("${names(it)}按逐股结构和风险线处理，不因已有浮盈直接卖出") }
-            groups["hold"]?.let { add("${names(it)}以持有观察为主，暂不主动调仓") }
-        }
-        if (positionParts.isNotEmpty()) add("现有仓位：${positionParts.joinToString("；")}")
-        if (holdings.isEmpty()) add("现有仓位：暂无有效持仓分析，不推算调仓动作")
-        add("新增资金：" + (swingPlan?.headline() ?: "波段加仓评估尚未完成，暂不新增买入"))
+        swingPlan?.capitalIssue?.let { add("资金检查：$it") }
     }
 
     /** 风险点：破位 / 深套 / 集中度 / 缺数据，只列有量的那几条。 */
     private fun briefRisks(results: List<PositionResult>, dayPnl: DayPnl.Summary?): List<String> {
         val risks = mutableListOf<String>()
-        val broke = results.count { it.signal == "减仓风险" && it.exitDecision?.stage != HoldingExitStage.HIGH_REDUCE }
+        val broke = results.count { isBreakSignal(it.signal) && it.exitDecision?.stage != HoldingExitStage.HIGH_REDUCE }
         val highReduce = results.count { it.exitDecision?.stage == HoldingExitStage.HIGH_REDUCE }
         if (broke > 0) risks.add("破位 $broke 只")
         if (highReduce > 0) risks.add("高位转弱 $highReduce 只")
@@ -819,7 +932,13 @@ object PortfolioAnalysis {
         strongContinuationEvents: List<StrongContinuationEvent> = emptyList(),
         marketEnvironment: MarketEnvironmentQuality? = null,
         swingPlan: SwingPlan? = null,
+        positionAllocations: Map<String, PositionAllocationConfig> = emptyMap(),
     ): String {
+        val allowBuy = results.none { it.quantity > 0 && priorityDecision(it).order <= 3 }
+        val effectiveSwing = swingPlan?.copy(rows = swingPlan.rows.map { row ->
+            if (allowBuy && results.any { it.code == row.code && it.priorityBuyApproved }) row
+            else row.copy(addQuantity = 0.0, estimatedCash = 0.0, afterPositionPct = null, reason = "未通过统一风险与数据检查，暂不新增")
+        })
         val lines = mutableListOf(
             "📦 持仓信息 / 盘中技术监控",
             "最近分析：$analyzedAt",
@@ -827,12 +946,12 @@ object PortfolioAnalysis {
         // 开头给「今日要点」：十来段的长报告，想看「今天要干什么」不该翻到底。
         lines.add("")
         lines.add("持仓整体操作建议")
-        overallAdvice(results, swingPlan).forEach { lines.add("· $it") }
+        overallAdvice(results, effectiveSwing).forEach { lines.add("· $it") }
         lines.add("")
         lines.add("📌 今日要点")
-        brief(results, dayPnl, market, swingPlan)
+        brief(results, dayPnl, market, effectiveSwing)
             .filterNot { it.startsWith("持仓整体操作建议：") }.forEach { lines.add("· $it") }
-        swingPlan?.let {
+        effectiveSwing?.let {
             it.capitalIssue?.let { issue -> lines.add("资金检查：$issue") }
             it.allocationCapital?.let { capital ->
                 lines.add("额度基数：${priceText(capital)}元（配置总资金与已录入持仓市值加现金取较小值）")
@@ -893,8 +1012,9 @@ object PortfolioAnalysis {
         if (results.isEmpty()) {
             lines.add("尚未配置监控股票，或当前没有可用分析结果。")
         }
-        for (result in results) {
-            val swing = swingPlan?.rows?.firstOrNull { it.code == result.code }
+        for (result in priorityOrdered(results)) {
+            val decision = priorityDecision(result)
+            val swing = effectiveSwing?.rows?.firstOrNull { it.code == result.code }
             var positionText = "未持仓观察"
             if (result.quantity > 0) {
                 positionText = "持仓${String.format(Locale.CHINA, "%.0f", result.quantity)}股"
@@ -905,11 +1025,17 @@ object PortfolioAnalysis {
             val dayText = dayPnl?.rows?.firstOrNull { it.code == result.code }?.pnl
                 ?.let { "，今日 ${DayPnl.money(it)} 元" } ?: ""
             lines.add(
-                "${result.name}（${result.code}）｜状态：${result.exitDecision?.stage?.label ?: result.signal}｜评分 ${String.format(Locale.CHINA, "%+d", result.score)}"
+                "${result.name}（${result.code}）｜状态：${decision.state.label}｜评分 ${String.format(Locale.CHINA, "%+d", result.score)}"
             )
             lines.add(
                 "当前价 ${String.format(Locale.CHINA, "%.2f", result.price)}" +
                     "（较前一日 ${String.format(Locale.CHINA, "%+.2f%%", result.changePct)}$dayText）｜$positionText$pctText"
+            )
+            lines.add(
+                "分仓：${PositionAllocationPolicy.derive(
+                    Position(result.code, result.name, result.quantity, result.cost),
+                    positionAllocations[result.code],
+                ).displayText}"
             )
             lines.add(
                 "${result.sectorNote ?: "板块归属暂缺"}｜入场：${swing?.status?.label ?: result.entrySetup.conciseText()}"
@@ -921,6 +1047,7 @@ object PortfolioAnalysis {
             if (swing != null) {
                 lines.add("波段追加：${swing.action()}")
                 lines.add("依据：${swing.reason}")
+                lines.add("加仓诊断：${swing.diagnosis.summary()}")
                 swing.cycles?.let { cycles ->
                     lines.add("${cycles.summary()}｜前复权历史${cycles.historyStart ?: "暂缺"}至${cycles.asOf}；完整周K${cycles.weeks.size}根、月K${cycles.months.size}根")
                     val year = cycles.years.lastOrNull()
@@ -948,9 +1075,8 @@ object PortfolioAnalysis {
                         "（财务与公告可见面，不含行业景气与订单）"
                 )
             }
-            lines.add("应对：" + if (swing?.addQuantity?.let { it > 0 } == true) {
-                "仅在参考区间内重新确认企稳后按上限分批考虑；价格、资金或仓位变化须重评，不自动下单。"
-            } else result.action)
+            lines.add("应对：${decision.reason}")
+            lines.add("数据口径：行情${result.analysisDate.ifBlank { "未知" }}｜技术${result.priorityEvidenceDate.ifBlank { "未知" }}｜前复权技术位｜${PortfolioPriorityPolicy.VERSION}")
             lines.add("")
         }
         lines.add("说明：本报告只提供条件式技术信号，不自动下单；未持仓股票的建议不考虑个人成本。")
@@ -995,7 +1121,7 @@ object PortfolioAnalysis {
                 } else if (environment.status == MarketEnvironmentStatus.STRONG_SINGLE_DAY) {
                     invalidators += "若后续量能不能延续，或指数/板块出现滞涨，单日高量不再支持继续等待"
                 }
-                val broken = results.count { it.signal == "减仓风险" && it.exitDecision?.stage != HoldingExitStage.HIGH_REDUCE }
+                val broken = results.count { isBreakSignal(it.signal) && it.exitDecision?.stage != HoldingExitStage.HIGH_REDUCE }
                 if (broken > 0) counter += "持仓中有${broken}只出现破位，个股风险优先"
                 val highReduce = results.count { it.exitDecision?.stage == HoldingExitStage.HIGH_REDUCE }
                 if (highReduce > 0) counter += "持仓中有${highReduce}只高位转弱，优先减仓"

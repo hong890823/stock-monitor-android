@@ -1,9 +1,18 @@
 package com.example.stockmonitor.ui
 
+import com.example.stockmonitor.analysis.PortfolioAnalysis
+import com.example.stockmonitor.analysis.DeepLossPolicy
+import com.example.stockmonitor.analysis.HoldingAdvicePolicy
+import com.example.stockmonitor.analysis.DailyAdvicePolicy
+import com.example.stockmonitor.analysis.TimeUtils
+
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import com.example.stockmonitor.R
 import com.example.stockmonitor.analysis.PositionResult
+import com.example.stockmonitor.analysis.PositionAllocationPolicy
+import com.example.stockmonitor.analysis.PositionAllocationRecommendationInput
+import com.example.stockmonitor.analysis.PositionAllocationRecommendationPolicy
 import com.example.stockmonitor.analysis.TechnicalTrendSnapshot
 import com.example.stockmonitor.analysis.FundFlowDisplayPolicy
 import com.example.stockmonitor.analysis.VolumePrice
@@ -27,6 +36,7 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             val context = requireContext()
             val store = Store(context)
             val portfolio = store.portfolio
+            val positionAllocations = store.positionAllocations
             val tradeBook = store.tradeBook
             val tradeAvailability = TradeLotLedger.availability(tradeBook, portfolio.positions, java.time.LocalDate.now().toString())
             val sellableTotal = tradeAvailability.sumOf { it.actionableSellableToday }
@@ -70,6 +80,11 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                 addKeyValue("单股最大仓位", String.format(Locale.CHINA, "%.0f%%", portfolio.maxPositionPct))
                 addKeyValue("监控股票", "${portfolio.positions.size} 只")
                 addKeyValue(
+                    "分仓配置",
+                    "${portfolio.positions.count { positionAllocations.containsKey(it.code) }}/${portfolio.positions.size} 只",
+                    note = "分仓数量按当前持仓动态派生；未设置的股票暂列观察。",
+                )
+                addKeyValue(
                     "T+1 可卖",
                     if (ledgerInconsistent) {
                         "账本不一致，当前可执行卖出 0 股｜今日锁定 ${formatShares(lockedTotal)}｜下一交易日 0 股"
@@ -88,6 +103,11 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                 add(
                     buttonRow(context) { row ->
                         row.addView(
+                            actionButton(context, "📒 记录交易") {
+                                Dialogs.recordTrade(context) { render() }
+                            },
+                        )
+                        row.addView(
                             actionButton(context, "💰 设置资金") {
                                 Dialogs.portfolioCapital(requireActivity() as androidx.appcompat.app.AppCompatActivity) { render() }
                             },
@@ -102,12 +122,14 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                                 Dialogs.editPosition(context) { render() }
                             },
                         )
-                        row.addView(
-                            actionButton(context, "📒 记录交易") {
-                                Dialogs.recordTrade(context) { render() }
-                            },
-                        )
                         row.addView(actionButton(context, "➖ 删除股票") { Dialogs.deletePosition(context) { render() } })
+                    },
+                )
+                add(
+                    buttonRow(context) { row ->
+                        row.addView(actionButton(context, "🧩 设置分仓") {
+                            Dialogs.positionAllocation(context) { render() }
+                        })
                     },
                 )
                 container.addView(view)
@@ -149,11 +171,18 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                                     price = quote?.let { String.format(Locale.CHINA, "%.2f", it.price) } ?: "—",
                                     changePct = quote?.changePct ?: Double.NaN,
                                     summary = portfolioSummary(
-                                        positionText = positionSummary(position),
+                                        positionText = positionSummary(position, quote?.price, positionAllocations, store),
                                         fundFlow = currentFundFlowSummary(position.code),
                                         technicalTrend = technicalTrend,
+                                        adviceText = dailyAdviceText(store, position.code),
                                     ),
-                                    details = portfolioDetails(position, quote, technicalTrend),
+                                    details = portfolioDetails(
+                                        position,
+                                        quote,
+                                        technicalTrend,
+                                        dailyAdviceText(store, position.code),
+                                        positionAllocations,
+                                    ),
                                     onExpansionChanged = {
                                         setSecondaryExpanded(
                                             QuoteRowExpansionState.allExpanded(holdingRowKeys),
@@ -164,19 +193,19 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                             add(row.view)
                         }
                     } else {
-                        results.forEach { result ->
+                        PortfolioAnalysis.priorityOrdered(results).forEach { result ->
                             val swing = swingPlan?.rows?.firstOrNull { it.code == result.code }
                             val technicalTrend = Repo.technicalTrendSnapshots[result.code]
                             val positionText =
                                 if (result.quantity > 0) {
-                                    String.format(Locale.CHINA, "持仓 %.0f 股｜成本 %.2f", result.quantity, result.cost)
+                                    String.format(Locale.CHINA, "持仓 %.0f 股｜成本 %.2f", result.quantity, result.cost) +
+                                        floatingPnlSuffix(result.cost, result.price) +
+                                        "｜分仓：${allocationText(result, positionAllocations)}"
                                 } else {
                                     "未持仓观察"
                                 }
-                            val responseText =
-                                swing?.takeIf { it.addQuantity > 0 }?.action() ?: result.action
-                            val swingText =
-                                swing?.takeIf { it.addQuantity <= 0 }?.action()
+                            val responseText = PortfolioAnalysis.priorityDecision(result).reason
+                            val swingText = swing?.action()
                             val row = UiKit.expandableQuoteRow(
                                     context = context,
                                     stateKey = "portfolio:${result.code}",
@@ -189,13 +218,16 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                                         score = result.score,
                                         fundFlow = currentFundFlowSummary(result.code),
                                         technicalTrend = technicalTrend,
+                                        adviceText = dailyAdviceText(store, result.code),
                                     ),
                                     details = portfolioDetails(
                                         result = result,
-                                        positionText = positionText,
                                         responseText = responseText,
                                         swingText = swingText,
+                                        swingDiagnosis = swing?.diagnosis?.summary(),
                                         technicalTrend = technicalTrend,
+                                        adviceText = dailyAdviceText(store, result.code),
+                                        positionAllocations = positionAllocations,
                                     ),
                                     onExpansionChanged = {
                                         setSecondaryExpanded(
@@ -385,35 +417,70 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             String.format(Locale.CHINA, "｜%s", VolumePrice.tag(result.volumeSignal))
         }
 
-    private fun fundFlowSummary(code: String): String {
-        return listOf(currentFundFlowSummary(code), fundFlowWindowSummary(code))
-            .joinToString("｜")
-    }
-
     private fun currentFundFlowSummary(code: String): String =
         FundFlowDisplayPolicy.current(Repo.fundFlowHistory[code].orEmpty().lastOrNull())
 
-    private fun fundFlowWindowSummary(code: String): String {
-        return FundFlowDisplayPolicy.multiDay(Repo.fundFlowHistory[code].orEmpty())
-    }
-
-    private fun positionSummary(position: Position): String =
+    private fun positionSummary(
+        position: Position,
+        price: Double? = null,
+        allocations: Map<String, com.example.stockmonitor.core.PositionAllocationConfig> = emptyMap(),
+        store: Store? = null,
+    ): String =
         if (position.quantity > 0) {
             String.format(
                 Locale.CHINA,
                 "持仓 %.0f 股｜成本 %.2f",
                 position.quantity,
                 position.cost,
-            )
+            ) + floatingPnlSuffix(position.cost, price) +
+                "｜分仓：${PositionAllocationPolicy.derive(position, allocations[position.code]).displayText}" +
+                allocationRecommendationSuffix(position, price, allocations, store)
         } else {
-            "未持仓观察"
+            "未持仓观察｜分仓：${PositionAllocationPolicy.derive(position, allocations[position.code]).displayText}"
         }
+
+    private fun allocationRecommendationSuffix(
+        position: Position,
+        price: Double?,
+        allocations: Map<String, com.example.stockmonitor.core.PositionAllocationConfig>,
+        store: Store?,
+    ): String {
+        if (allocations.containsKey(position.code) || store == null) return ""
+        val technical = Repo.technicalTrendSnapshots[position.code]
+        val fundamental = Repo.fundamentalHealth[position.code]?.health
+        val positionPct = if (
+            price != null && price.isFinite() && price > 0.0 && store.portfolio.totalCapital > 0.0
+        ) {
+            position.quantity * price / store.portfolio.totalCapital * 100.0
+        } else {
+            null
+        }
+        val recommendation = PositionAllocationRecommendationPolicy.recommend(
+            PositionAllocationRecommendationInput(
+                quantity = position.quantity,
+                technicalScore = technical?.technicalScore,
+                technicalAllowsAdd = technical?.allowsAddPosition,
+                trendWeak = technical?.trendWeak == true,
+                fundamentalLevel = fundamental?.level,
+                positionPct = positionPct,
+                maxPositionPct = store.portfolio.maxPositionPct,
+            ),
+        )
+        return "｜建议：${recommendation.summary}"
+    }
+
+    /** 摘要行直接给浮盈亏百分比，免去心算成本差；行情缺失时不拼。 */
+    private fun floatingPnlSuffix(cost: Double, price: Double?): String {
+        val pnl = DeepLossPolicy.floatingPnlPct(cost, price ?: Double.NaN) ?: return ""
+        return String.format(Locale.CHINA, "｜浮%s %+.1f%%", if (pnl < 0) "亏" else "盈", pnl)
+    }
 
     private fun portfolioSummary(
         positionText: String,
         score: Int? = null,
         fundFlow: String,
         technicalTrend: TechnicalTrendSnapshot?,
+        adviceText: String? = null,
     ): String = listOfNotNull(
         positionText,
         technicalTrend?.let {
@@ -421,69 +488,123 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
         } ?: "技术综合评分计算中",
         score?.let { String.format(Locale.CHINA, "策略评分 %+d", it) },
         fundFlow,
+        adviceText,
     ).joinToString("｜")
 
+    private fun dailyAdviceText(store: Store, code: String): String? = store.dailyAdvicePlans
+        .firstOrNull { it.date == TimeUtils.todayText() && it.code == code }
+        ?.let(DailyAdvicePolicy::displayText)
+
+    /**
+     * 等待盘中分析时的详情：摘要行已有的信息（持仓/评分/周月趋势/资金流）不再重复；
+     * 技术快照带出的支撑/压力、量比、均线结构让等待态不再只有评分和一句模板建议。
+     */
     private fun portfolioDetails(
         position: Position,
         quote: Quote?,
         technicalTrend: TechnicalTrendSnapshot?,
-    ): List<UiKit.DetailRow> =
-        listOfNotNull(
-            UiKit.DetailRow("股票代码", position.code),
-            UiKit.DetailRow("持仓 / 成本", positionSummary(position)),
-            UiKit.DetailRow("技术综合评分", technicalTrend?.let { "${it.technicalScore}/100" } ?: "计算中"),
-            UiKit.DetailRow(
-                "周/月趋势",
-                technicalTrend?.let { "${it.weeklyTrend.label}/${it.monthlyTrend.label}" } ?: "数据不足",
-            ),
-            technicalTrend?.let { UiKit.DetailRow("技术分构成", it.evidenceSummary.removePrefix("技术分构成：")) },
-            technicalTrend?.let { UiKit.DetailRow("操作建议", it.primaryAdvice) },
-            quote?.let {
-                UiKit.DetailRow(
-                    "成交额",
-                    String.format(Locale.CHINA, "%.2f亿", it.turnover / 1e8),
-                )
-            },
-            UiKit.DetailRow("资金流", currentFundFlowSummary(position.code)),
-            UiKit.DetailRow(
-                "近3日资金流",
-                fundFlowWindowSummary(position.code).ifBlank { "样本不足" },
-            ),
-            UiKit.DetailRow("分析状态", "等待盘中分析结果"),
+        adviceText: String? = null,
+        allocations: Map<String, com.example.stockmonitor.core.PositionAllocationConfig> = emptyMap(),
+    ): List<UiKit.DetailRow> {
+        val holdingAdvice = HoldingAdvicePolicy
+            .evaluate(position, quote, technicalTrend, Repo.fundFlowHistory[position.code].orEmpty().lastOrNull())
+        val mainForce = FundFlowDisplayPolicy.mainForceDirection(
+            quote?.changePct,
+            quote?.quoteDate,
+            Repo.fundFlowHistory[position.code].orEmpty(),
         )
+        return listOfNotNull(
+        adviceText?.let { UiKit.DetailRow("今日建议计划", it, dividerAfter = true) },
+        UiKit.DetailRow(
+            "分仓",
+            PositionAllocationPolicy.derive(position, allocations[position.code]).displayText,
+        ),
+        UiKit.DetailRow(
+            "支撑 / 压力",
+            supportResistanceText(technicalTrend?.support, technicalTrend?.resistance, quote?.price),
+        ),
+        UiKit.DetailRow(
+            "量比",
+            technicalTrend?.volumeRatio?.let { String.format(Locale.CHINA, "%.2f", it) } ?: "暂缺",
+        ),
+        UiKit.DetailRow("均线", technicalTrend?.let { maStructureText(it) } ?: "暂缺"),
+        technicalTrend?.let {
+            UiKit.DetailRow(
+                "技术分构成",
+                it.evidenceSummary.removePrefix("技术分构成："),
+                dividerAfter = true,
+            )
+        },
+        technicalTrend?.let {
+            UiKit.DetailRow(
+                "操作建议",
+                it.primaryAdvice,
+                dividerAfter = holdingAdvice != null,
+            )
+        },
+        holdingAdvice?.let {
+            UiKit.DetailRow("持仓视角", it, dividerAfter = true)
+        },
+        quote?.let {
+            UiKit.DetailRow(
+                "成交额",
+                String.format(Locale.CHINA, "%.2f亿", it.turnover / 1e8),
+            )
+        },
+        UiKit.DetailRow(
+            "主力意图",
+            mainForce.summary,
+        ),
+        UiKit.DetailRow(
+            "资金依据",
+            mainForce.evidence.replace("｜", "\n"),
+        ),
+    )
+    }
 
+    /** 盘中分析结果的详情：摘要行已有的信息（持仓/评分/周月趋势/资金流）不再重复。 */
     private fun portfolioDetails(
         result: PositionResult,
-        positionText: String,
         responseText: String,
         swingText: String?,
+        swingDiagnosis: String? = null,
         technicalTrend: TechnicalTrendSnapshot?,
+        adviceText: String? = null,
+        positionAllocations: Map<String, com.example.stockmonitor.core.PositionAllocationConfig> = emptyMap(),
     ): List<UiKit.DetailRow> {
         val pct = result.positionPct?.let { String.format(Locale.CHINA, "，占总资金 %.1f%%", it) } ?: ""
+        val mainForce = FundFlowDisplayPolicy.mainForceDirection(
+            result.changePct,
+            result.analysisDate,
+            Repo.fundFlowHistory[result.code].orEmpty(),
+        )
         return listOfNotNull(
-            UiKit.DetailRow("股票代码", result.code),
-            UiKit.DetailRow("持仓 / 成本", positionText),
+            adviceText?.let { UiKit.DetailRow("今日建议计划", it, dividerAfter = true) },
+            UiKit.DetailRow(
+                "分仓",
+                allocationText(result, positionAllocations),
+            ),
             UiKit.DetailRow("状态", "${result.exitDecision?.stage?.label ?: result.signal}$pct"),
-            UiKit.DetailRow("策略评分", String.format(Locale.CHINA, "%+d", result.score)),
-            UiKit.DetailRow("技术综合评分", technicalTrend?.let { "${it.technicalScore}/100" } ?: "计算中"),
-            UiKit.DetailRow(
-                "周/月趋势",
-                technicalTrend?.let { "${it.weeklyTrend.label}/${it.monthlyTrend.label}" } ?: "数据不足",
-            ),
-            technicalTrend?.let { UiKit.DetailRow("技术分构成", it.evidenceSummary.removePrefix("技术分构成：")) },
+            technicalTrend?.let {
+                UiKit.DetailRow(
+                    "技术分构成",
+                    it.evidenceSummary.removePrefix("技术分构成："),
+                    dividerAfter = true,
+                )
+            },
             technicalTrend?.let { UiKit.DetailRow("操作建议", it.primaryAdvice) },
-            UiKit.DetailRow(
-                "支撑 / 压力",
-                String.format(Locale.CHINA, "%.2f / %.2f", result.support, result.resistance),
-            ),
+            UiKit.DetailRow("支撑 / 压力", supportResistanceText(result.support, result.resistance, result.price)),
             UiKit.DetailRow(
                 "量比 / 量价",
                 String.format(Locale.CHINA, "%.2f倍", result.volumeRatio) + volumeTag(result),
             ),
-            UiKit.DetailRow("资金流", currentFundFlowSummary(result.code)),
             UiKit.DetailRow(
-                "近3日资金流",
-                fundFlowWindowSummary(result.code).ifBlank { "样本不足" },
+                "主力意图",
+                mainForce.summary,
+            ),
+            UiKit.DetailRow(
+                "资金依据",
+                mainForce.evidence.replace("｜", "\n"),
             ),
             UiKit.DetailRow("入场结构", result.entrySetup.compactText()),
             UiKit.DetailRow("结构依据", result.entrySetup.reason),
@@ -492,8 +613,62 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             },
             UiKit.DetailRow("应对", responseText),
             swingText?.let { UiKit.DetailRow("波段追加", it) },
+            swingDiagnosis?.let { UiKit.DetailRow("加仓诊断", it) },
         )
     }
+
+    private fun allocationText(
+        result: PositionResult,
+        allocations: Map<String, com.example.stockmonitor.core.PositionAllocationConfig>,
+    ): String {
+        val position = Position(result.code, result.name, result.quantity, result.cost)
+        val allocation = PositionAllocationPolicy.derive(position, allocations[result.code])
+        if (allocations.containsKey(result.code)) return allocation.displayText
+        val recommendation = PositionAllocationRecommendationPolicy.recommend(
+            PositionAllocationRecommendationInput(
+                quantity = result.quantity,
+                technicalScore = result.score,
+                technicalAllowsAdd = result.trendAssessment?.allowsAddPosition,
+                trendWeak = result.entrySetup.trendWeak || result.trendAssessment?.riskOnly == true,
+                majorTrend = result.trendAssessment?.major,
+                fundamentalLevel = result.fundamentalHealth?.level,
+                positionPct = result.positionPct,
+            ),
+        )
+        return "${allocation.displayText}｜建议：${recommendation.summary}"
+    }
+
+    /** 支撑/压力不只是两个数：标注现价在区间里的位置（贴近支撑/压力、已跌破、区间百分比）。 */
+    private fun supportResistanceText(support: Double?, resistance: Double?, price: Double?): String {
+        val validSupport = support?.takeIf { it.isFinite() && it > 0 }
+        val validResistance = resistance?.takeIf { it.isFinite() && it > 0 }
+        val validPrice = price?.takeIf { it.isFinite() && it > 0 }
+        val numbers = listOfNotNull(validSupport, validResistance)
+            .joinToString(" / ") { String.format(Locale.CHINA, "%.2f", it) }
+        if (numbers.isEmpty()) return "暂缺"
+        if (validSupport == null || validResistance == null || validPrice == null ||
+            validResistance <= validSupport
+        ) {
+            return numbers
+        }
+        val location = when {
+            validPrice < validSupport -> "已跌破支撑"
+            validPrice <= validSupport * 1.02 -> "贴近支撑"
+            validPrice >= validResistance * 0.98 -> "贴近压力"
+            else -> "处于区间 ${String.format(Locale.CHINA, "%.0f%%", (validPrice - validSupport) / (validResistance - validSupport) * 100)} 位置"
+        }
+        return "$numbers（现价 $location）"
+    }
+
+    private fun maStructureText(trend: TechnicalTrendSnapshot): String =
+        listOf(
+            "MA5" to trend.ma5,
+            "MA10" to trend.ma10,
+            "MA20" to trend.ma20,
+            "MA60" to trend.ma60,
+        ).filter { it.second.isFinite() && it.second > 0 }
+            .joinToString("｜") { "${it.first} ${String.format(Locale.CHINA, "%.2f", it.second)}" }
+            .ifEmpty { "暂缺" }
 
     private fun formatShares(value: Double): String =
         String.format(Locale.CHINA, "%.0f 股", value)
@@ -505,7 +680,8 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             "持有观察" -> "⚪"
             "持有/止盈观察" -> "🟡"
             "减仓风险" -> "🔴"
-            "趋势转弱观察", "等待" -> "⚫"
+            // NOTICE 缓释档的新 signal：破位但三项缓释，只提示不命令卖出，与转弱/等待同用观察色。
+            "趋势转弱观察", "破位提示", "等待" -> "⚫"
             else -> "⚪"
         }
 
@@ -527,7 +703,7 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                         "🔵" to "买入观察",
                         "⚪" to "持有观察",
                         "🟡" to "持有/止盈观察",
-                        "⚫" to "趋势转弱观察 / 等待",
+                        "⚫" to "趋势转弱观察 / 破位提示 / 等待",
                         "🔴" to "减仓风险",
                     ).forEach { (icon, label) ->
                         addView(

@@ -1,5 +1,6 @@
 package com.example.stockmonitor.analysis
 
+import com.example.stockmonitor.core.DayBar
 import kotlin.math.roundToInt
 import java.util.Locale
 
@@ -34,10 +35,21 @@ data class TechnicalAssessment(
  * PE/PB 不在这里重复计分，由独立估值/风险因子表达。
  */
 object TechnicalAssessmentPolicy {
+    /**
+     * 无持仓语境的统一技术建议：工具页卡片、完整报告与 AI 工具共用，
+     * 与持仓/自选的 [primaryAdvice] 同一口径——替换 [TechnicalResult.action] 那套
+     * score 四档的一句话模板（「技术面偏强：不建议追高…」不带任何价位数据）。
+     */
+    fun unifiedAdviceFor(result: TechnicalResult, history: List<DayBar>): String {
+        val cycles = MultiTimeframeTrend.evaluate(history, result.dataDate)
+        return evaluate(result, cycles.weekTrend, cycles.monthTrend).primaryAdvice
+    }
+
     fun evaluate(
         technical: TechnicalResult,
         weeklyTrend: SwingTrend,
         monthlyTrend: SwingTrend,
+        marketRegime: MarketRegime? = null,
     ): TechnicalAssessment {
         val trendPoints = trendPoints(technical, weeklyTrend, monthlyTrend)
         val structurePoints = structurePoints(technical)
@@ -85,6 +97,7 @@ object TechnicalAssessmentPolicy {
             weeklyTrend = weeklyTrend,
             monthlyTrend = monthlyTrend,
             normalDivergence = normalDivergence,
+            marketRegime = marketRegime,
         )
         val level = when {
             broken -> TechnicalAssessmentLevel.RISK
@@ -106,9 +119,8 @@ object TechnicalAssessmentPolicy {
                 if (broken) append("中出现破位或明确转弱，综合分已按风险规则封顶")
                 else if (hotRisk) append("尚可但短线过热或高位风险偏高，综合分已按风险规则封顶")
                 else append("与均线、量价和技术风险综合判断")
-                if (normalDivergence.level == NormalDivergenceLevel.NORMAL) {
-                    append("；${normalDivergence.reason}")
-                } else if (normalDivergence.level != NormalDivergenceLevel.MISSING) {
+                // 原先 NORMAL 与非 MISSING 两个分支追加的文本完全相同，合并为「非缺失即附注」。
+                if (normalDivergence.level != NormalDivergenceLevel.MISSING) {
                     append("；${normalDivergence.reason}")
                 }
             },
@@ -125,25 +137,51 @@ object TechnicalAssessmentPolicy {
         weeklyTrend: SwingTrend,
         monthlyTrend: SwingTrend,
         normalDivergence: NormalDivergenceDecision,
+        marketRegime: MarketRegime? = null,
     ): String {
         val price = formatPrice(technical.price)
         val support = formatPrice(technical.support)
         val resistance = formatPrice(technical.resistance)
+        val ma5 = formatPrice(technical.ma5)
         val ma20 = formatPrice(technical.ma20)
         val ma60 = formatPrice(technical.ma60)
         val nearSupport = technical.support > 0 && technical.price <= technical.support * 1.02
         val nearResistance = technical.resistance > 0 && technical.price >= technical.resistance * 0.98
         val trendText = "周K${weeklyTrend.label}、月K${monthlyTrend.label}"
+        val movingAverageTrend = MovingAverageTrendPolicy.evaluate(
+            price = technical.price,
+            ma5 = technical.ma5,
+            ma20 = technical.ma20,
+            ma60 = technical.ma60,
+        )
         return when {
             broken && technical.support > 0 && technical.price < technical.support ->
                 "减仓或退出：现价 $price 已跌破支撑 $support，先控制仓位；重新站稳后再评估是否接回。"
             technical.entrySetup.trendWeak ||
                 technical.trendAssessment?.major == MajorTrend.DOWN ||
-                technical.trendAssessment?.shortTerm == ShortTermTrend.DOWN ->
+                technical.trendAssessment?.shortTerm == ShortTermTrend.DOWN -> {
+                // 弱趋势不再只报两个均线数：带上现价距 MA20/支撑的百分比与量比，
+                // 让「暂不补仓」能看出是深跌未止还是贴近支撑蓄势。
+                val context = weakTrendContext(technical)
+                    .ifEmpty { "短线关键均线看 MA20（$ma20），趋势参考 MA60（$ma60）" }
                 if (weeklyTrend == SwingTrend.STABILIZING || monthlyTrend == SwingTrend.STABILIZING) {
-                    "暂不补仓：${trendText}出现下跌企稳迹象；短线关键均线看 MA20（$ma20），趋势参考 MA60（$ma60），等待连续站稳后再评估。"
+                    "暂不补仓：${trendText}出现下跌企稳迹象；$context，等待连续站稳后再评估。"
                 } else {
-                    "暂不补仓：${trendText}；短线关键均线看 MA20（$ma20），趋势参考 MA60（$ma60），等待重新站稳后再评估。"
+                    "暂不补仓：${trendText}；$context，等待重新站稳后再评估。"
+                }
+            }
+            movingAverageTrend == MovingAverageTrend.STRONG_BEARISH ->
+                "暂不补仓：${movingAverageTrend.label}，现价 $price 低于 MA5（$ma5）、MA20（$ma20）和 MA60（$ma60）；反弹优先看压力 $resistance，失守支撑 $support 时继续控制仓位。"
+            movingAverageTrend == MovingAverageTrend.MID_WEAK_SHORT_WEAK ->
+                "短中期均线偏弱：现价 $price 未站上 MA5（$ma5），MA20（$ma20）仍低于或贴近 MA60（$ma60）；不把反弹当加仓依据，先观察能否站回 MA20，支撑参考 $support。"
+            movingAverageTrend == MovingAverageTrend.SHORT_BULLISH_MID_WEAK ||
+                movingAverageTrend == MovingAverageTrend.SHORT_REBOUND_BELOW_MA20 ->
+                "短期反弹观察：${movingAverageTrend.label}，中期尚未转强；接近压力 $resistance 不追入，只有回踩支撑 $support 企稳并站上 MA20（$ma20）后再评估。"
+            movingAverageTrend == MovingAverageTrend.MID_BULLISH_SHORT_PULLBACK ->
+                if (nearSupport) {
+                    "中期持有、短期防守：MA20（$ma20）仍在 MA60（$ma60）上方，现价靠近支撑 $support；等待重新站上 MA5（$ma5）并确认承接，未确认前不追加仓位。"
+                } else {
+                    "中期趋势未破、短期正在回踩：MA20（$ma20）仍在 MA60（$ma60）上方；先等价格重新站上 MA5（$ma5），接近压力 $resistance 不追高。"
                 }
             normalDivergence.level == NormalDivergenceLevel.NORMAL &&
                 normalDivergence.line == NormalDivergenceLine.MA5 &&
@@ -157,19 +195,35 @@ object TechnicalAssessmentPolicy {
                 }
             technical.trendAssessment?.shortTerm == ShortTermTrend.RANGE ->
                 "持有观察：价格仍在区间内，压力 $resistance、支撑 $support 之间没有形成一致方向，不追高。"
-            score >= 70 && technical.trendAssessment?.allowsAddPosition == true ->
+            // 大盘塌陷期不因为个股强就给加仓类建议（口径同 PortfolioAnalysis 环境改写）：
+            // 塌陷初期一律暂缓补仓；个股自身出现企稳/反弹迹象（筑底或周月企稳）才允许
+            // 考虑小仓做T降成本——不是加仓，站稳 MA20 后再评估。
+            marketRegime == MarketRegime.COLLAPSE -> when {
+                technical.trendAssessment?.major == MajorTrend.BOTTOMING ||
+                    weeklyTrend == SwingTrend.STABILIZING || monthlyTrend == SwingTrend.STABILIZING ->
+                    "大盘塌陷、个股有企稳迹象：${trendText}；仅可考虑小仓做T降成本，不追加仓位，站稳 MA20（$ma20）后再评估。"
+                else ->
+                    "暂缓补仓：大盘处塌陷期，先控制仓位不加仓；等大盘企稳（站回 MA20）再评估做T与接回。"
+            }
+            score >= 70 && technical.trendAssessment?.allowsAddPosition == true &&
+                movingAverageTrend == MovingAverageTrend.STRONG_BULLISH ->
                 when {
                     technical.entrySetup.type != EntrySetupType.NONE &&
-                        technical.entrySetup.confirmed && technical.entrySetup.volumeConfirmed ->
-                        "可分批参与：${trendText}向上，突破/回踩结构和量价已确认；首次仓位宜轻，回踩不破支撑 $support 再加。"
+                        technical.entrySetup.confirmed &&
+                        technical.entrySetup.canBuy &&
+                        technical.entrySetup.volumeConfirmed ->
+                        "可分批参与：${trendText}向上，短中期均线多头排列，入场结构和量价已确认；首次仓位宜轻，回踩不破支撑 $support 再加。"
+                    technical.entrySetup.type != EntrySetupType.NONE &&
+                        technical.entrySetup.confirmed && !technical.entrySetup.canBuy ->
+                        "入场结构仅作观察：${technical.entrySetup.label}已确认，但当前规则不允许据此开仓；等待回踩支撑 $support 企稳或形成可买结构。"
                     technical.entrySetup.type != EntrySetupType.NONE ->
-                        "观察入场结构：${trendText}偏强，但突破/回踩尚未完成确认，等待确认后再分批。"
+                        "观察入场结构：${trendText}偏强，短中期均线多头排列，但突破/回踩尚未完成确认，等待确认后再分批。"
                     nearResistance ->
                         "等待突破确认：${trendText}偏强且接近压力 $resistance，站稳压力后再评估，不直接追入。"
                     nearSupport ->
                         "可小仓观察：${trendText}偏强且靠近支撑 $support，等回踩企稳和量能配合后再分批。"
                     else ->
-                        "可关注分批参与：${trendText}和量价基本配合，但入场结构尚未确认，先以小仓观察为主。"
+                        "可关注分批参与：${trendText}和短中期均线均配合，但入场结构尚未确认，先以小仓观察为主。"
                 }
             else ->
                 "持有观察：${trendText}与量价尚未形成高置信度入场条件，等待方向进一步确认。"
@@ -178,6 +232,31 @@ object TechnicalAssessmentPolicy {
 
     private fun formatPrice(value: Double): String =
         if (value.isFinite() && value > 0) String.format(Locale.CHINA, "%.2f", value) else "暂缺"
+
+    /** 弱趋势分支的位置上下文：现价距 MA20/MA60、距支撑的百分比与量比；数据缺失的部分自动省略。 */
+    private fun weakTrendContext(technical: TechnicalResult): String = buildString {
+        if (!technical.price.isFinite() || technical.price <= 0) return@buildString
+        val maRefs = buildList {
+            if (technical.ma20.isFinite() && technical.ma20 > 0) {
+                add("MA20（${formatPrice(technical.ma20)}）${distancePct(technical.price, technical.ma20)}")
+            }
+            if (technical.ma60.isFinite() && technical.ma60 > 0) {
+                add("MA60（${formatPrice(technical.ma60)}）${distancePct(technical.price, technical.ma60)}")
+            }
+        }
+        if (maRefs.isNotEmpty()) append("现价 ${formatPrice(technical.price)} 距 ${maRefs.joinToString("、")}")
+        if (technical.support.isFinite() && technical.support > 0 && technical.price >= technical.support) {
+            if (isNotEmpty()) append("，")
+            append("距支撑 ${formatPrice(technical.support)} ${distancePct(technical.price, technical.support)}")
+        }
+        technical.volumeRatio?.takeIf { it.isFinite() && it > 0 }?.let {
+            if (isNotEmpty()) append("，")
+            append(String.format(Locale.CHINA, "量比 %.2f", it))
+        }
+    }
+
+    private fun distancePct(price: Double, reference: Double): String =
+        String.format(Locale.CHINA, "%+.1f%%", (price / reference - 1) * 100)
 
     private fun trendPoints(
         technical: TechnicalResult,

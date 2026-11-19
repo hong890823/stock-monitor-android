@@ -10,6 +10,10 @@
         android:title="@string/alert_history_title"
         app:showAsAction="never" />
     <item
+        android:id="@+id/action_trade_history"
+        android:title="@string/trade_history_title"
+        app:showAsAction="never" />
+    <item
         android:id="@+id/action_refresh"
         android:title="@string/action_refresh"
         app:showAsAction="never" />

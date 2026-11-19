@@ -1,8 +1,10 @@
 package com.example.stockmonitor.analysis
 
+import com.example.stockmonitor.core.NewsItem
 import com.example.stockmonitor.core.Portfolio
 import com.example.stockmonitor.core.Position
 import com.example.stockmonitor.core.Quote
+import com.example.stockmonitor.core.TradeBook
 import java.time.LocalDate
 import java.util.Locale
 import kotlin.math.abs
@@ -23,9 +25,12 @@ import kotlin.math.abs
  *
  * **缺数据写「暂缺 / 未计入」，绝不写 0**，不把「没行情」显示成「没亏没赚」。
  *
- * **利好与利空都只看近两日、且按交易日回溯**（见 [recentPositives] / [recentNegatives]）：
+ * **第三节分两类来源**：
+ * - 交易所公告只看近两日、且按交易日回溯（见 [recentPositives] / [recentNegatives]）；
+ * - 华尔街见闻仅取「只看重要」（`score=2`）的媒体快讯，按真实持仓名称或代码本地匹配。
+ *
  * 窗口是「上一交易日 → 今天」，周末/长假挂出的公告跟着上一交易日一起收；
- * 再往前的消息多半已兑现进股价，列出来是误导。只收「真」利好/真利空，口径同 [EventCoil]。
+ * 再往前的消息多半已兑现进股价，列出来是误导。公告只收「真」利好/真利空，口径同 [EventCoil]。媒体快讯不推断利好或利空。
  *
  * 章节标题必须以中文数字开头（`ReportSectionAssertions` 的正则 `^[一二三四五六七八九十]+、`），
  * emoji 放在数字后面；每节最后一行顶格写「结论：」。
@@ -58,24 +63,6 @@ object DailyReview {
         val vsIndexPp: Double?,
     )
 
-    /** 操作优先级分层。顺序就是「轻重缓急」的顺序。 */
-    enum class PriorityTier(val title: String) {
-        ACT_NOW("P1 今日必须复核"),
-        TREND_WATCH("P2 趋势转弱，暂缓加仓"),
-        TAKE_PROFIT_WATCH("P3 止盈 / 过热"),
-        HOLD("P4 今天不要动"),
-        WAIT_ENTRY("P5 等待位置"),
-    }
-
-    data class PriorityItem(
-        val result: PositionResult,
-        val tier: PriorityTier,
-        /** 这一层里为什么点它，一句话。 */
-        val reason: String,
-        /** 当日盈亏（较昨收）；无行情时为 null。 */
-        val dayPnl: Double?,
-    )
-
     data class Inputs(
         val positions: List<Position>,
         /** 与 [positions] 同一时点的实时行情，缺行情的代码不出现即可。 */
@@ -100,11 +87,22 @@ object DailyReview {
          */
         val recentAnnouncements: Map<String, List<Announcement>> = emptyMap(),
         /**
+         * 华尔街见闻 7×24「只看重要」快讯。由持仓复盘每次生成时一次性获取，再按持仓本地匹配。
+         * 它是媒体线索，绝不写入公告缓存或参与 [EventCoil] 的利好/利空分类。
+         */
+        val wallstreetcnImportantNews: List<NewsItem> = emptyList(),
+        /** 快讯请求是否已完成。false 表示没有发起或无法确认状态，不能写成“没有相关新闻”。 */
+        val wallstreetcnNewsLoaded: Boolean = false,
+        /** 快讯接口失败说明；有值时报告继续生成并明确标注数据暂缺。 */
+        val wallstreetcnNewsError: String? = null,
+        /**
          * 交易日期（如指数日线的日期表）。利好窗口要回溯到上一交易日——周一复盘时
          * 「今天+昨天」会漏掉周五盘后和周末的公告。缺表时退回自然日两天。
          */
         val tradingDates: List<String> = emptyList(),
-        /** 今日新增买入批次；今日盈亏按这些股份的买入成本计算，不沿用昨收。 */
+        /** 完整交易账本；真实成交用于账户今日盈亏，手工调整会明确降级。 */
+        val tradeBook: TradeBook = TradeBook(),
+        /** 保留兼容已有调用；当前持仓今日盈亏已统一按昨收，不再使用该字段。 */
         val todayAcquisitions: Map<String, DayPnl.Acquisition> = emptyMap(),
     )
 
@@ -174,58 +172,6 @@ object DailyReview {
         )
     }
 
-    /**
-     * 操作优先级分层。只按 [PositionResult.signal] 分层、用涨跌幅/距压力/量价辅助排序，
-     * **不重新实现信号判定**——信号该是什么已经在 [PortfolioAnalysis.evaluate] 里定了。
-     *
-     * 观察股（数量 0）没有仓位，一律进「等待位置」，不会出现在「今天不要动」里
-     * （那句话的意思是「你手上这只今天不用动」）。
-     */
-    fun prioritize(results: List<PositionResult>, dayPnlRows: List<DayPnl.Row> = emptyList()): List<PriorityItem> {
-        val pnlByCode = dayPnlRows.associate { it.code to it.pnl }
-        val items = results.map { result ->
-            val dayPnl = pnlByCode[result.code]
-            val holding = result.quantity > 0
-            val nearResistance = result.resistance > 0 && result.price > 0 &&
-                (result.resistance / result.price - 1) * 100 <= 2.0
-            val tier = when {
-                result.signal == "减仓风险" -> PriorityTier.ACT_NOW
-                result.signal == "趋势转弱观察" -> PriorityTier.TREND_WATCH
-                result.signal == "持有/止盈观察" -> PriorityTier.TAKE_PROFIT_WATCH
-                !holding -> PriorityTier.WAIT_ENTRY
-                result.signal == "持有观察" && result.changePct >= 5.0 && nearResistance ->
-                    PriorityTier.TAKE_PROFIT_WATCH
-                result.signal == "持有观察" && result.volumeSignal.tone == Tone.CAUTION ->
-                    PriorityTier.TAKE_PROFIT_WATCH
-                result.signal == "持有观察" -> PriorityTier.HOLD
-                else -> PriorityTier.WAIT_ENTRY
-            }
-            PriorityItem(result, tier, tierReason(result, tier, nearResistance), dayPnl)
-        }
-        // 层内排序：P1 按当日亏损从大到小（最该看的先看），P3 按当日涨幅从大到小。
-        return items.sortedWith(
-            compareBy<PriorityItem> { it.tier.ordinal }.thenBy { item ->
-                when (item.tier) {
-                    PriorityTier.ACT_NOW -> item.dayPnl ?: 0.0
-                    PriorityTier.TAKE_PROFIT_WATCH -> -(item.result.changePct.takeIf { it.isFinite() } ?: 0.0)
-                    else -> 0.0
-                }
-            },
-        )
-    }
-
-    private fun tierReason(result: PositionResult, tier: PriorityTier, nearResistance: Boolean): String = when (tier) {
-        PriorityTier.ACT_NOW -> "跌破支撑 ${priceText(result.support)}，破位是风险事件"
-        PriorityTier.TREND_WATCH -> "趋势转弱，暂缓加仓；深套不盲目补仓"
-        PriorityTier.TAKE_PROFIT_WATCH -> when {
-            result.signal == "持有/止盈观察" -> "突破确认，持有同时防短线过热"
-            result.changePct >= 5.0 && nearResistance -> "当日涨幅已大且逼近压力，防冲高回落"
-            else -> "量价偏警示（${VolumePrice.tag(result.volumeSignal)}）"
-        }
-        PriorityTier.HOLD -> "持有观察，无须动作"
-        PriorityTier.WAIT_ENTRY -> if (result.signal == "买入观察") "进入买入观察" else "仍等待"
-    }
-
     /** 生成整篇复盘。持仓为空时给一句说明，而不是空壳章节。 */
     fun generate(inputs: Inputs): String {
         if (inputs.positions.isEmpty()) {
@@ -239,13 +185,12 @@ object DailyReview {
             ).joinToString("\n")
         }
 
-        val dayPnl = DayPnl.summarize(
-            inputs.positions,
-            inputs.quotes,
-            inputs.todayAcquisitions,
+        val dayPnl = DayPnl.summarize(inputs.positions, inputs.quotes)
+        val reviewDate = inputs.analyzedAt.substringBefore(' ')
+        val accountPnl = DayPnl.accountSummary(
+            inputs.positions, inputs.quotes, inputs.tradeBook, reviewDate,
         )
         val aggregates = aggregate(inputs.positions, dayPnl, inputs.portfolio, inputs.indexQuote, inputs.results)
-        val reviewDate = inputs.analyzedAt.substringBefore(' ')
 
         return buildString {
             appendLine("📊 ${titleDate(inputs.analyzedAt)} 持仓复盘")
@@ -254,11 +199,10 @@ object DailyReview {
                     "浮盈浮亏为较成本口径，两者不混用"
             )
             appendLine()
-            PortfolioAnalysis.highestPriorityAction(inputs.results)?.let { appendLine(it) }
             appendLine("持仓整体操作建议")
-            PortfolioAnalysis.overallAdvice(inputs.results).forEach { appendLine("· $it") }
+            reviewOverallAdvice(inputs.results).forEach { appendLine("· $it") }
             append(separator())
-            append(attributionSection(dayPnl))
+            append(attributionSection(dayPnl, accountPnl, inputs))
             append(separator())
             append(healthSection(dayPnl, aggregates, inputs))
             append(separator())
@@ -282,6 +226,33 @@ object DailyReview {
         }
     }
 
+    /**
+     * 复盘顶部只保留需要处理的真实风险，避免把“风险核实”、正常持有和深套通用提示逐股重复。
+     * 基本面红灯仍会按实际 [PriorityState.WATCH] 出现，但必须带具体原因，不能只罗列股票名。
+     */
+    private fun reviewOverallAdvice(results: List<PositionResult>): List<String> {
+        val risks = PortfolioAnalysis.priorityOrdered(results)
+            .map { result -> result to PortfolioAnalysis.priorityDecision(result) }
+            .filter { (_, decision) -> decision.state in setOf(PriorityState.EXIT, PriorityState.REDUCE, PriorityState.WATCH) }
+        if (risks.isEmpty()) {
+            return listOf("当前没有已确认的持仓风险；维持原有仓位，下一交易日继续核对行情和公告。")
+        }
+        val urgent = risks.filter { (_, decision) -> decision.state in setOf(PriorityState.EXIT, PriorityState.REDUCE) }
+        val observing = risks.filter { (_, decision) -> decision.state == PriorityState.WATCH }
+        return buildList {
+            if (urgent.isNotEmpty()) {
+                add("优先处理：" + urgent.joinToString("；") { (result, decision) ->
+                    "『${result.name}』${decision.state.label}，${decision.reason}"
+                })
+            }
+            if (observing.isNotEmpty()) {
+                add("风险观察：" + observing.joinToString("；") { (result, decision) ->
+                    "『${result.name}』${decision.reason}"
+                })
+            }
+        }
+    }
+
     private fun strongContinuationSection(events: List<StrongContinuationEvent>): String = buildString {
         appendLine("四、📈 强势环境暂缓做T记录")
         appendLine("量能、市场和板块环境同时偏强时，记录为继续观察；后续价格变化仅用于复盘，不代表必然上涨。")
@@ -302,6 +273,45 @@ object DailyReview {
         val title: String,
         val positive: Boolean,
     )
+
+    /** 一条按真实持仓名称或代码本地匹配到的华尔街见闻重要快讯。 */
+    data class HeldNews(
+        val name: String,
+        val code: String,
+        val publishedAtMs: Long,
+        val title: String,
+        val source: String,
+        val url: String?,
+    )
+
+    /**
+     * 媒体快讯只作为待核查线索，匹配不等同于交易所公告，也不推断其利好或利空方向。
+     * 名称和六码代码都在本地比对，避免为每只持仓重复请求同一个公共快讯接口。
+     */
+    fun recentHeldNews(positions: List<Position>, news: List<NewsItem>): List<HeldNews> =
+        positions.filter { it.quantity.isFinite() && it.quantity > 0 }
+            .flatMap { position ->
+                val name = normalizeNewsText(position.name)
+                val code = position.code.takeLast(6)
+                news.mapNotNull { item ->
+                    val text = normalizeNewsText("${item.title} ${item.rawCategory.orEmpty()}")
+                    val matchesName = name.length >= 2 && text.contains(name)
+                    val matchesCode = code.length == 6 && text.contains(code)
+                    if (!matchesName && !matchesCode) null else HeldNews(
+                        name = position.name,
+                        code = position.code,
+                        publishedAtMs = item.publishedAtMs,
+                        title = item.title,
+                        source = item.source,
+                        url = item.url,
+                    )
+                }
+            }
+            .distinctBy { it.code to (it.url ?: it.title) }
+            .sortedByDescending { it.publishedAtMs }
+
+    private fun normalizeNewsText(value: String): String =
+        value.lowercase(Locale.CHINA).replace(Regex("[\\s\\p{Punct}，。！？；：、“”‘’（）【】《》]+"), "")
 
     /** 近两日真利好清单（窗口与「真」的口径见 [recentEvents]）。 */
     fun recentPositives(
@@ -376,8 +386,9 @@ object DailyReview {
         val holdings = inputs.positions.filter { it.quantity.isFinite() && it.quantity > 0 }
         // 公告没拉到 ≠ 没有消息：Repo.publishAnnouncements 空清单不落库，containsKey 才算「看过」。
         val announced = holdings.count { inputs.recentAnnouncements.containsKey(it.code) }
+        val headlines = recentHeldNews(holdings, inputs.wallstreetcnImportantNews)
         val lines = mutableListOf<String>()
-        lines.add("三、🔔 近两日个股利好与利空")
+        lines.add("三、📰 近日要闻（持仓相关）")
         val cutoff = recentCutoff(today, inputs.tradingDates) ?: today
         val yesterday = runCatching { LocalDate.parse(today).minusDays(1).toString() }.getOrNull()
         val windowNote = if (yesterday != null && cutoff < yesterday) {
@@ -385,16 +396,15 @@ object DailyReview {
         } else {
             "（今天与昨天）"
         }
-        lines.add(
-            "只列 $cutoff 以来的真利好/真利空公告$windowNote；" +
-                "更早的可能已兑现进股价，不再列出。"
-        )
+        lines.add("交易所公告只列 $cutoff 以来的真利好/真利空$windowNote；华尔街见闻仅列近两自然日按持仓名称或代码匹配的“只看重要”快讯。")
         lines.add("")
+
         when {
-            holdings.isEmpty() -> lines.add("没有持仓，本节不适用。")
-            announced == 0 -> lines.add("公告数据暂缺（还没拉到公告清单），近两日是否有利好利空无法判断。")
-            positives.isEmpty() && negatives.isEmpty() -> lines.add("近两日没有命中利好或利空的公告。")
+            holdings.isEmpty() -> lines.add("持仓为空，本节不适用。")
+            announced == 0 -> lines.add("交易所公告：数据暂缺（还没拉到公告清单），是否有利好利空无法判断，不等于没有消息。")
+            positives.isEmpty() && negatives.isEmpty() -> lines.add("交易所公告：近两日未出现按既定口径识别的重大利好或重大利空。")
             else -> {
+                lines.add("交易所公告：")
                 if (positives.isNotEmpty()) {
                     lines.add("重大利好：")
                     positives.forEach {
@@ -409,29 +419,50 @@ object DailyReview {
                 }
             }
         }
-        lines.add(
-            "结论：" + when {
-                holdings.isEmpty() -> "没有持仓，本节不适用。"
-                announced == 0 -> "公告暂缺，消息面未知，不等于没有消息。"
-                positives.isEmpty() && negatives.isEmpty() -> "近两日无利好/利空消息面变化。"
-                else -> {
-                    val counts = mutableListOf<String>()
-                    if (positives.isNotEmpty()) counts.add("利好 ${positives.size} 条")
-                    if (negatives.isNotEmpty()) counts.add("利空 ${negatives.size} 条")
-                    "以上为近两日的真利好/真利空（${counts.joinToString("、")}），消息面较新；" +
-                        "消息不等于股价必涨跌，市场是否认账仍看量价。"
+
+        lines.add("")
+        when {
+            !inputs.wallstreetcnNewsError.isNullOrBlank() ->
+                lines.add("华尔街见闻重要快讯：暂缺（${inputs.wallstreetcnNewsError}）。")
+            !inputs.wallstreetcnNewsLoaded ->
+                lines.add("华尔街见闻重要快讯：本次未获取，不能据此判断是否存在相关消息。")
+            headlines.isEmpty() ->
+                lines.add("华尔街见闻重要快讯：近两自然日未按持仓名称或代码匹配到快讯；这不代表没有相关事件。")
+            else -> {
+                lines.add("华尔街见闻重要快讯（本地关键词匹配，score=2，非交易所公告）：")
+                headlines.take(MAX_HELD_NEWS).forEach { headline ->
+                    lines.add(
+                        "· 『${headline.name}』${formatHeldNewsTime(headline.publishedAtMs)}｜${headline.title}" +
+                            (headline.url?.let { "｜$it" } ?: ""),
+                    )
                 }
             }
+        }
+
+        lines.add(
+            "结论：交易所公告与媒体快讯已分开列示；公告的重大利好/利空按固定规则识别，" +
+                "华尔街见闻快讯仅作事件核查线索，不单独推断股价方向。",
         )
         return lines.joinToString("\n")
     }
+
+    private fun formatHeldNewsTime(timestampMs: Long): String =
+        java.text.SimpleDateFormat("MM-dd HH:mm", Locale.CHINA)
+            .apply { timeZone = java.util.TimeZone.getTimeZone("Asia/Shanghai") }
+            .format(java.util.Date(timestampMs))
+
+    private const val MAX_HELD_NEWS = 8
 
     /** 章节之间的分隔：空行 + `---` + 空行，与盘面总结同一排版。 */
     private fun separator(): String = "\n\n---\n\n"
 
     // ── 一、盈亏归因（较昨收） ────────────────────────────────────────────────
 
-    private fun attributionSection(dayPnl: DayPnl.Summary): String {
+    private fun attributionSection(
+        dayPnl: DayPnl.Summary,
+        accountPnl: DayPnl.AccountSummary,
+        inputs: Inputs,
+    ): String {
         val lines = mutableListOf<String>()
         lines.add("一、💰 盈亏归因（今天赚/亏的钱从哪来）")
         lines.add("")
@@ -443,12 +474,33 @@ object DailyReview {
             return lines.joinToString("\n")
         }
 
-        lines.add(
-            "合计：今日盈亏 ${ReportMarkup.red(DayPnl.money(dayPnl.totalPnl) + " 元")}" +
-                "（较昨日市值 ${DayPnl.pct(totalPct)}）" +
-                "｜持仓市值 ${DayPnl.amount(dayPnl.marketValue)} 元" +
-                "｜昨日市值 ${DayPnl.amount(dayPnl.prevMarketValue)} 元"
-        )
+        val accountText = DayPnl.accountSummaryText(accountPnl)
+        if (accountText != null && (
+                accountPnl.realizedPnl != 0.0 || accountPnl.fees != 0.0 ||
+                    accountPnl.holdingsPnl != dayPnl.totalPnl
+            )
+        ) {
+            lines.add("账户合计：${ReportMarkup.red(accountText)}")
+            lines.add(
+                "当前持仓归因：${DayPnl.money(dayPnl.totalPnl)} 元" +
+                    "（较昨日市值 ${DayPnl.pct(dayPnl.totalPct ?: 0.0)}）" +
+                    "｜持仓市值 ${DayPnl.amount(dayPnl.marketValue)} 元",
+            )
+        } else if (accountPnl.complete) {
+            lines.add(
+                "合计：今日盈亏 ${ReportMarkup.red(DayPnl.money(dayPnl.totalPnl) + " 元")}" +
+                    "（较昨日市值 ${DayPnl.pct(totalPct)}）" +
+                    "｜持仓市值 ${DayPnl.amount(dayPnl.marketValue)} 元" +
+                    "｜昨日市值 ${DayPnl.amount(dayPnl.prevMarketValue)} 元"
+            )
+        } else {
+            lines.add(
+                "当前持仓：今日盈亏 ${ReportMarkup.red(DayPnl.money(dayPnl.totalPnl) + " 元")}" +
+                    "（较昨日市值 ${DayPnl.pct(totalPct)}）" +
+                    "｜持仓市值 ${DayPnl.amount(dayPnl.marketValue)} 元"
+            )
+            lines.add("账户今日盈亏：数据不足（${accountPnl.reasons.joinToString("；")}）")
+        }
         if (dayPnl.missing > 0) {
             lines.add("另有 ${dayPnl.missing} 只无行情未计入，归因只覆盖能算的 ${dayPnl.counted} 只。")
         }
@@ -482,8 +534,9 @@ object DailyReview {
 
         val narrative = attributionNarrative(dayPnl, profitRows, lossRows, grossProfit, grossLoss)
         lines.add(narrative.first)
-        lines.add("本节金额均为较昨收的日内浮动；较成本的持仓浮盈浮亏见第二节。")
-        lines.add("结论：${narrative.second}")
+        // 口径说明并入结论行：结论是跳读层（只读各节「结论：」能拼出全报告），单独占一行
+        // 只会让「结论」紧跟叙述复读同一件事。
+        lines.add("结论：${narrative.second}（本节金额均为较昨收的日内浮动，较成本的持仓浮盈浮亏见第二节）")
         return lines.joinToString("\n")
     }
 
@@ -529,7 +582,9 @@ object DailyReview {
                 share >= 60.0 ->
                     "今天赚的钱主要来自『${topProfit.name}』一只（${moneyYuan(topProfit.pnl!!)}，" +
                         "占今日盈利 ${String.format(Locale.CHINA, "%.0f%%", share)}）" +
-                        "；其余 ${profitRows.size - 1} 只合计 ${moneyYuan(rest)}。"
+                        // rest 金额 = 合计 − 主力，覆盖其余全部被计入的持仓（含亏损股的拖累），
+                        // 只数不能只数盈利股，否则「其余N只」与金额对不上。
+                        "；其余 ${dayPnl.counted - 1} 只合计 ${moneyYuan(rest)}。"
                 profitRows.size >= 3 && share < 30.0 ->
                     "今天盈利较分散：" + profitRows.take(3).joinToString("、") { "${it.name} ${moneyYuan(it.pnl!!)}" } +
                         "，没有单一主力。"
@@ -686,7 +741,18 @@ object DailyReview {
             )
         }
         if (aggregates.deepLossCount > 0) {
-            risks.add("${aggregates.deepLossCount} 只按波动率口径已属深套（较成本），不要在破位处割肉摊成本")
+            // 复盘是行动清单：只给数量不给名单就没法逐只核对；判定与 aggregate 完全同源。
+            val deepNames = inputs.positions
+                .filter { it.quantity > 0 }
+                .mapNotNull { position ->
+                    val row = dayPnl.rows.firstOrNull { it.code == position.code } ?: return@mapNotNull null
+                    val atrPct = inputs.results.firstOrNull { it.code == position.code }?.volatility?.atrPct
+                    if (DeepLossPolicy.isDeepLoss(position.cost, row.price, atrPct)) position.name else null
+                }
+                .joinToString("、")
+            risks.add(
+                "${aggregates.deepLossCount} 只按波动率口径已属深套（较成本）：$deepNames，不要在破位处割肉摊成本",
+            )
         }
         val vs = aggregates.vsIndexPp
         if (vs != null && vs <= -0.5) {
@@ -731,7 +797,6 @@ object DailyReview {
         return if (parts.size >= 3) "${parts[1]}.${parts[2]}" else date
     }
 
-    private fun priceText(value: Double): String = String.format(Locale.CHINA, "%.2f", value)
 
     /** 散文里的金额：带单位。表格列头已经写了「今日盈亏」，格子里就不用再带「元」。 */
     private fun moneyYuan(value: Double): String = DayPnl.money(value) + " 元"

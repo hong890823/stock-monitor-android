@@ -16,6 +16,12 @@ data class FiveOneThreeHit(
     val progress: String,
     val detail: String,
     val gain60Pct: Double,
+    /** 最新收盘价在近60日高低区间中的位置，0% 为区间低点、100% 为区间高点。 */
+    val rangePositionPct: Double = Double.NaN,
+    /** 与指标两档、趋势精选共用的统一技术分；旧缓存缺失时保持中性兜底。 */
+    val technicalScore: Int = 40,
+    val weeklyTrendLabel: String = "数据不足",
+    val monthlyTrendLabel: String = "数据不足",
 )
 
 data class FiveOneThreeInspection(
@@ -46,7 +52,7 @@ object FiveOneThreeScreener {
         if (completed.size < MIN_HISTORY_DAYS) {
             return FiveOneThreeInspection(false, false, false, null)
         }
-        if (name.contains("ST", ignoreCase = true)) {
+        if (name.contains("ST", ignoreCase = true) || !hasMinimumLiquidity(completed)) {
             return FiveOneThreeInspection(true, false, false, null)
         }
 
@@ -87,6 +93,7 @@ object FiveOneThreeScreener {
                     stage = FiveOneThreeStage.OBSERVING,
                     confirmations = 0,
                     gain60Pct = gain60Pct,
+                    rangePositionPct = position * 100.0,
                 )
             }
 
@@ -115,6 +122,7 @@ object FiveOneThreeScreener {
                 stage = stage,
                 confirmations = confirmations,
                 gain60Pct = gain60Pct,
+                rangePositionPct = position * 100.0,
             )
         }
         return candidates.lastOrNull()
@@ -127,6 +135,7 @@ object FiveOneThreeScreener {
         stage: FiveOneThreeStage,
         confirmations: Int,
         gain60Pct: Double,
+        rangePositionPct: Double,
     ): FiveOneThreeHit = FiveOneThreeHit(
         code = code,
         name = name,
@@ -139,6 +148,7 @@ object FiveOneThreeScreener {
         },
         detail = "5连阳 5/5｜倍量阳 ${if (stage == FiveOneThreeStage.OBSERVING) 0 else 1}/1｜缩量确认 $confirmations/3",
         gain60Pct = gain60Pct,
+        rangePositionPct = rangePositionPct,
     )
 
     private fun isFiveBullish(bars: List<DayBar>, end: Int): Boolean {
@@ -156,6 +166,10 @@ object FiveOneThreeScreener {
                 bar.close <= bar.open || gain < MIN_SINGLE_GAIN || gain > MAX_SINGLE_GAIN ||
                     bar.volume > baseline * MAX_OBSERVATION_VOLUME_RATIO
             }) return false
+        if (five.withIndex().any { (offset, bar) ->
+                val previousClose = if (offset == 0) bars[start - 1].close else five[offset - 1].close
+                bar.close <= previousClose
+            }) return false
         if (five.map { it.volume }.average() < baseline * MIN_OBSERVATION_VOLUME_RATIO) return false
         return five.withIndex().all { (offset, bar) ->
             val index = start + offset
@@ -167,7 +181,9 @@ object FiveOneThreeScreener {
     private fun isDoubleVolumeBullish(bars: List<DayBar>, index: Int): Boolean {
         if (index <= 0 || index >= bars.size) return false
         val bar = bars[index]
-        if (bar.close <= bar.open || bar.volume < bars[index - 1].volume * DOUBLE_VOLUME_RATIO) return false
+        if (bar.close <= bar.open || bar.close <= bars[index - 1].close ||
+            bar.volume < bars[index - 1].volume * DOUBLE_VOLUME_RATIO
+        ) return false
         if (bar.close < movingAverage(bars, index, MOVING_AVERAGE_DAYS)) return false
         return (bar.high - bar.close) / bar.high.coerceAtLeast(bar.close) <= MAX_PULLBACK_RATIO
     }
@@ -189,6 +205,15 @@ object FiveOneThreeScreener {
         return bars.subList(start, end + 1).map { it.close }.average()
     }
 
+    /** 用收盘价×成交量近似成交额；20 日均额不足 5000 万时，形态再漂亮也不适合作为可执行短线候选。 */
+    private fun hasMinimumLiquidity(bars: List<DayBar>): Boolean {
+        val recent = bars.takeLast(LIQUIDITY_AVERAGE_DAYS)
+        if (recent.size < LIQUIDITY_AVERAGE_DAYS) return false
+        val amounts = recent.map { it.close * it.volume }
+        if (amounts.any { !it.isFinite() || it <= 0.0 }) return false
+        return amounts.average() >= MIN_AVG_TURNOVER_YUAN
+    }
+
     private const val MIN_HISTORY_DAYS = 60
     private const val FIVE_DAYS = 5
     private const val CONFIRMATION_DAYS = 3
@@ -203,6 +228,8 @@ object FiveOneThreeScreener {
     private const val DOUBLE_VOLUME_RATIO = 2.0
     private const val MAX_PULLBACK_RATIO = 0.06
     private const val MAX_CONFIRMATION_AMPLITUDE = 0.05
+    private const val LIQUIDITY_AVERAGE_DAYS = 20
+    private const val MIN_AVG_TURNOVER_YUAN = 50_000_000.0
 
     /** 信号日（含确认）距最新完整交易日超过这个天数，形态不再列出。 */
     private const val MAX_PATTERN_AGE_DAYS = 3

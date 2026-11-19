@@ -27,12 +27,13 @@ data class HeadlineScore(
     val focus: Int = 0,
     val event: Int = 0,
     val trust: Int = 0,
+    val sourcePreference: Int = 0,
     val corroboration: Int = 0,
     val freshness: Int = 0,
     val penalty: Int = 0,
 ) {
     val total: Int
-        get() = focus + event + trust + corroboration + freshness - penalty
+        get() = focus + event + trust + sourcePreference + corroboration + freshness - penalty
 }
 
 data class SelectedHeadline(
@@ -93,7 +94,7 @@ object HeadlineSelector {
 
     fun formatReport(items: List<SelectedHeadline>, updatedAtMs: Long): String = buildString {
         appendLine("今日要闻｜更新时间：${formatTime(updatedAtMs)}")
-        appendLine("综合评分顺序：持仓/观察池关联 > 可投资事件 > 来源可信度 > 多源交叉 > 新鲜度。")
+        appendLine("综合评分顺序：持仓/观察池关联 > 可投资事件 > 首选来源 > 来源可信度 > 多源交叉 > 新鲜度。")
         appendLine("来源与发布时间按接口返回展示；分类与评分不代表确定的利好或利空方向。")
         appendLine()
         if (items.isEmpty()) {
@@ -127,6 +128,7 @@ object HeadlineSelector {
         candidates.sortedWith(
             compareByDescending<SelectedHeadline> { focusScore(it.item, focus) }
                 .thenByDescending { eventScore(it.item) }
+                .thenByDescending { it.item.sourcePriority }
                 .thenByDescending { it.item.trustScore }
                 .thenByDescending { it.item.publishedAtMs },
         ).forEach { candidate ->
@@ -152,6 +154,7 @@ object HeadlineSelector {
         val representative = clusterItems.maxWithOrNull(
             compareByDescending<SelectedHeadline> { focusScore(it.item, focus) }
                 .thenByDescending { eventScore(it.item) }
+                .thenByDescending { it.item.sourcePriority }
                 .thenByDescending { it.item.trustScore }
                 .thenByDescending { it.item.publishedAtMs },
         ) ?: clusterItems.first()
@@ -160,6 +163,7 @@ object HeadlineSelector {
             focus = focusScore(representative.item, focus),
             event = eventScore(representative.item),
             trust = (representative.item.trustScore.coerceIn(0, 100) * TRUST_WEIGHT / 100),
+            sourcePreference = (representative.item.sourcePriority.coerceIn(0, 100) * SOURCE_PREFERENCE_WEIGHT / 100),
             corroboration = ((supportingSources.size - 1).coerceAtLeast(0) * CORROBORATION_STEP)
                 .coerceAtMost(MAX_CORROBORATION),
             freshness = freshnessScore(representative.item.publishedAtMs, nowMs),
@@ -282,6 +286,8 @@ object HeadlineSelector {
     private const val THEME_SCORE = 30
     private const val MATERIAL_EVENT_SCORE = 25
     private const val TRUST_WEIGHT = 25
+    /** 首选来源仅用于同等相关性事件排序，不覆盖持仓关联或实质事件权重。 */
+    private const val SOURCE_PREFERENCE_WEIGHT = 15
     private const val CORROBORATION_STEP = 10
     private const val MAX_CORROBORATION = 30
     private const val PROMOTION_PENALTY = 45

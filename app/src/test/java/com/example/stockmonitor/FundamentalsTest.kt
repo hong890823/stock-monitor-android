@@ -40,6 +40,7 @@ class FundamentalsTest {
     ) = FinancialPeriod(date, revenue, cost, net, deduct, ocf, sales, capex)
 
     private fun sheet(
+        date: String = "2026-06-30",
         totalAssets: Double = 1000.0,
         monetaryFunds: Double = 100.0,
         shortLoan: Double = 0.0,
@@ -47,12 +48,15 @@ class FundamentalsTest {
         goodwill: Double = 0.0,
         otherReceivable: Double = 0.0,
         parentEquity: Double = 500.0,
+        accountsReceivable: Double = 100.0,
+        inventory: Double = 100.0,
+        contractLiabilities: Double? = null,
     ) = BalanceSheetSnapshot(
-        date = "2026-06-30",
+        date = date,
         monetaryFunds = monetaryFunds,
-        accountsReceivable = 100.0,
+        accountsReceivable = accountsReceivable,
         otherReceivable = otherReceivable,
-        inventory = 100.0,
+        inventory = inventory,
         goodwill = goodwill,
         shortLoan = shortLoan,
         longLoan = longLoan,
@@ -62,6 +66,7 @@ class FundamentalsTest {
         totalLiabilities = totalAssets - parentEquity,
         parentEquity = parentEquity,
         minorityEquity = 0.0,
+        contractLiabilities = contractLiabilities,
     )
 
     private fun valuations(pe: List<Double>, pb: List<Double> = emptyList()): List<ValuationPoint> =
@@ -76,6 +81,7 @@ class FundamentalsTest {
     private fun input(
         periods: List<FinancialPeriod>,
         balance: BalanceSheetSnapshot? = sheet(),
+        balanceHistory: List<BalanceSheetSnapshot> = emptyList(),
         valuations: List<ValuationPoint> = emptyList(),
         peers: com.example.stockmonitor.analysis.PeerContext? = null,
         mainBusiness: List<MainBusinessItem> = emptyList(),
@@ -87,6 +93,7 @@ class FundamentalsTest {
     ) = Fundamentals.Input(
         periods = periods,
         balance = balance,
+        balanceHistory = balanceHistory,
         valuations = valuations,
         totalShares = shares,
         price = price,
@@ -855,6 +862,44 @@ class FundamentalsTest {
         val report = FundamentalsReport.format("测试股", "sh600000", 20.0, "2026-09-24 12:00", result)
         // 基本面固定十三节；「十二、口径提醒」只在真的有口径问题时才出现，所以只要求不少于十二节。
         ReportSectionAssertions.assertEverySectionHasConclusion(report, leastSections = 12)
+    }
+
+    @Test
+    fun reportExplainsFinancialQualityThresholdsAndPositiveEvidence() {
+        val previous = sheet(
+            date = "2024-12-31",
+            accountsReceivable = 100.0,
+            inventory = 100.0,
+            contractLiabilities = 100.0,
+        )
+        val latest = sheet(
+            date = "2025-12-31",
+            totalAssets = 1000.0,
+            accountsReceivable = 180.0,
+            inventory = 300.0,
+            contractLiabilities = 300.0,
+        )
+        val result = Fundamentals.analyze(
+            input(
+                periods = listOf(
+                    p("2024-12-31", revenue = 1000.0, net = 100.0, deduct = 60.0, ocf = 40.0),
+                    p("2025-12-31", revenue = 1200.0, net = 100.0, deduct = 60.0, ocf = 30.0),
+                ),
+                balance = latest,
+                balanceHistory = listOf(previous, latest),
+                announcements = listOf(Announcement("2025-10-01", "签订重大订单并完成交付")),
+            ),
+        )
+
+        val report = FundamentalsReport.format("测试股", "sh600000", 20.0, "2026-09-24 12:00", result)
+
+        assertTrue(report.contains("财务质量细项（新增规则）"))
+        assertTrue(report.contains("连续两年低于 0.5"))
+        assertTrue(report.contains("低于 0.7"))
+        assertTrue(report.contains("存货达到营收增速 2 倍以上"))
+        assertTrue(report.contains("应收账款增速"))
+        assertTrue(report.contains("合同负债/预收款"))
+        assertTrue(report.contains("合同/订单落地线索"))
     }
 
     @Test

@@ -4,12 +4,14 @@ import android.content.Context
 import com.example.stockmonitor.analysis.FundamentalHealthPolicy
 import com.example.stockmonitor.analysis.Fundamentals
 import com.example.stockmonitor.analysis.FundamentalsReport
+import com.example.stockmonitor.analysis.TechnicalAssessmentPolicy
 import com.example.stockmonitor.analysis.GlobalFundamentalsReport
 import com.example.stockmonitor.analysis.EnvContext
 import com.example.stockmonitor.analysis.MarketRegime
 import com.example.stockmonitor.analysis.MarketRiskContext
 import com.example.stockmonitor.analysis.MarketTimingContext
 import com.example.stockmonitor.analysis.NewsRelatedQueryPolicy
+import com.example.stockmonitor.analysis.PortfolioAnalysis
 import com.example.stockmonitor.analysis.RecentMarketContext
 import com.example.stockmonitor.analysis.StockAnalysis
 import com.example.stockmonitor.analysis.TimeUtils
@@ -68,6 +70,7 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
                 "get_technical_analysis" -> getTechnicalAnalysis(arguments)
                 "get_kline_summary" -> getKlineSummary(arguments)
                 "get_portfolio_report" -> getPortfolioReport()
+                "get_portfolio_today_brief" -> getPortfolioTodayBrief()
                 "get_market_summary_report" -> getMarketSummaryReport()
                 "get_recent_market_context" -> getRecentMarketContext(arguments)
                 "get_sector_snapshot" -> getSectorSnapshot(arguments)
@@ -255,6 +258,8 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
                 .put("code", code)
                 .put("market", if (isA股(code)) "A股" else "港美股")
                 .put("source", "程序本地缓存")
+                // 带上这半份报告的实际生成时刻：缓存可能半新半旧，AI 需要知道新旧再决定信多少。
+                .put("report_updated_at", cached.fundamentalUpdatedAt)
                 .put("report", cached.fundamentalReport)
         }
 
@@ -329,7 +334,12 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
             prev = AnalysisReportCache.get(store.analysisReports, code)?.snapshot,
             marketRisk = Repo.marketRiskContext,
         )
-        val report = StockAnalysis.formatReport(result, env)
+        val report = StockAnalysis.formatReport(
+            result = result,
+            env = env,
+            // AI 读到的「结论（无持仓假设）」也用统一口径，不带价位的四档模板会误导模型。
+            unifiedAdvice = TechnicalAssessmentPolicy.unifiedAdviceFor(result, history),
+        )
         // 存下这次的状态快照，下次取同一份报告才有「较上次分析」的对照。
         store.analysisReports = AnalysisReportCache.merge(
             raw = store.analysisReports,
@@ -400,6 +410,35 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
                 ?.trim()
                 .orEmpty(),
         )
+    }
+
+    private fun getPortfolioTodayBrief(): JSONObject {
+        val asOf = TimeUtils.todayText()
+        val advice = PortfolioAnalysis.todayPriorityAdvice(
+            results = Repo.portfolioResults,
+            technicalTrends = Repo.technicalTrendSnapshots,
+            asOf = asOf,
+            currentPositions = store.portfolio.positions,
+        )
+        return JSONObject()
+            .put("as_of", asOf)
+            .put("analysis_count", Repo.portfolioResults.size)
+            .put("status", if (advice == null) "no_priority_action" else "available")
+            .put(
+                "priority",
+                advice?.let {
+                    JSONObject()
+                        .put("code", it.code)
+                        .put("name", it.name)
+                        .put("state", it.state.name)
+                        .put("state_label", it.state.label)
+                        .put("fresh", it.fresh)
+                        .put("reason", it.reason)
+                        .put("holding_action", it.action ?: JSONObject.NULL)
+                        .put("technical_advice", it.technicalAdvice ?: JSONObject.NULL)
+                        .put("summary", it.displayText)
+                } ?: JSONObject.NULL,
+            )
     }
 
     private fun getMarketSummaryReport(): JSONObject {
@@ -584,6 +623,7 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
             Fundamentals.Input(
                 periods = data.periods,
                 balance = data.balance,
+            balanceHistory = data.balanceHistory,
                 valuations = data.valuations,
                 totalShares = data.totalShares,
                 price = data.price,

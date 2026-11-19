@@ -61,6 +61,10 @@ class MainActivity : AppCompatActivity() {
                         startActivity(Intent(this@MainActivity, AlertHistoryActivity::class.java))
                         true
                     }
+                    R.id.action_trade_history -> {
+                        startActivity(Intent(this@MainActivity, TradeHistoryActivity::class.java))
+                        true
+                    }
                     R.id.action_settings -> {
                         Dialogs.showSettings(this@MainActivity) { switchTab(currentTab) }
                         true

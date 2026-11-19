@@ -2,17 +2,12 @@ package com.example.stockmonitor.analysis
 
 import com.example.stockmonitor.core.DayBar
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDate
 
 class TechnicalTrendSnapshotPolicyTest {
-
-    @Test
-    fun entrySetupEvidenceMatchesSelectionDailyEvidenceRatio() {
-        assertEquals(1.0, TechnicalQualityPolicy.dailyEvidenceRatio(confirmedSetup()), 0.001)
-        assertEquals(0.0, TechnicalQualityPolicy.dailyEvidenceRatio(weakSetup()), 0.001)
-    }
 
     @Test
     fun snapshotUsesUnifiedTechnicalScoreAndWeeklyMonthlyTrend() {
@@ -53,6 +48,30 @@ class TechnicalTrendSnapshotPolicyTest {
 
         assertTrue(result.technicalScore <= 45)
         assertTrue(result.primaryAdvice.contains("暂不补仓"))
+    }
+
+    @Test
+    fun snapshotCarriesPriceLevelsAndVolumeRatio() {
+        val bars = risingBars()
+        val result = TechnicalTrendSnapshotPolicy.evaluate(
+            history = bars,
+            code = "sh600000",
+            name = "测试股票",
+            asOf = bars.last().date,
+            entrySetup = weakSetup(),
+            trendAssessment = trendAssessment(allowsAddPosition = false),
+        )
+
+        // 持仓页等待盘中分析时靠这些字段展示支撑/压力、量比与均线结构。
+        assertEquals(bars.last().close, result.price, 0.0001)
+        assertTrue(result.ma5 > 0)
+        assertTrue(result.ma10 > 0)
+        assertTrue(result.ma20 > 0)
+        assertTrue(result.ma60 > 0)
+        assertTrue(result.support >= 0.0 && result.resistance >= 0.0)
+        assertNotNull(result.volumeRatio)
+        assertTrue(result.volumeRatio!! > 0)
+        assertTrue(result.atrPct == null || result.atrPct!! > 0)
     }
 
     @Test

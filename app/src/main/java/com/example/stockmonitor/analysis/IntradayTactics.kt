@@ -3,7 +3,10 @@ package com.example.stockmonitor.analysis
 import com.example.stockmonitor.core.DualTimeframeDecision
 import com.example.stockmonitor.core.DailyRiskContext
 import com.example.stockmonitor.core.IntradayVolumeContext
+import com.example.stockmonitor.core.PullbackPhaseVolumeEvidence
 import com.example.stockmonitor.core.TimeframeEvidence
+import com.example.stockmonitor.core.PositionAllocationConfig
+import com.example.stockmonitor.core.PositionAllocationMode
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.floor
@@ -77,6 +80,8 @@ data class IntradaySignal(
     val title: String,
     val body: String,
     val holdingExitStage: HoldingExitStage? = null,
+    /** 做T卖出通过双边费用、滑点和最低净收益门槛后的计划；其他信号为空。 */
+    val tSellNetProfitEstimate: IntradayTNetProfitEstimate? = null,
 )
 
 /**
@@ -93,7 +98,7 @@ data class IntradaySignal(
  */
 object IntradayTactics {
 
-    /** 做 T 的涨跌幅阈值 = 板块涨跌停幅度 × 该系数。 */
+    /** 做 T 的涨跌幅阈值以涨停幅度基线和 ATR 波动基线的较高者为准。 */
     const val T_RATIO = 0.3
 
     /** 做 T 建议减出的仓位比例。 */
@@ -120,8 +125,12 @@ object IntradayTactics {
     /** 提醒正文里最多列出几只强势龙头，供人工核对。 */
     const val MAX_STRONG_LEADER_NAMES = 3
 
-    /** 回踩的容差：现价在支撑上方这么多以内算「回踩到位」。 */
+    /** 普通回踩与站回支撑共用的容差；接回观察另按 ATR 动态支撑带判断。 */
     const val PULLBACK_TOLERANCE = 0.02
+
+    /** 冲高回落基础阈值：max(0.6%, ATR%×0.35%)，只钳制基础值，保留节奏/龙头额外缓冲。 */
+    const val MIN_T_SELL_RETREAT_PCT = 0.6
+    const val MAX_T_SELL_RETREAT_PCT = 3.0
 
     /** 反弹到压力位附近的容差：距压力这么多以内算「反弹到位」（深套红灯的离场窗口）。 */
     const val EXIT_NEAR_PCT = 0.02
@@ -168,6 +177,7 @@ object IntradayTactics {
         val maxPositionPct: Double,
         /** 当日可卖数量；为空时兼容旧调用，按总持仓处理。 */
         val sellableQuantity: Double? = null,
+        val positionAllocation: PositionAllocationConfig? = null,
         /** 当日不可卖数量（当日买入 + 未记录买入日期的残股，见 [untrackedQuantity]）。 */
         val lockedQuantity: Double = 0.0,
         /**
@@ -251,8 +261,13 @@ object IntradayTactics {
         val dailyRiskContext: DailyRiskContext? = null,
         val timeframeEvidence: TimeframeEvidence? = null,
         val volumeContext: IntradayVolumeContext? = null,
+        /** 仅由已完成15分钟K线推导的峰后回踩阶段量能快照；缺失时接回确认失败关闭。 */
+        val pullbackPhaseVolumeEvidence: PullbackPhaseVolumeEvidence? = null,
         val ledgerConsistent: Boolean = true,
-        /** 真实卖出后尚未接回的数量，用于接回/做T买入资格。 */
+        /**
+         * 真实卖出后尚未接回的数量，用于接回/做T买入资格。
+         * 生产链路尚未回填真实已减未接流水时必须保持 0，接回只作观察，不能由预测卖出或总持仓推算。
+         */
         val reentryCapacityQuantity: Double = 0.0,
     ) {
         /** 大盘或板块任一塌陷。 */
@@ -423,7 +438,8 @@ object IntradayTactics {
             input.changePct.isFinite() && input.limitPct.isFinite() && input.limitPct > 0 &&
             abs(input.changePct) < input.limitPct - 0.2
         // 不用 context!!：tReady 为假时 context 可能是 null，这里在短路外求值。
-        val baseRetreatNeed = context?.atrPct?.let { maxOf(0.5, it * 0.25) } ?: 0.5
+        // ATR 高时以更大的回撤过滤噪声，但基础阈值钳在 3% 内；节奏/龙头缓冲仍在下方叠加。
+        val baseRetreatNeed = tSellRetreatNeed(context?.atrPct ?: input.atrPct)
         // 强节奏下浅回落先进入暂缓观察；弱节奏仍按基础阈值及时给做 T 提醒。
         val rolloverNeed = baseRetreatNeed * if (rhythm.retreatFactor > 1.0) 0.5 else 1.0
         val rollover = tReady && observation!!.falling && observation.retreatPct >= rolloverNeed
@@ -465,8 +481,7 @@ object IntradayTactics {
                 (expanded || atResistance(input)) -> tSell(input, expanded)
             // 买入侧：转弱就别接回，塌陷直接不提——系统性下跌里接回是接飞刀。
             tBuyAllowed && highAllowsNewBuy && holding && input.changePct <= -tThreshold(input) &&
-                input.support > 0 && input.price >= input.support &&
-                input.price <= input.support * (1 + PULLBACK_TOLERANCE) && confirmedTRebound(input) ->
+                reentryObservationConfirmed(input) ->
                 tBuy(input)
             ordinaryAllowed && highAllowsNewBuy && !holding && pullback &&
                 input.score >= 2 && !input.weakEnv ->
@@ -555,8 +570,31 @@ object IntradayTactics {
         )
     }
 
-    /** 做 T 的当日涨跌幅阈值（百分数）。 */
-    fun tThreshold(input: Input): Double = input.limitPct * T_RATIO
+    /** 做 T 的当日涨跌幅阈值（百分数）：涨停幅度基线与 ATR 波动基线取较高者。 */
+    fun tThreshold(input: Input): Double = maxOf(input.limitPct * T_RATIO, validAtrPct(input) * 0.6)
+
+    private fun validAtrPct(input: Input): Double =
+        input.atrPct?.takeIf { it.isFinite() && it > 0.0 }
+            ?: input.holdingTContext?.atrPct?.takeIf { it.isFinite() && it > 0.0 }
+            ?: 0.0
+
+    private fun tSellRetreatNeed(atrPct: Double?): Double =
+        maxOf(MIN_T_SELL_RETREAT_PCT, (atrPct?.takeIf { it.isFinite() && it > 0.0 } ?: 0.0) * 0.35)
+            .coerceAtMost(MAX_T_SELL_RETREAT_PCT)
+
+    /** 接回支撑带与 MA20 容差按 ATR 伸缩，避免固定 2% 在不同波动股上失真。 */
+    private fun tBuyStructureConfirmed(input: Input): Boolean {
+        if (input.weakEnv || input.support <= 0.0 || input.ma5 <= 0.0 || input.ma20 <= 0.0) return false
+        val bandPct = IntradayTNetProfitPolicy.supportBandPct(input.atrPct)
+        val nearSupport = input.price >= input.support && input.price <= input.support * (1.0 + bandPct / 100.0)
+        val aboveMa5 = input.price >= input.ma5
+        val ma20Intact = input.price >= input.ma20 * (1.0 - bandPct / 100.0)
+        return nearSupport && aboveMa5 && ma20Intact
+    }
+
+    /** 接回观察必须同时满足结构、短周期止跌/反弹和已完成15分钟K的阶段量能确认。 */
+    fun reentryObservationConfirmed(input: Input): Boolean =
+        tBuyStructureConfirmed(input) && confirmedTRebound(input)
 
     private fun confirmedTRebound(input: Input): Boolean {
         val context = input.holdingTContext ?: return false
@@ -567,14 +605,14 @@ object IntradayTactics {
         ) {
             return false
         }
-        // 反弹跟踪已判「真反弹企稳」：站稳时间与承接都验证过，接回/站回只需确认
-        // 当前不在回落、量能没爆表——比等 3 分钟观察窗的即时判定更及时。
-        if (input.reboundConfirmed) {
-            return !observed.falling && input.volumeRatio?.let { it > 0 && it <= 1.2 } == true
-        }
+        // 两阶段量价只认不可变的完成K线快照：峰后回踩窗口平均量必须不高于峰前基线
+        // 中位量的80%，低点在ATR支撑带内，最后一根完成15分钟K相对同一基线放量并收复关键线。
+        // 缺少连续完成K线或任何一个阶段条件时，证据构建器会失败关闭。
+        if (input.pullbackPhaseVolumeEvidence?.confirmed != true) return false
+        // 反弹跟踪已判「真反弹企稳」时仍保留两阶段量价门槛；否则要求短周期逐笔回升。
+        if (input.reboundConfirmed) return !observed.falling
         val required = maxOf(0.3, context.atrPct * 0.15) * if (context.cautiousBuy) 2 else 1
-        return input.volumeRatio?.let { it > 0 && it <= 1.0 } == true &&
-            observed.rising && observed.reboundPct >= required &&
+        return observed.rising && observed.reboundPct >= required &&
             observed.low >= input.support * (1 - BREAK_TOLERANCE)
     }
 
@@ -750,8 +788,14 @@ object IntradayTactics {
      * 正文里写清哪几只龙头仍强和「回落加深到哪」，方便在行情软件里逐点核对。
      */
     private fun tSellDeferred(input: Input, expanded: Boolean): IntradaySignal {
-        val need = input.holdingTContext?.atrPct?.let { maxOf(0.5, it * 0.25) } ?: 0.5
-        val deepPct = need * DEEP_RETREAT_FACTOR
+        val need = tSellRetreatNeed(input.holdingTContext?.atrPct ?: input.atrPct)
+        // 文案阈值必须与判定路径同源（见 evaluate 里的 deepRetreatFactor）：节奏路径
+        // rhythm.retreatFactor 1.5 倍就恢复做T提醒，写死 2 倍会让用户白等一段深度。
+        val deepRetreatFactor = maxOf(
+            adaptiveRhythm(input).retreatFactor,
+            if (leadersStrong(input)) DEEP_RETREAT_FACTOR else 1.0,
+        )
+        val deepPct = need * deepRetreatFactor
         val deepPrice = input.dailyHighPrice
             ?.takeIf { it.isFinite() && it > 0.0 }
             ?.let { it * (1 - deepPct / 100.0) }
@@ -777,21 +821,52 @@ object IntradayTactics {
 
     private fun tSell(input: Input, expanded: Boolean): IntradaySignal {
         val sizing = tQuantity(input, expanded)
+        // 文案阈值与 evaluate 判定路径同源（见 deepRetreatFactor）：实际阈值是
+        // 节奏因子与龙头因子的较大者，写死 2 倍会在节奏因子更高时误导用户白等深度。
+        val deepRetreatFactor = maxOf(
+            adaptiveRhythm(input).retreatFactor,
+            if (leadersStrong(input)) DEEP_RETREAT_FACTOR else 1.0,
+        )
         val reason = (if (expanded) "放量冲高后出现连续回落" else "接近压力 ${price(input.resistance)} 后出现连续回落") +
-            (if (leadersStrong(input)) "；同板块龙头仍强，但回落已加深到 ${DEEP_RETREAT_FACTOR.toInt()} 倍阈值，按真回落处理" else "")
-        val action = if (sizing.quantity > 0) {
-            "保留底仓，机动仓可先减约 ${qty(sizing.quantity)} 股做 T（${sizing.note}，且须为可卖股份）；" +
-                "回踩企稳后再评估接回，不因到价直接买回，需核对手续费、滑点和实际成交。"
-        } else if (sizing.liquidityBlocked) {
-            "流动性不足，暂不给具体股数；先观察成交情况，不能为做T凑整卖出底仓。"
-        } else {
-            "按1/3测算的机动仓不足1手，不为做T凑整卖出底仓。"
+            (if (leadersStrong(input)) "；同板块龙头仍强，但回落已加深到 ${String.format(Locale.CHINA, "%.1f", deepRetreatFactor)} 倍阈值，按真回落处理" else "")
+        if (sizing.quantity <= 0.0) {
+            val blockedReason = if (sizing.liquidityBlocked) {
+                "流动性不足，不能为做T凑整卖出底仓"
+            } else {
+                "按机动仓测算不足一手，不能为做T凑整卖出底仓"
+            }
+            return IntradaySignal(
+                IntradaySignalType.T_SELL_DEFERRED,
+                "⏸ ${input.name}·冲高回落暂缓做T",
+                "现价 ${price(input.price)}（${pct(input.changePct)}，$reason）。${sizing.note}；$blockedReason，当前仅观察。",
+            )
         }
+        val estimate = IntradayTNetProfitPolicy.estimate(
+            sellReferencePrice = input.price,
+            support = input.support,
+            atrPct = input.atrPct ?: input.holdingTContext?.atrPct,
+            quantity = sizing.quantity,
+        )
+        if (estimate == null || !estimate.meetsMinimum) {
+            val net = estimate?.expectedNetProfit?.let { String.format(Locale.CHINA, "%.2f", it) } ?: "—"
+            val minimum = estimate?.requiredNetProfit?.let { String.format(Locale.CHINA, "%.2f", it) } ?: "—"
+            return IntradaySignal(
+                IntradaySignalType.T_SELL_DEFERRED,
+                "⏸ ${input.name}·冲高回落暂缓做T",
+                "现价 ${price(input.price)}（${pct(input.changePct)}，$reason）。预计双边净收益 $net 元，" +
+                    "未达到最低 $minimum 元；已计入佣金、卖出印花税、过户费和双边0.05%滑点，当前仅观察。",
+            )
+        }
+        val action = "保留底仓，机动仓可先减约 ${qty(sizing.quantity)} 股做T（${sizing.note}，且须为可卖股份）；" +
+            "按预计接回价 ${price(estimate.expectedBuybackPrice)} 测算，双边费用和滑点后净收益约 " +
+            "${String.format(Locale.CHINA, "%.2f", estimate.expectedNetProfit)} 元（门槛 " +
+            "${String.format(Locale.CHINA, "%.2f", estimate.requiredNetProfit)} 元）。"
         return IntradaySignal(
-            IntradaySignalType.T_SELL,
-            "🔔 ${input.name}·冲高做T",
-            "现价 ${price(input.price)}（${pct(input.changePct)}，$reason）。" +
+            type = IntradaySignalType.T_SELL,
+            title = "🔔 ${input.name}·冲高做T",
+            body = "现价 ${price(input.price)}（${pct(input.changePct)}，$reason）。" +
                 "${input.holdingTContext?.summary()}。$action",
+            tSellNetProfitEstimate = estimate,
         )
     }
 
@@ -826,8 +901,9 @@ object IntradayTactics {
     }
 
     private fun tBuy(input: Input): IntradaySignal {
-        val action = "仅作接回观察：需有真实减出记录，数量不超过尚未接回的已卖股份，且受可用资金约束；" +
-            "系统尚未核实成交，不推算接回股数；深套不盲目补仓。" +
+        val action = "仅作接回观察：已完成15分钟K显示峰后回踩窗口平均量≤峰前基线中位量80%，低点位于ATR支撑带内；" +
+            "最后一根完成15分钟K相对该基线放量并收复支撑、MA5，MA20不得在ATR容差外破位。需有真实减出记录，数量不超过尚未接回的已卖股份，且受可用资金约束；" +
+            "当前未回填真实已减未接数量，系统不由预测做T卖推算或升级为可执行接回股数；深套不盲目补仓。" +
             "须扣除手续费与滑点；若重新跌破 ${price(input.support)}，接回窗口失效并停止执行。"
         val sectorNote = sectorBuyNote(input)
         return IntradaySignal(
@@ -920,12 +996,22 @@ object IntradayTactics {
     }
 
     private fun tQuantity(input: Input, expanded: Boolean): TQuantityAdvice {
-        val sellable = input.sellableQuantity ?: input.quantity
+        val allocation = input.positionAllocation
+            ?: return TQuantityAdvice(0.0, "尚未配置底仓与滚动仓，暂缓普通做T", false)
+        if (allocation.mode != PositionAllocationMode.NORMAL) {
+            return TQuantityAdvice(0.0, "风险观察仓不参与普通做T", false)
+        }
+        val sellable = input.sellableQuantity ?: 0.0
         if (sellable <= 0 || !sellable.isFinite()) {
             return TQuantityAdvice(0.0, if (input.lockedQuantity > 0) "今日可卖仓位为0" else "持仓不足一手", false)
         }
+        if (!input.quantity.isFinite() || input.quantity <= 0.0) {
+            return TQuantityAdvice(0.0, "持仓数量无效", false)
+        }
+        val rollingCapacity = minOf(sellable, (input.quantity - allocation.baseQuantityTarget).coerceAtLeast(0.0))
+        if (rollingCapacity < LOT) return TQuantityAdvice(0.0, "可卖滚动仓不足一手，不动底仓凑整", false)
         var part = T_PART
-        val notes = mutableListOf<String>()
+        val notes = mutableListOf("底仓目标${qty(allocation.baseQuantityTarget)}股，可卖滚动仓${qty(rollingCapacity)}股")
         val atrPct = input.atrPct ?: input.holdingTContext?.atrPct
         if (atrPct?.isFinite() == true && atrPct >= 5.0) {
             part = minOf(part, 0.2)
@@ -962,7 +1048,7 @@ object IntradayTactics {
             part = minOf(part, 0.25)
             notes.add("未放量按1/4")
         }
-        val rawQuantity = sellable * part
+        val rawQuantity = minOf(sellable * part, rollingCapacity)
         val turnover = input.todayTurnoverYi
         val orderValueYi = rawQuantity * input.price / 100_000_000.0
         if (turnover != null && (!turnover.isFinite() || turnover <= 0.0 ||

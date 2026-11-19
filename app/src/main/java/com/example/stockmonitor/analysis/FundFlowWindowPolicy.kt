@@ -85,9 +85,19 @@ object FundFlowWindowPolicy {
                 "多日资金流仅${valid.size}/${SHORT_WINDOW_DAYS}个交易日样本｜暂不判断方向"
             FundFlowWindowTone.UNAVAILABLE -> "多日资金流暂无有效样本"
         }
+        val recent3Amounts = recent3.mapNotNull { flow ->
+            flow.mainNetYuan?.takeIf { it.isFinite() }
+        }
+        val recent3TotalAmount = recent3Amounts
+            .takeIf { it.size == recent3.size }
+            ?.sum()
+        val amountDetail = recent3TotalAmount?.let { total ->
+            val direction = if (total < 0.0) "净流出" else "净流入"
+            "，近3日主力资金${direction}合计 ${formatMoney(abs(total))}"
+        }.orEmpty()
         val directionDetail =
             "近3个交易日${recent3PositiveDays}天净流入、${recent3NegativeDays}天净流出，" +
-                "平均主力净占比 $averageText；近5日${recent5PositiveDays}天净流入。"
+                "平均主力净占比 $averageText$amountDetail；近5日${recent5PositiveDays}天净流入。"
         val reason = when (tone) {
             FundFlowWindowTone.PERSISTENT_INFLOW ->
                 "${directionDetail}结论：持续流入，可作为加分参考，不单独触发买卖提醒。"
@@ -130,6 +140,12 @@ object FundFlowWindowPolicy {
 
     private fun formatPct(value: Double): String =
         String.format(Locale.CHINA, "%+.2f%%", value)
+
+    private fun formatMoney(value: Double): String = when {
+        value >= 1e8 -> String.format(Locale.CHINA, "%.2f亿", value / 1e8)
+        value >= 1e4 -> String.format(Locale.CHINA, "%.1f万", value / 1e4)
+        else -> String.format(Locale.CHINA, "%.0f元", value)
+    }
 
     private fun abs(value: Double): Double = if (value < 0.0) -value else value
 }

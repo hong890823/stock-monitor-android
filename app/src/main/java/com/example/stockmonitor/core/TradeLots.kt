@@ -20,6 +20,18 @@ data class TradeRecord(
     val quantity: Double,
     val price: Double,
     val source: TradeSource,
+    /** 本笔真实成交的总费用（佣金、印花税等），旧记录默认 0。 */
+    val fee: Double = 0.0,
+    /** 仅补批次日期/成本，不是实际成交，不参与账户当日盈亏。 */
+    val bookkeepingOnly: Boolean = false,
+)
+
+data class PositionAdjustment(
+    val code: String,
+    val name: String,
+    val date: String,
+    val quantityDelta: Double,
+    val reason: String,
 )
 
 data class TradeLot(
@@ -33,6 +45,8 @@ data class TradeLot(
 data class TradeBook(
     val entries: List<TradeRecord> = emptyList(),
     val lots: List<TradeLot> = emptyList(),
+    /** 手工数量校正没有成交价/费用，账户日盈亏必须据此降级。 */
+    val adjustments: List<PositionAdjustment> = emptyList(),
 )
 
 data class TradeAvailability(
@@ -84,7 +98,7 @@ object TradeLotLedger {
             unitCost = record.price,
             buyDate = record.date,
         )
-        return TradeBook(book.entries + record, book.lots + lot)
+        return book.copy(entries = book.entries + record, lots = book.lots + lot)
     }
 
     fun sell(book: TradeBook, record: TradeRecord): TradeBook {
@@ -104,7 +118,7 @@ object TradeLotLedger {
                 lot.copy(quantity = lot.quantity - used)
             }
         }
-        return TradeBook(book.entries + record, lots.filter { it.quantity > EPSILON })
+        return book.copy(entries = book.entries + record, lots = lots.filter { it.quantity > EPSILON })
     }
 
     /**
@@ -127,17 +141,25 @@ object TradeLotLedger {
         check(code.isNotBlank() && name.isNotBlank())
         check(newQuantity.isFinite() && newQuantity >= 0.0)
         val delta = newQuantity - oldQuantity
-        return when {
-            delta > EPSILON -> {
-                // 只有真加仓才用到日期；改成本不动数量时日期可留空。
-                check(buyDate.matches(DATE_PATTERN)) { "买入日期必须是 yyyy-MM-dd" }
-                TradeBook(
-                    book.entries,
-                    book.lots + TradeLot(code, name, delta, unitCost, buyDate),
-                )
-            }
-            delta < -EPSILON -> consumeLots(book, code, -delta)
-            else -> book
+        if (kotlin.math.abs(delta) <= EPSILON) return book
+        check(buyDate.matches(DATE_PATTERN)) { "调整日期必须是 yyyy-MM-dd" }
+        val adjustment = PositionAdjustment(
+            code = code,
+            name = name,
+            date = buyDate,
+            quantityDelta = delta,
+            reason = "manual_position_edit",
+        )
+        return if (delta > EPSILON) {
+            // 只有真加仓才用到日期；改成本不动数量时日期可留空。
+            book.copy(
+                lots = book.lots + TradeLot(code, name, delta, unitCost, buyDate),
+                adjustments = book.adjustments + adjustment,
+            )
+        } else {
+            consumeLots(book, code, -delta).copy(
+                adjustments = book.adjustments + adjustment,
+            )
         }
     }
 
@@ -153,7 +175,7 @@ object TradeLotLedger {
                 lot.copy(quantity = lot.quantity - used)
             }
         }
-        return TradeBook(book.entries, lots.filter { it.quantity > EPSILON })
+        return book.copy(lots = lots.filter { it.quantity > EPSILON })
     }
 
     fun buyToPortfolio(
@@ -245,6 +267,7 @@ object TradeLotLedger {
         check(record.date.matches(DATE_PATTERN))
         check(record.quantity.isFinite() && record.quantity > 0.0)
         check(record.price.isFinite() && record.price > 0.0)
+        check(record.fee.isFinite() && record.fee >= 0.0)
     }
 
     private val DATE_PATTERN = Regex("\\d{4}-\\d{2}-\\d{2}")

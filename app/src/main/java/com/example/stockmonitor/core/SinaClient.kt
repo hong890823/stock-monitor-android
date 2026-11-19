@@ -320,8 +320,8 @@ class SinaClient {
                     if (name.contains("ST") || name.contains("退") || name.startsWith("N ")) continue
                     val limit = limitPctFor(quote.code, quote.name)
                     val stock = LimitStock(quote.code, name, quote.price, quote.prevClose, quote.changePct)
-                    if (quote.changePct >= limit - 0.15) up.add(stock)
-                    else if (quote.changePct <= -limit + 0.15) down.add(stock)
+                    if (quote.changePct >= limit - LIMIT_TOLERANCE_PCT) up.add(stock)
+                    else if (quote.changePct <= -limit + LIMIT_TOLERANCE_PCT) down.add(stock)
                 }
             }
         }
@@ -386,6 +386,13 @@ class SinaClient {
             Triple("sz", 0, 4000),
             Triple("sz", 300000, 302000),
         )
+
+        /**
+         * 涨跌停判定的百分比容差：SinaClient 全市场扫描、MonitorService 连板统计与
+         * ObservationEligibility 封板判定共用一份——三处口径必须一致，散落的字面量
+         * 一旦只改一处，封板/连板/暂缓名单会互相矛盾。
+         */
+        const val LIMIT_TOLERANCE_PCT = 0.15
 
         /**
          * 涨跌停阈值：主板（含 ST 和星号 ST）10%，创业板/科创板（含风险警示）20%，北交所 30%。

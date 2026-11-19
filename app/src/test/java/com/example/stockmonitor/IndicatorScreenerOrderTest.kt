@@ -1,8 +1,12 @@
 package com.example.stockmonitor
 
+import com.example.stockmonitor.analysis.FiveOneThreeHit
+import com.example.stockmonitor.analysis.FiveOneThreeStage
 import com.example.stockmonitor.analysis.orderRelaxedHits
 import com.example.stockmonitor.analysis.orderStrictHits
 import com.example.stockmonitor.analysis.orderTrendHits
+import com.example.stockmonitor.analysis.orderFiveOneThreeHits
+import com.example.stockmonitor.analysis.selectRelaxedExcludingStrict
 import com.example.stockmonitor.analysis.EntrySetup
 import com.example.stockmonitor.analysis.EntrySetupType
 import com.example.stockmonitor.analysis.MarketFilter
@@ -63,14 +67,77 @@ class IndicatorScreenerOrderTest {
         assertEquals(listOf("confirmed", "watch"), ordered.map { it.code })
     }
 
-    private fun trendHit(code: String, confirmed: Boolean, volume: Double) = TrendScreenHit(
+    @Test
+    fun `513同阶段优先区间位置更低 不优先近60日涨幅更高`() {
+        val lowerPosition = fiveOneThree("low", position = 20.0, gain = 18.0)
+        val higherPosition = fiveOneThree("high", position = 80.0, gain = 5.0)
+        val missingPosition = fiveOneThree("missing", position = Double.NaN, gain = 1.0)
+
+        val ordered = orderFiveOneThreeHits(listOf(higherPosition, missingPosition, lowerPosition))
+
+        assertEquals(listOf("low", "high", "missing"), ordered.map { it.code })
+    }
+
+    @Test
+    fun `宽松档先排除严格档再截断二十只 不会漏掉后续候选`() {
+        val hits = (1..30).map { index ->
+            hit("r%02d".format(index), 30.0 + index, 2).copy(
+                macdDetail = "MACD改善",
+                relaxedTrendEligible = true,
+            )
+        }
+
+        val selected = selectRelaxedExcludingStrict(hits, setOf("r01", "r02", "r03"))
+
+        assertEquals(20, selected.size)
+        assertEquals((4..23).map { "r%02d".format(it) }, selected.map { it.code })
+    }
+
+    @Test
+    fun `趋势回踩优先缩量更充分 突破优先量能更强`() {
+        val weakContraction = trendHit("weak", confirmed = true, volume = 0.78, pullback = true)
+        val strongContraction = trendHit("strong", confirmed = true, volume = 0.45, pullback = true)
+        val breakoutLowVolume = trendHit("breakout-low", confirmed = true, volume = 1.3)
+        val breakoutHighVolume = trendHit("breakout-high", confirmed = true, volume = 2.1)
+
+        assertEquals(
+            listOf("strong", "weak"),
+            orderTrendHits(listOf(weakContraction, strongContraction)).map { it.code },
+        )
+        assertEquals(
+            listOf("breakout-high", "breakout-low"),
+            orderTrendHits(listOf(breakoutLowVolume, breakoutHighVolume)).map { it.code },
+        )
+    }
+
+    private fun fiveOneThree(code: String, position: Double, gain: Double) = FiveOneThreeHit(
+        code = code,
+        name = code,
+        price = 10.0,
+        stage = FiveOneThreeStage.CONFIRMED,
+        progress = "形态已确认",
+        detail = "",
+        gain60Pct = gain,
+        rangePositionPct = position,
+    )
+
+    private fun trendHit(
+        code: String,
+        confirmed: Boolean,
+        volume: Double,
+        pullback: Boolean = false,
+    ) = TrendScreenHit(
         code = code,
         name = code,
         price = 10.0,
         changePct = 1.0,
         volumeRatio = volume,
         entrySetup = EntrySetup(
-            type = if (confirmed) EntrySetupType.BREAKOUT else EntrySetupType.BREAKOUT_WATCH,
+            type = when {
+                pullback -> EntrySetupType.M20_PULLBACK
+                confirmed -> EntrySetupType.BREAKOUT
+                else -> EntrySetupType.BREAKOUT_WATCH
+            },
             confirmed = confirmed,
             canBuy = confirmed,
             priorHigh = 9.5,

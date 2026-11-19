@@ -40,6 +40,10 @@ class MultiTimeframeTrendTest {
         assertEquals(first.years, second.years)
         assertEquals(first.weekTrend, second.weekTrend)
         assertEquals(first.monthTrend, second.monthTrend)
+        assertEquals("2026-10-14", first.currentWeek?.date)
+        assertEquals("2026-10-14", first.currentMonth?.date)
+        assertEquals(999.0, second.currentWeek?.close ?: 0.0, 0.0)
+        assertEquals(999.0, second.currentMonth?.close ?: 0.0, 0.0)
     }
 
     @Test

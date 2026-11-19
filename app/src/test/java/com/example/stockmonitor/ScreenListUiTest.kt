@@ -44,60 +44,68 @@ class ScreenListUiTest {
     }
 
     @Test
-    fun selectionListsRankStrongSectorAndCoreRoleBonusFirst() {
+    fun selectionListsUseObservationSpecificRankingWithoutChangingOtherBoardRankingLists() {
         val source = TestProjectFiles
             .source("com/example/stockmonitor/ui/ScreenFragment.kt")
             .readText()
 
         assertTrue(source.contains("StrongSectorRankingPolicy.rankByCombined("))
+        assertTrue(source.contains("ObservationDisplayRankingPolicy.rank("))
         assertTrue(source.contains("private fun strongSectorRanking("))
-        assertTrue(source.contains("综合质量分 ${'$'}overallScore/100"))
-        assertFalse(source.contains("技术评分"))
-        assertTrue(source.contains("🔥 持续主线："))
-        assertTrue(source.contains("⚡ 单日强势："))
+        assertTrue(source.contains("候选排序"))
+        assertTrue(source.contains("技术快照暂缺"))
+        assertTrue(source.contains("板块只作同条件裁决"))
         assertTrue(source.contains("UiKit.DetailRow(\"板块标记\""))
-        assertTrue(source.contains("UiKit.DetailRow(\"评分构成\""))
         assertTrue(source.contains("UiKit.DetailRow(\"技术趋势\""))
-        assertTrue(source.contains("UiKit.DetailRow(\"主线持续\""))
-        assertTrue(source.contains("/35（原始${'$'}{item.technicalScore}/100）"))
-        assertTrue(source.contains("强势板块决定强势观察档位"))
-        assertFalse(source.contains("只改变组内顺序，不参与晋级"))
-        assertFalse(source.contains("强势板块+"))
-        assertFalse(source.contains("强势板块加分"))
-        assertFalse(source.contains("主线加分"))
+        assertFalse(source.contains("item.score.coerceIn(0, 3) * 40 / 3"))
+        assertFalse(source.contains("强势板块决定强势观察档位"))
     }
 
     @Test
-    fun observationPoolPrioritizesStrongWatchThenUsesClearStatusGroups() {
+    fun observationPoolUsesStrictStateGroupsAndStructureFirstOrdering() {
         val source = TestProjectFiles
             .source("com/example/stockmonitor/ui/ScreenFragment.kt")
             .readText()
 
         assertTrue(source.contains("\"状态总览\""))
-        assertTrue(source.contains("\"强弱顺序\""))
-        // c428c62 起四个档位从单行拼接改为逐行 addText 分层展示。
+        assertTrue(source.contains("\"状态顺序\""))
         assertTrue(source.contains("addText(\"1️⃣ ✅ 可参与候选（买点已确认）\")"))
-        assertTrue(source.contains("addText(\"2️⃣ 🔥 强势观察（强而未确认）\")"))
-        assertTrue(source.contains("addText(\"3️⃣ 🕐 等待确认（条件未齐）\")"))
-        assertTrue(source.contains("addText(\"4️⃣ ⏸ 其他观察（封板 / 缩量 / 风险 / 数据不足）\")"))
+        assertTrue(source.contains("addText(\"2️⃣ 🧭 待确认（尚不能直接参与）\")"))
+        assertTrue(source.contains("⭐ 优先复参与：曾确认买点、结构仍有效，等待新的盘中确认"))
+        assertTrue(source.contains("⏳ 其他待确认：回踩、量价或连续复评仍差最后确认"))
+        assertTrue(source.contains("addText(\"3️⃣ 👀 观察中（继续跟踪结构演变）\")"))
+        assertTrue(source.contains("addText(\"4️⃣ ⏸ 暂缓参与（封板或已明确标记暂缓）\")"))
+        assertTrue(source.contains("addText(\"5️⃣ ⚠ 风险观察（只列有明确证据的个股风险）\")"))
         assertTrue(source.contains("val observationDetails = buildString"))
         assertTrue(source.contains("text = \"查看观察池详情 ›\""))
         assertTrue(source.contains("appendLine(\"策略路线\")"))
         assertTrue(source.contains("appendLine(\"晋级规则\")"))
         assertTrue(source.indexOf("title = \"✅ 可参与候选（") <
-            source.indexOf("title = \"🔥 强势观察（"))
-        assertTrue(source.indexOf("title = \"🔥 强势观察（") <
-            source.indexOf("title = \"🕐 等待确认（"))
-        assertTrue(source.indexOf("title = \"🕐 等待确认（") <
-            source.indexOf("title = \"⏸ 其他暂缓 / 封板 / 观察（"))
-        assertTrue(source.contains("ObservationEligibility.sections("))
+            source.indexOf("title = \"⭐ 优先复参与（"))
+        assertTrue(source.indexOf("title = \"⭐ 优先复参与（") <
+            source.indexOf("title = \"⏳ 其他待确认（"))
+        assertTrue(source.indexOf("title = \"⏳ 其他待确认（") <
+            source.indexOf("title = \"👀 观察中（"))
+        assertTrue(source.indexOf("title = \"👀 观察中（") <
+            source.indexOf("title = \"⏸ 暂缓参与（"))
+        assertTrue(source.indexOf("title = \"⏸ 暂缓参与（") <
+            source.indexOf("title = \"⚠ 风险观察（"))
+        assertTrue(source.contains("android.graphics.drawable.GradientDrawable"))
+        assertTrue(source.contains("title.substringBefore(\"（\")}列表"))
+        assertTrue(source.contains("ObservationEligibility.prioritizedSections("))
+        assertTrue(source.contains("⚠ 买点已确认，存在风险"))
+        assertTrue(source.contains("⚠ 买点待确认，存在风险"))
+        assertTrue(source.contains("风险消失后再复评"))
+        assertFalse(source.contains("风险未解除"))
+        assertFalse(source.contains("风险信号暂缺"))
+        assertTrue(source.indexOf("val riskSummary = ObservationEligibility.riskSummary(item, currentFlow, flowHistory)") <
+            source.indexOf("val statusLabel = when {"))
+        assertTrue(source.indexOf("riskSummary != null -> UiKit.color(context, R.color.risk_alert)") <
+            source.indexOf("item.stage == ObservationStage.BUY_CANDIDATE ->"))
         assertTrue(source.contains("\"晋级规则\""))
         assertTrue(source.contains("3日走弱/10日未确认淘汰"))
-        assertFalse(source.contains("阅读顺序："))
-        assertFalse(source.contains("路线含义："))
-        assertTrue(source.contains("下一步："))
-        assertTrue(source.contains("资金流："))
-        assertTrue(source.contains("flowWindow.summary"))
+        assertTrue(source.contains("状态档位优先；同档按个股结构"))
+        assertFalse(source.contains("🔥 强势观察（"))
         assertFalse(source.contains("fun addStrategyGroup("))
         assertEquals(1, Regex("UiKit\\.DetailRow\\(\"入池日期\"").findAll(source).count())
     }
@@ -146,7 +154,7 @@ class ScreenListUiTest {
         assertTrue(source.contains("private data class SelectionRankingContext"))
         assertTrue(source.contains("private fun selectionRankingContext()"))
         assertTrue(source.contains("strongSectorRanking(rankingContext"))
-        assertTrue(source.contains(".strongWatch"))
+        assertTrue(source.contains("ObservationDisplayRankingPolicy.rank("))
         assertTrue(source.contains("private var renderPending"))
         assertTrue(source.contains("view?.post"))
         assertTrue(source.contains("turnoverRankByCode"))

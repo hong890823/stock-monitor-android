@@ -2,6 +2,7 @@ package com.example.stockmonitor
 
 import com.example.stockmonitor.analysis.HoldingTTrend
 import com.example.stockmonitor.analysis.MajorTrend
+import com.example.stockmonitor.analysis.MultiTimeframeSummary
 import com.example.stockmonitor.analysis.ShortTermTrend
 import com.example.stockmonitor.analysis.SwingTrend
 import com.example.stockmonitor.analysis.TrendAssessmentPolicy
@@ -24,6 +25,7 @@ class TrendAssessmentPolicyTest {
         previousMa20: Double = 10.9,
         ma250: Double? = 10.0,
         lows: List<Double> = risingLows,
+        cycles: MultiTimeframeSummary? = null,
     ) = TrendEvidence(
         shortTerm = shortTerm,
         weekTrend = week,
@@ -33,6 +35,7 @@ class TrendAssessmentPolicyTest {
         previousMa20 = previousMa20,
         ma250 = ma250,
         completedLows = lows,
+        cycles = cycles,
     )
 
     @Test
@@ -79,6 +82,111 @@ class TrendAssessmentPolicyTest {
         assertFalse(result.allowsTSell)
         assertFalse(result.allowsBottomReversal)
         assertTrue(result.riskOnly)
+    }
+
+    @Test
+    fun majorDownExplainsCompletedCycleMovingAveragesAndUnfinishedPeriods() {
+        fun bars(count: Int, lastClose: Double) = (1..count).map { index ->
+            val close = if (index == count) lastClose else 10.0
+            DayBar(
+                date = "2026-${index.toString().padStart(2, '0')}-01",
+                open = close,
+                high = close,
+                low = close,
+                close = close,
+                volume = 100.0,
+            )
+        }
+        val cycles = MultiTimeframeSummary(
+            weeks = bars(24, 9.0),
+            months = bars(13, 9.0),
+            weekTrend = SwingTrend.WEAK,
+            monthTrend = SwingTrend.WEAK,
+            ma250 = 10.0,
+            asOf = "2026-10-28",
+        )
+        val result = TrendAssessmentPolicy.evaluate(
+            evidence(
+                week = SwingTrend.WEAK,
+                month = SwingTrend.WEAK,
+                price = 8.0,
+                ma20 = 9.0,
+                previousMa20 = 9.5,
+                lows = listOf(12.0, 11.5, 11.0, 10.5, 10.0, 9.5, 9.0, 8.5, 8.0, 7.5, 7.0),
+                cycles = cycles,
+            ),
+        )
+
+        assertEquals(MajorTrend.DOWN, result.major)
+        assertTrue(result.reason.contains("按已完成周K/月K"))
+        assertTrue(result.reason.contains("周K收"))
+        assertTrue(result.reason.contains("月K收"))
+        assertTrue(result.reason.contains("未完成周/月K不计入趋势确认"))
+    }
+
+    @Test
+    fun doubleWeakCyclesWithDailyStabilizationBecomeRepairInsteadOfHardRisk() {
+        fun bars(count: Int, close: Double) = (1..count).map { index ->
+            DayBar(
+                date = "2026-01-${index.toString().padStart(2, '0')}",
+                open = close,
+                high = close,
+                low = close,
+                close = close,
+                volume = 100.0,
+            )
+        }
+        val cycles = MultiTimeframeSummary(
+            weeks = bars(24, 10.0),
+            months = bars(13, 12.0),
+            weekTrend = SwingTrend.WEAK,
+            monthTrend = SwingTrend.WEAK,
+            ma250 = 12.0,
+            asOf = "2026-10-28",
+            currentWeek = bars(1, 11.33).single(),
+            currentMonth = bars(1, 11.33).single(),
+        )
+        val result = TrendAssessmentPolicy.evaluate(
+            evidence(
+                week = SwingTrend.WEAK,
+                month = SwingTrend.WEAK,
+                price = 10.3,
+                ma20 = 10.13,
+                previousMa20 = 10.16,
+                ma250 = 12.13,
+                cycles = cycles,
+            ),
+        )
+
+        assertEquals(MajorTrend.REPAIR, result.major)
+        assertFalse(result.riskOnly)
+        assertFalse(result.allowsOrdinaryBuy)
+        assertTrue(result.reason.contains("修复待确认"))
+        assertTrue(result.reason.contains("当前未完成周K收11.33，已回到均线上方"))
+        assertTrue(result.reason.contains("当前未完成月K收11.33，仍低于均线"))
+    }
+
+    @Test
+    fun extendedDailySurgeWithWeakCyclesIsRepairWatchNotHardRisk() {
+        val result = TrendAssessmentPolicy.evaluate(
+            evidence(
+                shortTerm = HoldingTTrend.EXTENDED,
+                week = SwingTrend.WEAK,
+                month = SwingTrend.WEAK,
+                price = 14.98,
+                ma20 = 12.80,
+                previousMa20 = 12.90,
+                ma250 = 14.20,
+                lows = listOf(13.0, 12.5, 12.4, 12.1, 11.9, 13.1, 14.5),
+            ),
+        )
+
+        assertEquals(MajorTrend.REPAIR, result.major)
+        assertFalse(result.riskOnly)
+        assertFalse(result.allowsOrdinaryBuy)
+        assertFalse(result.allowsBottomReversal)
+        assertTrue(result.reason.contains("日线短期强势且站上MA20"))
+        assertTrue(result.reason.contains("等待回调企稳后再评估"))
     }
 
     @Test

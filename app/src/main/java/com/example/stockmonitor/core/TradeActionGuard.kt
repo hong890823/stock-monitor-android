@@ -26,6 +26,12 @@ data class TradeActionEligibility(
     val todayLockedQuantity: Double = 0.0,
     val untrackedQuantity: Double = 0.0,
     val buyCapacityQuantity: Double = 0.0,
+    /** 已通过接回观察的支撑、均线、短周期与两阶段量价确认；最终守卫不可绕过。 */
+    val reentryObservationConfirmed: Boolean = false,
+    /** 仅做T卖出：纯策略已通过费用、滑点和最低净收益校验的计划数量。 */
+    val plannedTSellQuantity: Double = 0.0,
+    /** 仅做T卖出：没有该确认，守卫不得生成可执行做T数量。 */
+    val tSellNetProfitApproved: Boolean = false,
     val ledgerConsistent: Boolean = true,
 )
 
@@ -44,6 +50,7 @@ data class GuardedTradeAction(
     val maxSellQuantity: Double = 0.0,
     val maxBuyQuantity: Double = 0.0,
     val invalidationPrice: Double = 0.0,
+    val requiresExitReview: Boolean = false,
 )
 
 object TradeActionGuard {
@@ -58,18 +65,22 @@ object TradeActionGuard {
         invalidationPrice: Double = 0.0,
         permissions: TradeActionPermissions? = null,
     ): GuardedTradeAction {
+        val normalizedIntent = intent.lowercase().trim()
+        val kind = normalizeIntent(normalizedIntent)
+        if (kind == GuardedAction.RISK_EXIT) {
+            return RiskExitReview.action(evidence, tradeDate, eligibility.ledgerConsistent)
+        }
         if (!eligibility.ledgerConsistent) {
             return observe("持仓账本数量不一致，暂不生成可卖股数；核对持仓批次后再评估。")
         }
         if (!validDate(tradeDate)) {
             return observe("行情交易日期缺失或无效，当前仅观察，不生成确定性买卖。")
         }
-        val normalizedIntent = intent.lowercase().trim()
-        val kind = normalizeIntent(normalizedIntent)
         if (kind == GuardedAction.HOLD) return observe("当前维持持有观察，不新增确定性买卖动作。")
         if (evidence == null) return observe("15/30分钟证据缺失，当前仅观察，不执行买入、卖出或做T。")
+        val reentry = normalizedIntent in setOf("t_buy", "reentry")
         if (kind == GuardedAction.BUY_SMALL) {
-            val allowed = if (normalizedIntent in setOf("t_buy", "reentry")) {
+            val allowed = if (reentry) {
                 permissions?.allowReentry != false
             } else {
                 permissions?.allowBuy != false
@@ -79,6 +90,9 @@ object TradeActionGuard {
                     ?.ifBlank { "趋势或高位结构不允许买入" }
                     ?: "趋势或高位结构不允许买入"
                 return observe("$blocker，不执行买入。")
+            }
+            if (reentry && !eligibility.reentryObservationConfirmed) {
+                return observe("接回尚未通过支撑、MA5/MA20、短周期、市场板块及完成15分钟K的回踩阶段量能确认，仅观察。")
             }
             if (invalidationPrice <= 0.0 || !invalidationPrice.isFinite()) {
                 return observe("缺少明确失效价，仅观察，不执行买入。")
@@ -100,16 +114,25 @@ object TradeActionGuard {
                 return observe("15/30分钟站稳距离不足，仅观察，不执行买入。")
             }
             if (evidence.lastBarRejected) return observe("15分钟K线出现上影拒绝，仅观察，不执行买入。")
-            if (volume?.blowoffRisk == true) return observe("上涨放量但出现冲高回落，量价证据冲突，仅观察。")
-            if (volume?.stockVolumeConfirming != true) return observe("个股量能证据不足，仅观察，不执行买入。")
-            if (volume?.marketExpanding != true) return observe("两市成交量证据不足或未放大，仅观察，不执行买入。")
-            if (volume?.barVolumeConfirming != true) return observe("当前15分钟量能未确认，仅观察，不执行买入。")
+            if (!reentry && volume?.blowoffRisk == true) return observe("上涨放量但出现冲高回落，量价证据冲突，仅观察。")
+            if (!reentry && volume?.stockVolumeConfirming != true) {
+                return observe("个股量能证据不足，仅观察，不执行买入。")
+            }
+            if (volume?.marketExpanding != true) {
+                return observe("大盘预估全天成交额未确认放量，反弹持续性未确认，仅观察，不执行抄底、买入或接回。")
+            }
+            if (!reentry && volume?.barVolumeConfirming != true) return observe("当前15分钟量能未确认，仅观察，不执行买入。")
             val quantity = floor(eligibility.buyCapacityQuantity.coerceAtLeast(0.0) / LOT) * LOT
             if (quantity < LOT) return observe("仓位边界不允许至少一手，仅观察，不执行买入。")
+            val actionText = if (reentry) {
+                "大盘预估全天成交额已确认放量，完成15分钟K的回踩阶段量能与策略确认、15/30分钟门控均已通过，可接回约${quantity.toLong()}股；"
+            } else {
+                "15/30分钟、个股和两市量能均已确认，可小仓买入约${quantity.toLong()}股；"
+            }
             return GuardedTradeAction(
                 GuardedActionLevel.ACTIONABLE,
                 GuardedAction.BUY_SMALL,
-                "15/30分钟、个股和两市量能均已确认，可小仓买入约${quantity.toLong()}股；失效价${formatPrice(invalidationPrice)}，跌破即停止执行。今日新增仓位受A股T+1限制。",
+                actionText + "失效价${formatPrice(invalidationPrice)}，跌破即停止执行。今日新增仓位受A股T+1限制。",
                 maxBuyQuantity = quantity,
                 invalidationPrice = invalidationPrice,
             )
@@ -148,17 +171,6 @@ object TradeActionGuard {
             }
             if (sellable <= 0.0) return nextDay("15分钟风险条件已确认", eligibility)
             val absorption = volume?.absorptionConfirmed == true
-            val fullExit = normalizedIntent in setOf("exit_position", "exit_priority") &&
-                evidence.riskLevel == DailyRiskLevel.CRITICAL &&
-                evidence.riskConfirmations >= 3
-            if (fullExit) {
-                return GuardedTradeAction(
-                    GuardedActionLevel.ACTIONABLE,
-                    GuardedAction.RISK_EXIT,
-                    "连续3根已完成15分钟K线确认，且日级风险为CRITICAL；使用今日可卖${sellable.toLong()}股分批离场。今日新增仓位受T+1限制。",
-                    maxSellQuantity = sellable,
-                )
-            }
             val firstBatch = if (absorption) {
                 LOT
             } else {
@@ -188,15 +200,21 @@ object TradeActionGuard {
         }
         if (sellable <= 0.0) return nextDay("卖点条件已确认", eligibility)
         return if (kind == GuardedAction.T_SELL) {
-            val planned = floor(eligibility.totalQuantity / 3.0 / LOT) * LOT
+            if (eligibility.plannedTSellQuantity > sellable + 0.000001) {
+                return observe("做T计划数量已超过最新可卖数量，需按当前股数重新核算净收益，暂不执行。")
+            }
+            if (!eligibility.tSellNetProfitApproved) {
+                return observe("做T预计净收益未通过双边费用、滑点及最低收益门槛校验，暂缓做T。")
+            }
+            val planned = lotFloor(eligibility.plannedTSellQuantity)
             if (planned < LOT) {
-                return observe("按持仓1/3不足100股，不生成零碎做T卖出。")
+                return observe("做T计划数量不足100股或未通过策略容量校验，暂缓做T。")
             }
             val quantity = minOf(sellable, planned)
             GuardedTradeAction(
                 GuardedActionLevel.ACTIONABLE,
                 GuardedAction.T_SELL,
-                "15/30分钟条件已确认，可用原有可卖仓位做T，最多减${quantity.toLong()}股；今日新增仓位受T+1限制。",
+                "15/30分钟条件与净收益门槛均已确认，可用原有可卖仓位做T，最多减${quantity.toLong()}股；今日新增仓位受T+1限制。",
                 maxSellQuantity = quantity,
                 invalidationPrice = invalidationPrice,
             )

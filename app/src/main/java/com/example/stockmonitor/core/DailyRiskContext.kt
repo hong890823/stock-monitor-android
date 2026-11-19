@@ -83,18 +83,29 @@ data class DailyRiskContext(
     )
 
     fun riskLevel(price: Double): DailyRiskLevel {
-        val invalidation = invalidationPrice
-        val low = rangeLow
-        val critical = highExitRisk || systemicRisk || portfolioRisk || eventRisk || liquidityRisk ||
-            (invalidation != null && invalidation.isFinite() && invalidation > 0.0 && price <= invalidation) ||
-            (low != null && low.isFinite() && low > 0.0 && price < low) ||
-            (majorTrend.equals("DOWN", ignoreCase = true) && fiveDayNoNewLow == false)
-        if (critical) return DailyRiskLevel.CRITICAL
+        if (criticalReasons(price).isNotEmpty()) return DailyRiskLevel.CRITICAL
         val elevated = priceLocation.equals("LOW", ignoreCase = true) ||
             majorTrend.equals("DOWN", ignoreCase = true) ||
             closesBelowMa20 >= 5 ||
             positionRisk
         return if (elevated) DailyRiskLevel.ELEVATED else DailyRiskLevel.NORMAL
+    }
+
+    fun criticalReasons(price: Double): List<String> = buildList {
+        val invalidation = invalidationPrice
+        val low = rangeLow
+        if (highExitRisk) add("高位转弱标记（技术风险）")
+        if (systemicRisk) add("市场或组合普跌标记（环境风险，非个股价值结论）")
+        if (portfolioRisk) add("组合风险标记（非个股清仓依据）")
+        if (eventRisk) add("基本面红灯标记（须核实来源、日期与实质影响）")
+        if (liquidityRisk) add("流动性风险标记（须核实）")
+        if (invalidation != null && invalidation.isFinite() && invalidation > 0.0 && price <= invalidation) {
+            add("跌破自动失效参考价$invalidation（非用户授权止损）")
+        }
+        if (low != null && low.isFinite() && low > 0.0 && price < low) add("跌破区间低点$low（技术风险）")
+        if (majorTrend.equals("DOWN", ignoreCase = true) && fiveDayNoNewLow == false) {
+            add("大趋势向下且近期创新低（技术风险）")
+        }
     }
 }
 

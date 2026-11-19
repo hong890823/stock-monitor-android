@@ -314,11 +314,11 @@ object Notifier {
         id: Int,
         title: String,
         text: String,
-    ) {
+    ): Boolean {
         val store =
             com.example.stockmonitor.core
                 .Store(context)
-        if (!store.alertsEnabled) return
+        if (!store.alertsEnabled) return false
         ensureChannels(context)
         val record =
             newAlertRecord(
@@ -340,6 +340,7 @@ object Notifier {
         val posted =
             postRecordedNotification(context, record, notification, CHANNEL_ALERT, "普通提醒发送失败")
         if (posted && shouldVibrateReminder(status)) vibrateSignal(context)
+        return posted
     }
 
     /** 大盘风险预警：高优先级通知，并使用应用直接震动避免厂商通道差异。 */
@@ -385,21 +386,40 @@ object Notifier {
         id: Int,
         title: String,
         text: String,
-    ) {
+    ): Boolean = holdingRisk(context, id, title, text, "risk_sell")
+
+    fun riskReview(
+        context: Context,
+        id: Int,
+        title: String,
+        text: String,
+        evidenceKey: String,
+        evidenceSummary: String,
+    ): Boolean = holdingRisk(context, id, title, text, "risk_exit_review", evidenceKey, evidenceSummary)
+
+    private fun holdingRisk(
+        context: Context,
+        id: Int,
+        title: String,
+        text: String,
+        kind: String,
+        evidenceKey: String? = null,
+        evidenceSummary: String? = null,
+    ): Boolean {
         val store =
             com.example.stockmonitor.core
                 .Store(context)
-        if (!store.alertsEnabled) return
+        if (!store.alertsEnabled) return false
         ensureChannels(context)
         val record =
             newAlertRecord(
                 notificationId = id,
-                kind = "risk_sell",
+                kind = kind,
                 title = title,
                 text = text,
                 level = "RISK",
-                triggerType = "risk_sell",
-            )
+                triggerType = kind,
+            ).copy(evidenceKey = evidenceKey, evidenceSummary = evidenceSummary)
         val notification =
             buildRecordedNotification(
                 context = context,
@@ -410,8 +430,9 @@ object Notifier {
             )
         val status = reminderStatus(context, CHANNEL_ALERT)
         val posted =
-            postRecordedNotification(context, record, notification, CHANNEL_ALERT, "个股风险卖出提醒发送失败")
+            postRecordedNotification(context, record, notification, CHANNEL_ALERT, "个股风险提醒发送失败")
         if (posted && shouldVibrateReminder(status)) vibrateSignal(context)
+        return posted
     }
 
     /**
@@ -425,11 +446,11 @@ object Notifier {
         id: Int,
         title: String,
         text: String,
-    ) {
+    ): Boolean {
         val store =
             com.example.stockmonitor.core
                 .Store(context)
-        if (!store.alertsEnabled || !store.intradaySignalEnabled) return
+        if (!store.alertsEnabled || !store.intradaySignalEnabled) return false
         ensureChannels(context)
         val record =
             newAlertRecord(
@@ -452,6 +473,7 @@ object Notifier {
         val posted =
             postRecordedNotification(context, record, notification, CHANNEL_SIGNAL, "盘中信号发送失败")
         if (posted && shouldVibrateReminder(status)) vibrateSignal(context)
+        return posted
     }
 
     /** 尾盘候选复核：与实时买点同通道，但用独立 triggerType 做跨重启的每日去重。 */

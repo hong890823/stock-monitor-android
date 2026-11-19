@@ -582,12 +582,66 @@ enum class ObservationStrategy(val label: String) {
     LIMIT_UP_CONTINUATION("涨停持续观察"),
 }
 
+/**
+ * 仅用于候选池展示排序的个股结构质量。它不参与晋级状态机，也不等同于技术快照分。
+ */
+enum class ObservationStructureQuality(val label: String, val rank: Int) {
+    NONE("结构暂缺", 0),
+    SETUP_WATCH("结构观察", 1),
+    BREAKOUT_CONFIRMED("突破确认", 2),
+    M20_PULLBACK_CONFIRMED("MA20 回踩确认", 3),
+    POST_LIMIT_DAILY_BASE("涨停后 MA20 承接", 4),
+    SECOND_WAVE_CONFIRMED("二波确认", 5),
+    POST_LIMIT_HIGH_HOLD("炸板高位承接", 6),
+}
+
+/**
+ * 候选复评时记录的市场门槛。数值越高代表环境越不利；缺失数据保持 null，不伪装成正常。
+ */
+enum class ObservationMarketRisk(val label: String, val rank: Int) {
+    NORMAL("正常", 0),
+    TIGHTENED("门槛收紧", 1),
+    HIGH_QUALITY_ONLY("仅高质量结构", 2),
+    BLOCKED("暂停普通晋级", 3),
+}
+
+/** 买点状态出现后，实际通知链路的最终结果；用于避免“界面上可参与、但没发通知”无迹可查。 */
+enum class ObservationAlertState(val label: String) {
+    UNKNOWN("未记录"),
+    PENDING("待发送"),
+    SENT_ACTIONABLE("已通知·执行核验通过"),
+    SENT_CAUTION("已通知·执行条件待满足"),
+    SENT_EARLIER("已通知·今日已有同股提醒"),
+    BLOCKED("未通知"),
+}
+
 data class ObservationStatusChange(
     val date: String,
     val atMs: Long,
     val previousStage: ObservationStage?,
     val stage: ObservationStage,
     val reason: String,
+)
+
+enum class ObservationRiskType(val label: String) {
+    BREAKOUT_FAILURE("突破失效"),
+    TREND_WEAK("趋势走弱"),
+    HIGH_POSITION_DISTRIBUTION("高位派发"),
+    VOLUME_SHRINK_ACCELERATION("涨停缩量加速"),
+    PRICE_VOLUME_DIVERGENCE("量价背离"),
+    FUND_FLOW_OUTFLOW("资金流出"),
+    STRUCTURE_BREAKDOWN("结构破位"),
+    ENTRY_CHASE("追高风险"),
+    MOMENTUM_DIVERGENCE("强势股分歧"),
+}
+
+/** 候选池的结构化风险证据；展示层不再通过中文原因字符串反推风险类型。 */
+data class ObservationRiskSignal(
+    val type: ObservationRiskType,
+    val detail: String,
+    val keyLevel: Double? = null,
+    val currentValue: Double? = null,
+    val threshold: Double? = null,
 )
 
 data class ObservationCandidate(
@@ -602,10 +656,18 @@ data class ObservationCandidate(
     val weakDaysSettledDate: String? = null,
     /** 当日两板及以上 MA20 承接已确认；供实时门控和通知识别独立日线参与路径。 */
     val dailyBaseEntryConfirmed: Boolean = false,
+    /** 展示排序使用的明确个股结构，独立于状态机资格分 score。 */
+    val structureQuality: ObservationStructureQuality = ObservationStructureQuality.NONE,
+    /** 近五日相对大盘超额收益百分点；缺失时不以 score 替代。 */
+    val relativeStrengthPct: Double? = null,
+    /** 当前候选晋级面对的市场风险层级；旧数据为空代表暂缺。 */
+    val marketRisk: ObservationMarketRisk? = null,
     val technicalScore: Int? = null,
     val weeklyTrendLabel: String? = null,
     val monthlyTrendLabel: String? = null,
     val observedDays: Int = 0,
+    /** 曾确认买点、随后失效并持续复评的交易日数；用于独立计算失效后的清理期限。 */
+    val postConfirmationWatchDays: Int = 0,
     val lastPrice: Double = 0.0,
     val stopPrice: Double? = null,
     val source: String = "选股",
@@ -618,7 +680,17 @@ data class ObservationCandidate(
     val entryConfirmationRequiredRounds: Int = 0,
     val entryConfirmedAtMs: Long = 0L,
     val entryConfirmationVolume: Double = 0.0,
+    /** 首次满足入场条件时的价格；后续确认必须仍在该价格允许的追涨范围内。 */
+    val entryTriggerPrice: Double = 0.0,
+    val entryTriggerAtMs: Long = 0L,
     val breakoutRisk: BreakoutRiskDecision? = null,
+    val riskSignals: List<ObservationRiskSignal> = emptyList(),
+    /** 生成风险结论时的规则版本；旧缓存为0，不能继续沿用已被修正的趋势风险。 */
+    val riskPolicyVersion: Int = 0,
+    /** 最近一次按时间间隔确认软风险的时刻，避免每分钟复评把同一风险重复计数。 */
+    val softRiskLastConfirmedAtMs: Long = 0L,
+    /** 形态来源的有效截止时刻；0 表示不按来源过期。 */
+    val sourceExpiresAtMs: Long = 0L,
     val continuousObservation: Boolean = false,
     val limitStreak: Int? = null,
     val sealQualityScore: Int? = null,
@@ -629,7 +701,25 @@ data class ObservationCandidate(
     val highestStageAtMs: Long = 0L,
     val statusChanges: List<ObservationStatusChange> = emptyList(),
     val softRiskRounds: Int = 0,
-)
+    /** 同一股票在当前选股结果中命中的全部来源；[source] 保留为首要兼容字段。 */
+    val sources: Set<String> = emptySet(),
+    /** 513 等形态来源按实际复评到的交易日计数，避免周末和节假日被自然时间提前淘汰。 */
+    val sourceValidTradingDays: Int = 0,
+    val sourceObservedDays: Int = 0,
+    /** 盘中炸板后守住高位线的起始时刻与平台低点；按交易日自动重置。 */
+    val postLimitHoldStartedAtMs: Long = 0L,
+    val postLimitHoldLowPrice: Double = 0.0,
+    /** 最近一次买点通知结果。默认值兼容旧缓存，不伪造历史发送记录。 */
+    val alertState: ObservationAlertState = ObservationAlertState.UNKNOWN,
+    val alertDetail: String = "",
+    val alertUpdatedAtMs: Long = 0L,
+) {
+    val allSources: Set<String>
+        get() = (sources + source)
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .toCollection(linkedSetOf())
+}
 
 fun ObservationCandidate.withStageResult(
     stage: ObservationStage,
@@ -701,6 +791,10 @@ data class ObservationSignal(
     val environmentGate: String? = null,
     /** 环境风险只提高普通晋级门槛时为 true，二波/日线承接等高质量结构仍可继续确认。 */
     val environmentTightened: Boolean = false,
+    /** 供展示排序使用的明确结构，不参与状态机晋级判断。 */
+    val structureQuality: ObservationStructureQuality = ObservationStructureQuality.NONE,
+    /** 本轮复评的市场风险层级；无行情/旧数据保持 null。 */
+    val marketRisk: ObservationMarketRisk? = null,
     val technicalScore: Int? = null,
     val weeklyTrendLabel: String? = null,
     val monthlyTrendLabel: String? = null,
@@ -708,6 +802,10 @@ data class ObservationSignal(
     val settlesWeakDay: Boolean = false,
     /** 两板及以上强势后回踩 MA20 缩量止跌确认，可缩短为日线结构参与路径。 */
     val postLimitDailyBaseEntry: Boolean = false,
+    /** 今日摸过涨停、开板后仍守在涨停高位线附近；持续时长由候选状态机跟踪。 */
+    val postLimitHighHoldCandidate: Boolean = false,
+    /** 当前复评是否发生在连续竞价时段；盘后只允许更新证据，不允许按分钟确认窗口重置买点。 */
+    val inTradingSession: Boolean = true,
 )
 
 /**

@@ -115,6 +115,7 @@ class ReboundTracker {
         val atrPct: Double? = null,
         val resistance: Double = 0.0,
         val held: Boolean = false,
+        val marketExpanding: Boolean? = null,
     )
 
     data class Event(
@@ -143,6 +144,7 @@ class ReboundTracker {
         var confirmedAlive = false
         var trapEmitted = false
         var pressureEmitted = false
+        var marketCautionEmitted = false
     }
 
     private data class DayCounters(
@@ -210,6 +212,10 @@ class ReboundTracker {
             leg.lastHighTs = sample.timestamp
         }
         rememberPrice(leg, sample)
+        if (sample.marketExpanding != true && leg.confirmedAlive) {
+            leg.confirmedAlive = false
+            leg.settled = false
+        }
         // 布防两条路：恐慌坑（与下探回升同口径的 ATR 阈值），或够深的日内坑
         // （[ReboundTrackPolicy.ARM_DIP_PCT]，兜住高波票被 -5% 钳位挡住的浅坑深 V）。
         // 日常小波动两条路都不进，跟踪照旧不刷屏。
@@ -237,6 +243,8 @@ class ReboundTracker {
             return trapEvent(sample, leg, failed = recovered <= peakRecovered * (1.0 - ReboundTrackPolicy.GIVE_BACK_RATIO))
         }
         // 抛压在途：高点停更、成交还在放——那是换手出货不是承接。定性之前就先说「别按有效反弹追」。
+        // （有意只看量不看价：这是「反弹跟踪放宽布防」的早提醒，接受一定误报，日限兜底噪声；
+        // 确认之后同一分支负责抛压接管、作废「已企稳」，见 ReboundTrackerTest 两条用例。）
         val stalled = sample.timestamp - leg.lastHighTs >= ReboundTrackPolicy.STALL_MINUTES * 60_000
         if (!leg.pressureEmitted && !leg.trapEmitted && peakRecovered >= recoveredNeed &&
             stalled && pace != null && pace >= ReboundTrackPolicy.HEAVY_VOLUME_PACE
@@ -278,6 +286,14 @@ class ReboundTracker {
                 if (counter.caution >= ReboundTrackPolicy.MAX_CAUTION_PER_DAY) return null
                 counter.caution += 1
                 cautionEvent(sample, leg, elapsedMinutes, sluggish = true)
+            }
+            sample.marketExpanding != true -> {
+                leg.settled = false
+                leg.confirmedAlive = false
+                if (leg.marketCautionEmitted || counter.caution >= ReboundTrackPolicy.MAX_CAUTION_PER_DAY) return null
+                leg.marketCautionEmitted = true
+                counter.caution += 1
+                marketCautionEvent(sample, leg)
             }
             else -> {
                 leg.confirmedAlive = true
@@ -388,7 +404,31 @@ class ReboundTracker {
             else "🔍 ${sample.name}·反弹企稳观察（缩量）",
             body = "日内低 ${fmtPrice(lowPrice)}（${fmtPct(leg.dayLowPct)}）回升至 " +
                 "${fmtPrice(sample.price)}，已站稳 ${elapsedMinutes.toInt()} 分钟，$reason；" +
-                "放量站稳或缩量回踩不破 ${fmtPrice(lowPrice)} 再评估。",
+                if (sample.marketExpanding == true) {
+                    "放量站稳或缩量回踩不破 ${fmtPrice(lowPrice)} 再评估。"
+                } else {
+                    "大盘预估全天成交额未确认放量，不抄底、不接回，等待大盘量能与个股结构共同确认。"
+                },
+            vibrate = false,
+            held = sample.held,
+        )
+    }
+
+    private fun marketCautionEvent(sample: Sample, leg: Leg): Event {
+        val (_, lowPrice, _) = pricesOf(sample, leg)
+        val reason = if (sample.marketExpanding == false) {
+            "大盘预估全天成交额未放量"
+        } else {
+            "大盘预估全天量能数据不足，尚未确认放量"
+        }
+        return Event(
+            code = sample.code,
+            name = sample.name,
+            kind = Kind.CAUTIOUS,
+            title = "🔍 ${sample.name}·反弹观察（大盘量能未确认）",
+            body = "日内低 ${fmtPrice(lowPrice)}回升至 ${fmtPrice(sample.price)}，个股虽有回升，" +
+                "$reason，反弹持续性未确认，仍可能回落；不抄底、不接回。" +
+                "等待大盘量能与个股结构共同确认；失效线 ${fmtPrice(lowPrice)}，跌破按风险处理。",
             vibrate = false,
             held = sample.held,
         )

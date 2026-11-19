@@ -22,8 +22,9 @@ data class MarketTimingContext(
     fun aiText(): String = buildString {
         append("日期 $date（$weekday）")
         if (isFriday) append("；周五")
-        if (isMonthEndWindow) append("；月末后三个日历日")
-        if (isQuarterEndWindow) append("；季度末后三个日历日")
+        // 计算口径是「距月末/季末月还有 ≤4 个日历日」（月末前），不是月末之后，别写反。
+        if (isMonthEndWindow) append("；距月末4个日历日内")
+        if (isQuarterEndWindow) append("；距季度末4个日历日内")
         lastTradingDate?.let { append("；最近交易日 $it") }
         reportSeason?.let { append("；$it") }
         append("。日期因素只作风险提示，不代表必然下跌")

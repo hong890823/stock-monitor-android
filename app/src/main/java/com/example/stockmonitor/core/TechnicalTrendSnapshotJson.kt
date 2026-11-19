@@ -25,7 +25,16 @@ object TechnicalTrendSnapshotJson {
                         .put("trend_weak", snapshot.trendWeak)
                         .put("allows_add_position", snapshot.allowsAddPosition)
                         .put("primary_advice", snapshot.primaryAdvice)
-                        .put("advice_reason", snapshot.adviceReason),
+                        .put("advice_reason", snapshot.adviceReason)
+                        .put("price", snapshot.price.finiteOrZero())
+                        .put("support", snapshot.support.finiteOrZero())
+                        .put("resistance", snapshot.resistance.finiteOrZero())
+                        .put("ma5", snapshot.ma5.finiteOrZero())
+                        .put("ma10", snapshot.ma10.finiteOrZero())
+                        .put("ma20", snapshot.ma20.finiteOrZero())
+                        .put("ma60", snapshot.ma60.finiteOrZero())
+                        .put("volume_ratio", snapshot.volumeRatio ?: JSONObject.NULL)
+                        .put("atr_pct", snapshot.atrPct ?: JSONObject.NULL),
                 )
             }
         }.toString()
@@ -53,6 +62,16 @@ object TechnicalTrendSnapshotJson {
                         allowsAddPosition = json.optBoolean("allows_add_position"),
                         primaryAdvice = json.optString("primary_advice", "暂无操作建议，等待重新计算"),
                         adviceReason = json.optString("advice_reason", "旧缓存未包含评分依据，等待重新计算"),
+                        // 旧缓存没有价位字段：0/null 落到「暂缺」语义，等下一次评估覆盖。
+                        price = json.optDouble("price", 0.0).takeIf { it.isFinite() } ?: 0.0,
+                        support = json.optDouble("support", 0.0).takeIf { it.isFinite() } ?: 0.0,
+                        resistance = json.optDouble("resistance", 0.0).takeIf { it.isFinite() } ?: 0.0,
+                        ma5 = json.optDouble("ma5", 0.0).takeIf { it.isFinite() } ?: 0.0,
+                        ma10 = json.optDouble("ma10", 0.0).takeIf { it.isFinite() } ?: 0.0,
+                        ma20 = json.optDouble("ma20", 0.0).takeIf { it.isFinite() } ?: 0.0,
+                        ma60 = json.optDouble("ma60", 0.0).takeIf { it.isFinite() } ?: 0.0,
+                        volumeRatio = json.optDoubleOrNull("volume_ratio"),
+                        atrPct = json.optDoubleOrNull("atr_pct"),
                     )
                     put(code, snapshot)
                 }
@@ -62,4 +81,13 @@ object TechnicalTrendSnapshotJson {
 
     private inline fun <reified T : Enum<T>> enumValueOrDefault(raw: String, default: T): T =
         enumValues<T>().firstOrNull { it.name == raw } ?: default
+
+    private fun Double.finiteOrZero(): Double = takeIf { it.isFinite() } ?: 0.0
+
+    /** null/缺失/非数值都返回 null；optDouble 对 NULL 值的返回值在不同实现里有差异，这里显式判空。 */
+    private fun JSONObject.optDoubleOrNull(key: String): Double? {
+        if (!has(key) || isNull(key)) return null
+        val value = optDouble(key, Double.NaN)
+        return value.takeIf { it.isFinite() }
+    }
 }

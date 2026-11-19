@@ -15,7 +15,11 @@ data class TechnicalSummary(
     val divergence: String = "",
 ) {
     companion object {
-        fun from(result: TechnicalResult): TechnicalSummary {
+        /**
+         * [unifiedAction] 统一口径建议（TechnicalAssessmentPolicy.primaryAdvice）；
+         * 缺省退回 [TechnicalResult.action] 的四档模板，供测试与旧调用兼容。
+         */
+        fun from(result: TechnicalResult, unifiedAction: String? = null): TechnicalSummary {
             val trend = when {
                 result.price > result.ma20 && result.ma20 > result.ma60 -> "中期趋势偏强"
                 result.price < result.ma20 && result.ma20 < result.ma60 -> "中期趋势偏弱"
@@ -46,10 +50,11 @@ data class TechnicalSummary(
             )
             val levels = String.format(
                 Locale.CHINA,
-                "支撑 %.2f｜压力 %.2f｜MA20 %.2f｜ATR %.2f（%.2f%%）",
+                "支撑 %.2f｜压力 %.2f｜MA20 %.2f｜MA60 %.2f｜ATR %.2f（%.2f%%）",
                 result.support,
                 result.resistance,
                 result.ma20,
+                result.ma60,
                 result.volatility.atr,
                 result.volatility.atrPct ?: 0.0,
             )
@@ -71,7 +76,7 @@ data class TechnicalSummary(
                 momentum = momentum,
                 levels = levels,
                 entry = entry,
-                action = result.action,
+                action = unifiedAction ?: result.action,
                 divergence = result.divergence.short,
             )
         }

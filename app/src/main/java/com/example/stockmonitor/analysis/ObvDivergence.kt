@@ -286,7 +286,16 @@ object ObvDivergence {
         }
 
         val reasonText = if (forming && state != DivergenceState.INSUFFICIENT && state != DivergenceState.NEUTRAL) {
-            reason + "（高点进行中，尚未走完确认窗）"
+            // 「进行中」按分支锚点分别措辞：顶背离/上行同步看高点，底背离/下行同步看低点。
+            // 之前一律写「高点进行中」，底背离的确认窗就被说反了；锚点侧已确认、
+            // 另一侧分型仍在走时，按实际在走的那侧说。
+            val anchor = when {
+                sideHigh && formingH -> "高点进行中"
+                !sideHigh && formingL -> "低点进行中"
+                sideHigh -> "低点参照进行中"
+                else -> "高点参照进行中"
+            }
+            "$reason（$anchor，尚未走完确认窗）"
         } else {
             reason
         }

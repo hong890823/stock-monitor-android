@@ -15,6 +15,8 @@ data class AlertRecord(
     val title: String,
     val body: String,
     val createdAtMs: Long,
+    val evidenceKey: String? = null,
+    val evidenceSummary: String? = null,
 )
 
 object AlertRecordBook {
@@ -58,7 +60,9 @@ object AlertRecordBook {
                     .put("trigger_type", record.triggerType)
                     .put("title", record.title)
                     .put("body", record.body)
-                    .put("created_at_ms", record.createdAtMs),
+                    .put("created_at_ms", record.createdAtMs)
+                    .put("evidence_key", record.evidenceKey)
+                    .put("evidence_summary", record.evidenceSummary),
             )
         }
     }.toString()
@@ -78,6 +82,8 @@ object AlertRecordBook {
                     title = item.optString("title"),
                     body = item.optString("body"),
                     createdAtMs = item.optLong("created_at_ms"),
+                    evidenceKey = item.optString("evidence_key").takeIf { it.isNotBlank() },
+                    evidenceSummary = item.optString("evidence_summary").takeIf { it.isNotBlank() },
                 ).takeIf { it.id.isNotBlank() && it.title.isNotBlank() }
             }
         }.getOrDefault(emptyList())
@@ -98,6 +104,7 @@ object AlertRecordBook {
     fun kindLabel(kind: String): String = when (kind) {
         "market_risk" -> "大盘风险"
         "risk_sell" -> "持仓风险"
+        "risk_exit_review" -> "重大风险待复核（非交易指令）"
         "signal" -> "盘中信号"
         "alert" -> "行情提醒"
         "analysis_complete" -> "分析完成"

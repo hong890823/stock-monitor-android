@@ -21,6 +21,7 @@ import com.example.stockmonitor.analysis.FundamentalCard
 import com.example.stockmonitor.analysis.FundamentalHealthPolicy
 import com.example.stockmonitor.analysis.Fundamentals
 import com.example.stockmonitor.analysis.FundamentalsReport
+import com.example.stockmonitor.analysis.TechnicalAssessmentPolicy
 import com.example.stockmonitor.analysis.GlobalCard
 import com.example.stockmonitor.analysis.GlobalFundamentalsReport
 import com.example.stockmonitor.analysis.MarketRegime
@@ -39,6 +40,8 @@ import com.example.stockmonitor.core.EastMoneyClient
 import com.example.stockmonitor.core.FundamentalsClient
 import com.example.stockmonitor.core.GlobalFundamentalsClient
 import com.example.stockmonitor.core.GlobalSecurity
+import com.example.stockmonitor.core.MarketNewsClient
+import com.example.stockmonitor.core.NewsItem
 import com.example.stockmonitor.core.Quote
 import com.example.stockmonitor.core.RowSnapshot
 import com.example.stockmonitor.core.SinaClient
@@ -287,11 +290,14 @@ class AnalysisService : Service() {
                     ),
                 prev = AnalysisReportCache.get(store.analysisReports, hit.first)?.snapshot,
             )
+        // 统一口径：卡片与报告的操作建议和持仓/自选同一套（带支撑、量比与距离上下文），
+        // AI 工具拿到的报告也出自这里，一处收敛三处受益。
+        val unifiedAdvice = TechnicalAssessmentPolicy.unifiedAdviceFor(result, history)
         val card =
             TechnicalCard(
                 result = result,
-                summary = TechnicalSummary.from(result),
-                report = StockAnalysis.formatReport(result, env),
+                summary = TechnicalSummary.from(result, unifiedAdvice),
+                report = StockAnalysis.formatReport(result, env, unifiedAdvice),
             )
         store.analysisReports =
             AnalysisReportCache.merge(
@@ -352,6 +358,7 @@ class AnalysisService : Service() {
                 Fundamentals.Input(
                     periods = data.periods,
                     balance = data.balance,
+                    balanceHistory = data.balanceHistory,
                     valuations = data.valuations,
                     totalShares = data.totalShares,
                     price = data.price,
@@ -474,6 +481,12 @@ class AnalysisService : Service() {
     ): Completed {
         val keyword = task.keyword
         val tools = StockAiToolExecutor(this)
+        // AI 综合分析每次主动带入同一时点的“只看重要”快讯，不依赖模型是否自行调用新闻工具。
+        val wallstreetcnImportantNews = runCatching {
+            MarketNewsClient.wallstreetcnImportantSummary(System.currentTimeMillis())
+        }.getOrElse { error ->
+            "华尔街见闻重要快讯请求失败：${error.message ?: "未知错误"}"
+        }
         val input =
             AiAnalysisInput(
                 question = keyword,
@@ -485,6 +498,7 @@ class AnalysisService : Service() {
                 trendSummary = "",
                 research = emptyList(),
                 generatedAt = TimeUtils.nowText(),
+                wallstreetcnImportantNews = wallstreetcnImportantNews,
             )
         val result = DeepSeekClient().analyze(input, tools)
         val security = tools.resolvedSecurity

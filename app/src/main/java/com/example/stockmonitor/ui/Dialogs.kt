@@ -1,5 +1,6 @@
 package com.example.stockmonitor.ui
 
+import android.app.DatePickerDialog
 import android.content.Context
 import android.text.InputType
 import android.view.View
@@ -16,10 +17,15 @@ import com.example.stockmonitor.analysis.AddLevel
 import com.example.stockmonitor.analysis.AddPositionStrategy
 import com.example.stockmonitor.analysis.CostReductionMarket
 import com.example.stockmonitor.analysis.CostReductionTrend
+import com.example.stockmonitor.analysis.PositionAllocationRecommendation
+import com.example.stockmonitor.analysis.PositionAllocationRecommendationInput
+import com.example.stockmonitor.analysis.PositionAllocationRecommendationPolicy
 import com.example.stockmonitor.analysis.StockAnalysis
 import com.example.stockmonitor.analysis.TradeCalculator
 import com.example.stockmonitor.analysis.TimeUtils
 import com.example.stockmonitor.core.Position
+import com.example.stockmonitor.core.PositionAllocationConfig
+import com.example.stockmonitor.core.PositionAllocationMode
 import com.example.stockmonitor.core.SinaClient
 import com.example.stockmonitor.core.Store
 import com.example.stockmonitor.core.TradeLotLedger
@@ -42,6 +48,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.LocalDate
 import java.util.Locale
 
 /** 输入框 / 设置 / 交易计算等对话框。 */
@@ -62,6 +69,10 @@ object Dialogs {
          * [value] 是要预选的选项，不在列表里（或留空）就选第一项。
          */
         val choices: List<String> = emptyList(),
+        /** 选项较多时纵向排列，由表单整体滚动，避免横向截断。 */
+        val verticalChoices: Boolean = false,
+        /** 日期字段使用系统日历，避免手输 yyyy-MM-dd。 */
+        val datePicker: Boolean = false,
         val action: FieldAction? = null,
     )
 
@@ -108,13 +119,45 @@ object Dialogs {
                             (if (field.decimal) InputType.TYPE_NUMBER_FLAG_DECIMAL else 0)
                     }
                 }
-                val actionButton = field.action?.let { action ->
-                    MaterialButton(context).apply {
-                        text = action.label
+                val openDatePicker: (() -> Unit)? = if (field.datePicker) {
+                    {
+                        val initial = runCatching { LocalDate.parse(edit.text.toString().trim()) }
+                            .getOrElse { LocalDate.now() }
+                        DatePickerDialog(
+                            context,
+                            { _, year, month, day ->
+                                val selected = LocalDate.of(year, month + 1, day).toString()
+                                edit.setText(selected)
+                                edit.setSelection(selected.length)
+                            },
+                            initial.year,
+                            initial.monthValue - 1,
+                            initial.dayOfMonth,
+                        ).show()
+                    }
+                } else {
+                    null
+                }
+                if (openDatePicker != null) {
+                    edit.isFocusable = false
+                    edit.isClickable = true
+                    edit.setOnClickListener { openDatePicker.invoke() }
+                }
+                val actionButton = when {
+                    openDatePicker != null -> MaterialButton(context).apply {
+                        text = "选择日期"
+                        textSize = 11f
+                        minWidth = 0
+                        minimumWidth = 0
+                        setOnClickListener { openDatePicker.invoke() }
+                    }
+                    field.action != null -> MaterialButton(context).apply {
+                        text = field.action.label
                         textSize = 11f
                         minWidth = 0
                         minimumWidth = 0
                     }
+                    else -> null
                 }
                 if (actionButton == null) {
                     container.addView(edit)
@@ -141,13 +184,36 @@ object Dialogs {
                 actionButtons.add(actionButton)
             } else {
                 val checked = field.choices.indexOf(field.value).takeIf { it >= 0 } ?: 0
-                val group = RadioGroup(context).apply { orientation = RadioGroup.HORIZONTAL }
+                val group = RadioGroup(context).apply {
+                    orientation = if (field.verticalChoices) RadioGroup.VERTICAL else RadioGroup.HORIZONTAL
+                }
                 field.choices.forEachIndexed { index, choice ->
                     val button = RadioButton(context).apply {
                         id = View.generateViewId()
                         text = choice
                         textSize = 14f
+                        isSingleLine = !field.verticalChoices
                         isChecked = index == checked
+                        minimumHeight = UiKit.dp(context, 44)
+                        if (field.verticalChoices) {
+                            setPadding(
+                                UiKit.dp(context, 8), UiKit.dp(context, 8),
+                                UiKit.dp(context, 8), UiKit.dp(context, 8),
+                            )
+                            layoutParams = LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                            )
+                        } else {
+                            setPadding(
+                                UiKit.dp(context, 8), UiKit.dp(context, 8),
+                                UiKit.dp(context, 16), UiKit.dp(context, 8),
+                            )
+                            layoutParams = LinearLayout.LayoutParams(
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                                ViewGroup.LayoutParams.WRAP_CONTENT,
+                            ).apply { marginEnd = UiKit.dp(context, 8) }
+                        }
                     }
                     group.addView(button)
                 }
@@ -618,11 +684,12 @@ object Dialogs {
                 "补记历史交易把日期改成实际买卖日；数量早已计入持仓、只想补上买入日期时，" +
                 "用「仅登记买入批次」，不会重复加持仓数量。",
             listOf(
-                Field("股票", labels.first(), choices = labels),
-                Field("交易日期", TimeUtils.todayText()),
+                Field("股票", labels.first(), choices = labels, verticalChoices = true),
+                Field("交易日期", TimeUtils.todayText(), datePicker = true),
                 Field("操作", "买入", choices = listOf("买入", "卖出")),
                 Field("数量（股）", "100", numeric = true, decimal = false),
                 Field("成交价格（元）", numeric = true),
+                Field("交易费用（元，可留空）", "0", numeric = true),
                 Field("仅登记买入批次（数量已计入持仓）", "否", choices = listOf("否", "是")),
             ),
         ) { values ->
@@ -636,16 +703,19 @@ object Dialogs {
             val sideText = values.getOrElse(2) { "买入" }
             val quantity = values.getOrElse(3) { "" }.toDoubleOrNull()
             val price = values.getOrElse(4) { "" }.toDoubleOrNull()
-            val lotOnly = values.getOrElse(5) { "否" } == "是"
+            val feeText = values.getOrElse(5) { "0" }.trim()
+            val fee = feeText.toDoubleOrNull()
+            val lotOnly = values.getOrElse(6) { "否" } == "是"
             val today = TimeUtils.todayText()
             if (!date.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) || date > today) {
                 Toast.makeText(context, "交易日期必须是不晚于今天的 yyyy-MM-dd", Toast.LENGTH_LONG).show()
                 return@input
             }
             if (quantity == null || quantity <= 0 || !quantity.isFinite() ||
-                price == null || price <= 0 || !price.isFinite()
+                price == null || price <= 0 || !price.isFinite() ||
+                fee == null || fee < 0 || !fee.isFinite()
             ) {
-                Toast.makeText(context, "数量和成交价格必须是大于 0 的数字", Toast.LENGTH_LONG).show()
+                Toast.makeText(context, "数量、成交价格和费用必须是有效数字（数量和价格大于 0，费用不小于 0）", Toast.LENGTH_LONG).show()
                 return@input
             }
             val side = if (sideText == "卖出") TradeSide.SELL else TradeSide.BUY
@@ -664,6 +734,8 @@ object Dialogs {
                 quantity = quantity,
                 price = price,
                 source = TradeSource.MANUAL,
+                fee = fee,
+                bookkeepingOnly = lotOnly,
             )
             if (lotOnly) {
                 // 补记批次：数量已经在持仓里（手工加仓时没记买入日期），这里只登记批次，
@@ -685,6 +757,15 @@ object Dialogs {
             }
             store.tradeBook = applied.book
             store.portfolio = applied.portfolio
+            store.applyDailyAdviceQuantityFeedback(
+                date = TimeUtils.todayText(),
+                code = position.code,
+                previousQuantity = position.quantity,
+                currentQuantity = applied.portfolio.positions
+                    .firstOrNull { it.code == position.code }
+                    ?.quantity
+                    ?: position.quantity,
+            )
             Toast.makeText(context, "交易已记录", Toast.LENGTH_SHORT).show()
             onSaved()
         }
@@ -707,7 +788,7 @@ object Dialogs {
                 listOf(
                     Field("持仓数量（股）", "0", numeric = true),
                     Field("持仓成本（元）", "0", numeric = true),
-                    Field("买入日期", TimeUtils.todayText()),
+                    Field("买入日期", TimeUtils.todayText(), datePicker = true),
                 ),
             ) { values ->
                 val quantity = values.getOrElse(0) { "0" }.toDoubleOrNull() ?: 0.0
@@ -730,6 +811,12 @@ object Dialogs {
                         store.tradeBook, code, name, 0.0, quantity, cost, date,
                     )
                 }
+                store.applyDailyAdviceQuantityFeedback(
+                    date = TimeUtils.todayText(),
+                    code = code,
+                    previousQuantity = 0.0,
+                    currentQuantity = quantity,
+                )
                 if (syncToWatchlist(context, code, name)) {
                     Toast.makeText(context, "已同时加入自选股（顶栏不显示）", Toast.LENGTH_SHORT).show()
                 }
@@ -811,7 +898,7 @@ object Dialogs {
                     listOf(
                         Field("持仓数量（股）", formatNumber(target.quantity), numeric = true),
                         Field("持仓成本（元）", formatNumber(target.cost), numeric = true),
-                        Field("加仓日期（数量增加时记批次）", TimeUtils.todayText()),
+                        Field("加仓日期（数量增加时记批次）", TimeUtils.todayText(), datePicker = true),
                     ),
                 ) { values ->
                     val quantity = values.getOrElse(0) { "0" }.toDoubleOrNull()
@@ -829,10 +916,132 @@ object Dialogs {
                     store.tradeBook = TradeLotLedger.syncPositionEdit(
                         store.tradeBook, target.code, target.name, target.quantity, quantity, cost, date,
                     )
+                    store.applyDailyAdviceQuantityFeedback(
+                        date = TimeUtils.todayText(),
+                        code = target.code,
+                        previousQuantity = target.quantity,
+                        currentQuantity = quantity,
+                    )
                     onSaved()
                 }
             }
             .show()
+    }
+
+    /** 配置固定底仓或风险观察模式；实时分仓数量始终从当前持仓派生。 */
+    fun positionAllocation(context: Context, onSaved: () -> Unit) {
+        val store = Store(context)
+        val positions = store.portfolio.positions
+        if (positions.isEmpty()) {
+            Toast.makeText(context, "当前没有可配置分仓的股票", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val labels = positions.map { position ->
+            val config = store.positionAllocations[position.code]
+            val recommendation = positionAllocationRecommendation(store, position)
+            val mode = when (config?.mode) {
+                PositionAllocationMode.RISK_OBSERVATION -> "风险观察"
+                PositionAllocationMode.NORMAL -> "普通"
+                null -> "未设置｜建议 ${recommendation.summary}"
+            }
+            "${position.name}（${position.code}）｜$mode"
+        }.toTypedArray()
+        MaterialAlertDialogBuilder(context)
+            .setTitle("设置分仓")
+            .setItems(labels) { _, index ->
+                val position = positions[index]
+                val current = store.positionAllocations[position.code]
+                val recommendation = positionAllocationRecommendation(store, position)
+                val recommendationText = buildString {
+                    append("系统建议：${recommendation.summary}（置信度 ${recommendation.confidence}%）。")
+                    recommendation.reasons.takeIf { it.isNotEmpty() }?.let {
+                        append("依据：${it.joinToString("；")}")
+                    }
+                    recommendation.dataGaps.takeIf { it.isNotEmpty() }?.let {
+                        append("数据缺口：${it.joinToString("、")}。")
+                    }
+                    append("系统建议只作参考，不会自动覆盖已保存的手动设置；点击确定后才会保存当前表单值。")
+                }
+                input(
+                    context,
+                    "设置 ${position.name} 的分仓",
+                    "普通模式按当前数量派生底仓和滚动仓；风险观察模式把当前数量列入风险观察仓，" +
+                        "不预设后续买回数量。技术趋势只影响操作谨慎度，不会自动改写已确认的底仓计划；" +
+                        "风险观察与持有价值判断分开复核。T+1 可卖数量仍以交易账本为准。\n\n$recommendationText",
+                    listOf(
+                        Field(
+                            "分仓模式",
+                            when (current?.mode) {
+                                PositionAllocationMode.RISK_OBSERVATION -> "风险观察模式"
+                                PositionAllocationMode.NORMAL -> "普通模式"
+                                null -> if (recommendation.mode == PositionAllocationMode.RISK_OBSERVATION) {
+                                    "风险观察模式"
+                                } else {
+                                    "普通模式"
+                                }
+                            },
+                            choices = listOf("普通模式", "风险观察模式"),
+                            verticalChoices = true,
+                        ),
+                        Field(
+                            "固定底仓目标（股）",
+                            current?.baseQuantityTarget?.let(::formatNumber)
+                                ?: recommendation.recommendedBaseQuantity?.let(::formatNumber).orEmpty(),
+                            numeric = true,
+                            action = recommendation.recommendedBaseQuantity?.let { suggestedQuantity ->
+                                FieldAction("填入建议") { formatNumber(suggestedQuantity) }
+                            },
+                        ),
+                    ),
+                ) { values ->
+                    val modeText = values.getOrElse(0) { "普通模式" }
+                    val config = if (modeText == "风险观察模式") {
+                        PositionAllocationConfig.riskObservation()
+                    } else {
+                        val target = values.getOrElse(1) { "" }.toDoubleOrNull()
+                        if (target == null || !target.isFinite() || target < 0.0) {
+                            Toast.makeText(context, "底仓目标必须是大于等于 0 的数字", Toast.LENGTH_SHORT).show()
+                            return@input
+                        }
+                        PositionAllocationConfig.normal(target)
+                    }
+                    store.positionAllocations = store.positionAllocations + (position.code to config)
+                    Toast.makeText(context, "分仓设置已保存", Toast.LENGTH_SHORT).show()
+                    onSaved()
+                }
+            }
+            .show()
+    }
+
+    private fun positionAllocationRecommendation(
+        store: Store,
+        position: Position,
+    ): PositionAllocationRecommendation {
+        val result = Repo.portfolioResults.firstOrNull { it.code == position.code }
+        val technical = Repo.technicalTrendSnapshots[position.code]
+        val fundamental = result?.fundamentalHealth ?: Repo.fundamentalHealth[position.code]?.health
+        val price = result?.price ?: technical?.price ?: Repo.quotes[position.code]?.price
+        val positionPct = result?.positionPct ?: if (
+            price != null && price.isFinite() && price > 0.0 && store.portfolio.totalCapital > 0.0
+        ) {
+            position.quantity * price / store.portfolio.totalCapital * 100.0
+        } else {
+            null
+        }
+        return PositionAllocationRecommendationPolicy.recommend(
+            PositionAllocationRecommendationInput(
+                quantity = position.quantity,
+                technicalScore = technical?.technicalScore,
+                technicalAllowsAdd = result?.trendAssessment?.allowsAddPosition ?: technical?.allowsAddPosition,
+                trendWeak = result?.entrySetup?.trendWeak == true ||
+                    result?.trendAssessment?.riskOnly == true ||
+                    technical?.trendWeak == true,
+                majorTrend = result?.trendAssessment?.major,
+                fundamentalLevel = fundamental?.level,
+                positionPct = positionPct,
+                maxPositionPct = store.portfolio.maxPositionPct,
+            ),
+        )
     }
 
     /** 交易日期校验：yyyy-MM-dd 且不晚于今天。 */

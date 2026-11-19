@@ -26,6 +26,7 @@ object MarketNewsJson {
                                 .put("source_id", selected.item.sourceId)
                                 .put("track", selected.track.name)
                                 .put("trust_score", selected.item.trustScore)
+                                .put("source_priority", selected.item.sourcePriority)
                                 .put("supporting_sources", JSONArray(selected.supportingSources))
                                 .put(
                                     "score",
@@ -33,6 +34,7 @@ object MarketNewsJson {
                                         .put("focus", selected.score.focus)
                                         .put("event", selected.score.event)
                                         .put("trust", selected.score.trust)
+                                        .put("source_preference", selected.score.sourcePreference)
                                         .put("corroboration", selected.score.corroboration)
                                         .put("freshness", selected.score.freshness)
                                         .put("penalty", selected.score.penalty),
@@ -64,6 +66,7 @@ object MarketNewsJson {
                 focus = scoreJson?.optInt("focus") ?: 0,
                 event = scoreJson?.optInt("event") ?: 0,
                 trust = scoreJson?.optInt("trust") ?: 0,
+                sourcePreference = scoreJson?.optInt("source_preference") ?: 0,
                 corroboration = scoreJson?.optInt("corroboration") ?: 0,
                 freshness = scoreJson?.optInt("freshness") ?: 0,
                 penalty = scoreJson?.optInt("penalty") ?: 0,
@@ -81,6 +84,7 @@ object MarketNewsJson {
                     sourceId = row.optString("source_id"),
                     track = track,
                     trustScore = row.optInt("trust_score", 50),
+                    sourcePriority = row.optInt("source_priority", 0),
                 ),
                 category = category,
                 track = track,

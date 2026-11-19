@@ -137,8 +137,8 @@ object AdaptiveRhythmPolicy {
             evidence.changePct?.let { it.isFinite() && it > 0.0 } == true &&
             evidence.volumeRatio?.let { it.isFinite() && it in 0.0..1.0 } == true
         val phase = when {
-            evidence.lowerHighs == true || evidence.volumeWithoutProgress == true ->
-                AdaptiveRhythmPhase.DIVERGENCE_RISK
+            // lowerHighs / volumeWithoutProgress 在函数开头已整组提前返回（DIVERGENCE_RISK），
+            // 这里再判一次永远不可达，删去。
             evidence.shortTermTrend == ShortTermTrend.DOWN || evidence.marketRegime == MarketRegime.COLLAPSE ->
                 if (reboundEvidence) AdaptiveRhythmPhase.REBOUND_WATCH else AdaptiveRhythmPhase.DOWN
             pressure >= thresholds.riskPressure -> AdaptiveRhythmPhase.DIVERGENCE_RISK

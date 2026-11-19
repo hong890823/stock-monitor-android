@@ -101,6 +101,8 @@ data class AiAnalysisInput(
     val trendSummary: String,
     val research: List<WebResearchItem>,
     val generatedAt: String,
+    /** AI 综合分析启动时主动获取的华尔街见闻“只看重要”快讯，避免由模型自行决定是否拉取。 */
+    val wallstreetcnImportantNews: String = "",
     val knowledgeBase: String = "",
 )
 
@@ -154,6 +156,12 @@ object AiToolCatalog {
         .put(function(
             name = "get_portfolio_report",
             description = "仅当问题涉及用户持仓、仓位或持仓影响时，读取最近一次持仓报告。报告可能来自内存或本地缓存；只读，不会触发重新分析。",
+            properties = JSONObject(),
+            required = emptyList(),
+        ))
+        .put(function(
+            name = "get_portfolio_today_brief",
+            description = "当问题涉及用户持仓、仓位或当日优先处理对象时，读取按风险优先级选出的单股建议，含数据新鲜度、持仓建议和同日技术趋势参考；只读，不会触发重新分析。需要完整上下文时再调用 get_portfolio_report。",
             properties = JSONObject(),
             required = emptyList(),
         ))
@@ -248,7 +256,7 @@ object AiAnalysisPrompt {
     fun system(): String = """
         你是一个严谨的股票和指数研究助手。你只能根据用户提供的程序分析数据和网络资料作判断，不能把缺失数据当成利好，也不能编造事实、数字、公告或来源。
         先判断问题范围，再只调用回答所必需的只读工具；不要因为应用提供了工具就机械地全部调用。工具调用应随问题变化：能用一个准确工具回答就不要扩张到无关数据。
-        个股问题：不要自行猜测股票代码或把完整问题当成股票名称，先用 search_security 确认标的。再按具体意图选择数据——问走势就调行情、K线或技术面，问财务就调基本面，问所属板块就调板块和市场环境，问持仓影响才调持仓报告；只有用户明确要求综合分析或结论确实需要时，才组合技术面、基本面、板块、市场和持仓数据。财务问题不要为了“完整”而调用技术面，技术问题也不必强行补基本面。
+        个股问题：不要自行猜测股票代码或把完整问题当成股票名称，先用 search_security 确认标的。再按具体意图选择数据——问走势就调行情、K线或技术面，问财务就调基本面，问所属板块就调板块和市场环境；涉及用户持仓、仓位或当日优先处理时先调 get_portfolio_today_brief，需要完整持仓上下文再调 get_portfolio_report。只有用户明确要求综合分析或结论确实需要时，才组合技术面、基本面、板块、市场和持仓数据。财务问题不要为了“完整”而调用技术面，技术问题也不必强行补基本面。
         板块问题：优先使用 get_sector_snapshot、get_market_summary_report 和必要的网络资料；不要调用个股技术分析、个股基本面、个股K线或个股持仓工具。先分清用户问的是行业、概念、相对强弱、资金还是整体宽度，只取得对应数据。
         大盘问题：按需使用 get_market_summary_report、get_market_risk_context 和必要的指数行情；没有明确个股或板块时，不要搜索并强行绑定一只股票。策略或研究方法问题先用 list_knowledge_bases，再按需读取 get_knowledge_base；一般知识问题不必调用行情工具。
         涉及新闻、公告、催化事件或风险事件时，调用 get_related_news：个股传公司名或代码，行业/概念问题传板块名称；根据事件新鲜度和来源判断可信度，查不到就明确写新闻数据不足，不能把没有命中写成没有事件。
@@ -268,6 +276,12 @@ object AiAnalysisPrompt {
         appendLine("【用户问题】")
         appendLine(input.question)
         appendLine("数据生成时间：${input.generatedAt}")
+        if (input.wallstreetcnImportantNews.isNotBlank()) {
+            appendLine()
+            appendLine("【华尔街见闻重要快讯】")
+            appendLine(input.wallstreetcnImportantNews)
+            appendLine("这些是实时事件线索，只在与问题相关时使用；引用时注明华尔街见闻与发布时间，不能把未命中的快讯推断为标的事实。")
+        }
         appendLine("如果问题涉及具体股票或指数，请先使用 search_security，不要等待客户端提供预解析标的。")
     }
 

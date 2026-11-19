@@ -208,7 +208,11 @@ object ScreenResultJson {
                     .put("stage", hit.stage.name)
                     .put("progress", hit.progress)
                     .put("detail", hit.detail)
-                    .putIfFinite("gain60_pct", hit.gain60Pct),
+                    .putIfFinite("gain60_pct", hit.gain60Pct)
+                    .putIfFinite("range_position_pct", hit.rangePositionPct)
+                    .put("technical_score", hit.technicalScore)
+                    .put("weekly_trend", hit.weeklyTrendLabel)
+                    .put("monthly_trend", hit.monthlyTrendLabel)
             )
         }
     }
@@ -228,6 +232,10 @@ object ScreenResultJson {
                     progress = json.optString("progress"),
                     detail = json.optString("detail"),
                     gain60Pct = json.optDouble("gain60_pct"),
+                    rangePositionPct = json.optDouble("range_position_pct", Double.NaN),
+                    technicalScore = json.optInt("technical_score", 40),
+                    weeklyTrendLabel = json.optString("weekly_trend", "数据不足"),
+                    monthlyTrendLabel = json.optString("monthly_trend", "数据不足"),
                 )
             }.getOrNull()
         }

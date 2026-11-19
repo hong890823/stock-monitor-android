@@ -94,4 +94,26 @@ class WatchlistBuyCandidatePoolTest {
         assertEquals(0, updated.weakDays)
         assertFalse(updated.continuousObservation)
     }
+
+    @Test
+    fun eliminatedWatchCandidateStaysEliminatedRestOfTheSameDay() {
+        // sync 每个盘中 tick 都跑：淘汰当日必须保留 ELIMINATED 与状态轨迹，
+        // 否则淘汰最多存活一个 tick 就被重置成全新候选（淘汰语义失效）。
+        val eliminated = WatchlistBuyCandidatePool
+            .candidate("sh600000", "浦发", "2026-10-10")
+            .copy(stage = ObservationStage.ELIMINATED, observedDays = 10, weakDays = 3,
+                lastEvaluatedDate = "2026-10-23")
+
+        val updated = WatchlistBuyCandidatePool.sync(
+            watchlist = listOf(WatchItem("sh600000", "浦发", false)),
+            previous = listOf(eliminated),
+            heldCodes = emptySet(),
+            observationCodes = emptySet(),
+            today = "2026-10-23",
+        ).single()
+
+        assertEquals(ObservationStage.ELIMINATED, updated.stage)
+        assertEquals(10, updated.observedDays)
+        assertEquals(3, updated.weakDays)
+    }
 }

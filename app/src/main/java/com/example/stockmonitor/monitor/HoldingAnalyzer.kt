@@ -29,6 +29,7 @@ import com.example.stockmonitor.core.DayBar
 import com.example.stockmonitor.core.DailyRiskMetrics
 import com.example.stockmonitor.core.EastMoneyClient
 import com.example.stockmonitor.core.FundamentalsClient
+import com.example.stockmonitor.core.MarketNewsClient
 import com.example.stockmonitor.core.Portfolio
 import com.example.stockmonitor.core.Position
 import com.example.stockmonitor.core.Quote
@@ -38,9 +39,10 @@ import java.util.Calendar
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
 
 /**
  * 持仓分析与持仓复盘**共用的分析机器**：单股「行情 + 技术 + 信号」判定、市场宽度、
@@ -67,11 +69,9 @@ object HoldingAnalyzer {
     val holdingTTracker = HoldingTTracker()
     val holdingBreakTracker = HoldingBreakTracker()
 
-    /** 公告清单按需补拉：上次尝试时间与在途去重，失败不重试轰炸。 */
+    /** 公告清单按需补拉：上次尝试时间与在途任务表，失败不重试轰炸。 */
     private val announcementLastFetchAt = mutableMapOf<String, Long>()
-    private val announcementInFlight =
-        ConcurrentHashMap
-            .newKeySet<String>()
+    private val announcementJobs = ConcurrentHashMap<String, Deferred<Unit>>()
 
     private val dailyReviewBusy = AtomicBoolean(false)
 
@@ -150,7 +150,7 @@ object HoldingAnalyzer {
             history.lastOrNull()?.date ?: live.quoteDate?.substringBefore(' ') ?: today,
         )
         return result.copy(
-            analysisDate = live.quoteDate?.substringBefore(' ') ?: today,
+            analysisDate = live.quoteDate?.substringBefore(' ').orEmpty(),
             fiveDayNoNewLow = dailyMetrics.fiveDayNoNewLow,
             closesBelowMa20 = dailyMetrics.closesBelowMa20,
         )
@@ -255,21 +255,33 @@ object HoldingAnalyzer {
             }
     }
 
-    private fun maybeRefreshAnnouncements(code: String) {
+    /**
+     * 发起公告补拉（12 小时按「上次尝试」节流 + 在途去重），返回在途任务。
+     * 盘中持仓分析拿到任务后不等（fire-and-forget，行情分析不能被轻量公告请求拖住）；
+     * 复盘则 await 它——否则复盘在补拉完成前读 [Repo.recentAnnouncements]，
+     * 会拿到 12 小时前的旧缓存（时间戳发起时即写入，复盘不会再触发第二次拉取）。
+     */
+    private fun startAnnouncementRefresh(code: String): Deferred<Unit>? {
+        // 在途任务直接复用：等同一个请求完成，不对同一 code 打两次接口。
+        announcementJobs[code]?.let { job -> if (!job.isCompleted) return job }
         val now = System.currentTimeMillis()
-        if (now - (announcementLastFetchAt[code] ?: 0L) < ANNOUNCEMENT_REFRESH_MS) return
-        if (!announcementInFlight.add(code)) return
+        if (now - (announcementLastFetchAt[code] ?: 0L) < ANNOUNCEMENT_REFRESH_MS) return null
         announcementLastFetchAt[code] = now
-        scope.launch {
+        val job = scope.async<Unit> {
             try {
                 Repo.publishAnnouncements(code, FundamentalsClient().announcements(code))
                 Repo.notifyChanged()
             } catch (error: Exception) {
                 Log.w(TAG, "公告补拉失败 $code", error)
-            } finally {
-                announcementInFlight.remove(code)
             }
         }
+        announcementJobs[code] = job
+        return job
+    }
+
+    /** 盘中持仓分析入口：发起即返回，不等待补拉完成。 */
+    private fun maybeRefreshAnnouncements(code: String) {
+        startAnnouncementRefresh(code)
     }
 
     /**
@@ -320,6 +332,15 @@ object HoldingAnalyzer {
                 return
             }
 
+            // 一次取得近两自然日的“只看重要”快讯，再按真实持仓在本地匹配，不能逐股重复请求。
+            val wallstreetcnNews = runCatching {
+                if (portfolio.positions.any { it.quantity.isFinite() && it.quantity > 0 }) {
+                    MarketNewsClient.wallstreetcnImportant(System.currentTimeMillis(), maxAgeDays = 2)
+                } else {
+                    emptyList()
+                }
+            }
+
             val benchmark = runCatching { sina.kline("sh000001", 240) }.getOrNull()
             val market = MarketRegime.evaluate(benchmark.orEmpty(), indexQuote?.changePct)
             Repo.marketState = market
@@ -348,6 +369,10 @@ object HoldingAnalyzer {
                     return@forEachIndexed
                 }
                 liveQuotes[position.code] = live
+                // 复盘要用最新公告（近两日利好一节的原料）：analyzePosition 里的补拉是
+                // fire-and-forget，立刻读缓存会拿到 12 小时前的旧数据，这里同步等
+                // 补拉完成再分析；节流与在途去重与盘中同源，不会打两次接口。
+                startAnnouncementRefresh(position.code)?.await()
                 // 复盘不发盘中信号、不补拉基本面，所以只取分析结果。
                 runCatching { results.add(analyzePosition(position, portfolio, live, benchmark, market, marketRisk)) }
                     .onFailure { Log.e(TAG, "复盘分析失败 ${position.name}", it) }
@@ -362,6 +387,32 @@ object HoldingAnalyzer {
                 Repo.notifyChanged()
             }
 
+            // 与盘中同一口径标注统一优先级的确认位（MonitorService 持仓分析循环同款）：
+            // 否则复盘走默认 false，头部永远「暂无已确认的买卖动作」，而个股应对里
+            // 却可能写着「退出优先」——同一份报告自相矛盾。盘后 15 分钟 K 线已完整，
+            // 风险确认的证据窗口比盘中更充分。
+            val priorityNow = java.time.LocalDateTime.now(java.time.ZoneId.of("Asia/Shanghai"))
+            for (index in results.indices) {
+                val result = results[index]
+                val bars = runCatching { sina.intradayKline(result.code, 15, 120) }.getOrNull().orEmpty()
+                val evidence = com.example.stockmonitor.core.TimeframeEvidence.build(
+                    bars15 = com.example.stockmonitor.core.IntradayBarWindow(bars)
+                        .withCompletionState(priorityNow, result.analysisDate, 15).bars,
+                    bars30 = emptyList(),
+                    price = result.price,
+                    support = result.support,
+                    resistance = result.resistance,
+                    now = priorityNow,
+                    quoteDate = result.analysisDate,
+                )
+                val confirmed = evidence.riskComplete && evidence.riskConfirmed && evidence.riskConfirmations >= 3
+                val exitReference = com.example.stockmonitor.analysis.HoldingExitPolicy.exitReference(result.support, result.volatility.atrPct)
+                results[index] = result.copy(
+                    priorityRiskConfirmed = confirmed,
+                    priorityExitTriggered = confirmed && result.price < exitReference && result.price < result.ma20 * 0.995,
+                )
+            }
+
             val text =
                 DailyReview.generate(
                     DailyReview.Inputs(
@@ -374,10 +425,14 @@ object HoldingAnalyzer {
                         market = market,
                         sectorContexts = Repo.sectorContexts,
                         strongContinuationEvents = Repo.strongContinuationEvents.filter { it.date == today },
-                        // 近两日重大利好一节的原料；analyzePosition 已顺带刷新（maybeRefreshAnnouncements）。
+                        // 近两日重大利好一节的原料；复盘循环里已对缺缓存/过期持仓同步等补拉完成。
                         recentAnnouncements = Repo.recentAnnouncements,
                         // 利好窗口要回溯到上一交易日（周一复盘才收得进周五盘后与周末的公告）。
                         tradingDates = benchmark.orEmpty().map { it.date },
+                        wallstreetcnImportantNews = wallstreetcnNews.getOrDefault(emptyList()),
+                        wallstreetcnNewsLoaded = wallstreetcnNews.isSuccess,
+                        wallstreetcnNewsError = wallstreetcnNews.exceptionOrNull()?.message,
+                        tradeBook = store.tradeBook,
                         todayAcquisitions = DayPnl.acquisitions(store.tradeBook, today),
                     ),
                 )

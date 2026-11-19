@@ -1,6 +1,7 @@
 package com.example.stockmonitor.analysis
 
 import com.example.stockmonitor.core.FundFlow
+import java.util.Locale
 import kotlin.math.abs
 
 enum class FundFlowTone {
@@ -49,7 +50,7 @@ object FundFlowPolicy {
             changePct < -MIN_CHANGE_PCT && netPct >= MIN_MAIN_NET_PCT -> FundFlowTone.ABSORPTION_WATCH
             else -> FundFlowTone.NEUTRAL
         }
-        val reason = when (tone) {
+        val explanation = when (tone) {
             FundFlowTone.SUPPORTIVE ->
                 "价格上涨且大单/超大单主动买卖净流向为正，方向一致，仅作辅助确认。"
             FundFlowTone.DIVERGENT ->
@@ -63,6 +64,19 @@ object FundFlowPolicy {
             FundFlowTone.UNAVAILABLE ->
                 "资金流数据缺失，仅按价格与量价条件判断。"
         }
+        val direction = when {
+            netPct > 0.0 -> "净流入"
+            netPct < 0.0 -> "净流出"
+            flow.mainNetYuan?.let { it.isFinite() && it > 0.0 } == true -> "净流入"
+            flow.mainNetYuan?.let { it.isFinite() && it < 0.0 } == true -> "净流出"
+            else -> "基本持平"
+        }
+        val amountText = flow.mainNetYuan?.takeIf { it.isFinite() }?.let {
+            " ${formatMoney(abs(it))}"
+        }.orEmpty()
+        val pctText = String.format(Locale.CHINA, "%+.2f%%", netPct)
+        val evidence = "今日主力资金$direction$amountText（占成交额 $pctText）"
+        val reason = "$evidence；$explanation"
         return FundFlowAssessment(
             tone = tone,
             strong = strong,
@@ -79,5 +93,11 @@ object FundFlowPolicy {
             FundFlowTone.DIVERGENT, FundFlowTone.RISK -> -1
             else -> 0
         }
+    }
+
+    private fun formatMoney(value: Double): String = when {
+        value >= 1e8 -> String.format(Locale.CHINA, "%.2f亿", value / 1e8)
+        value >= 1e4 -> String.format(Locale.CHINA, "%.1f万", value / 1e4)
+        else -> String.format(Locale.CHINA, "%.0f元", value)
     }
 }

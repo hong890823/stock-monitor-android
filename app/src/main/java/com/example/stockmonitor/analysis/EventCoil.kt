@@ -69,7 +69,9 @@ object EventCoil {
         if (!noticed) return null
         val holdLine = eventBar.close * HOLD_RATIO
         // 事件日之后的中间日必须缩量蓄势；最新一根只要还守得住回踩线（启动日放量上涨也算守住）。
-        val middles = sorted.subList(eventIndex + 1, sorted.size - 1)
+        // 事件日即最后一根（当日盘中公告）时没有中间日，取空列表，不能让 subList 越界。
+        val middles =
+            if (eventIndex < sorted.size - 1) sorted.subList(eventIndex + 1, sorted.size - 1) else emptyList()
         if (middles.any { it.volume > avgVolume * COIL_VOLUME_RATIO || it.close < holdLine }) return null
         val latest = sorted.last()
         if (latest.close < holdLine) return null
@@ -142,11 +144,22 @@ object EventCoil {
         "占[^。；%]{0,24}(?:总股本|流通股本|股本|股份总数|总市值|流通市值|市值)[^。；%]{0,12}?([0-9]+(?:\\.[0-9]+)?)\\s*%"
     )
 
-    /** 「注销/减少/取消……N 股」的注销股数；表格型披露没有「占 X%」句式时用它兜底。 */
-    private val CANCEL_SHARES = Regex("(?:注销|减少|取消)[^。；]{0,16}?([0-9][0-9,]{2,})\\s*股")
+    /** 「注销/减少/取消……N 股」的注销股数；表格型披露没有「占 X%」句式时用它兜底。支持「万股/亿股」。 */
+    private val CANCEL_SHARES = Regex("(?:注销|减少|取消)[^。；]{0,16}?([0-9][0-9,.]{2,})\\s*(万|亿)?\\s*股")
 
-    /** 「总股本/股份总数……N」的变动前总股本；同样给表格型披露兜底用。 */
-    private val TOTAL_SHARES = Regex("(?:总股本|股份总数)[^。；]{0,16}?([0-9][0-9,]{5,})")
+    /** 「总股本/股份总数……N」的变动前总股本；同样给表格型披露兜底用。支持「万股/亿股」。 */
+    private val TOTAL_SHARES = Regex("(?:总股本|股份总数)[^。；]{0,16}?([0-9][0-9,.]{2,})\\s*(万|亿)?")
+
+    /** 股数解析：去千分位 + 按万/亿倍率换算；解析不出返回 null。 */
+    private fun parseShares(match: MatchResult): Double? {
+        val number = match.groupValues[1].replace(",", "").toDoubleOrNull() ?: return null
+        if (!number.isFinite() || number <= 0) return null
+        return when (match.groupValues[2]) {
+            "万" -> number * 10_000.0
+            "亿" -> number * 100_000_000.0
+            else -> number
+        }
+    }
 
     /**
      * 回购注销占股本比例（百分点）；解析不出返回 null。
@@ -161,12 +174,8 @@ object EventCoil {
             .mapNotNull { it.groupValues[1].toDoubleOrNull() }
             .maxOrNull()
             ?.let { return it }
-        val cancel = CANCEL_SHARES.findAll(text)
-            .mapNotNull { it.groupValues[1].replace(",", "").toDoubleOrNull() }
-            .maxOrNull() ?: return null
-        val total = TOTAL_SHARES.findAll(text)
-            .mapNotNull { it.groupValues[1].replace(",", "").toDoubleOrNull() }
-            .maxOrNull() ?: return null
+        val cancel = CANCEL_SHARES.findAll(text).mapNotNull { parseShares(it) }.maxOrNull() ?: return null
+        val total = TOTAL_SHARES.findAll(text).mapNotNull { parseShares(it) }.maxOrNull() ?: return null
         // 股数解析错位（注销数 ≥ 总股本）就宁缺勿滥，别算出个离谱占比。
         if (total <= 0 || cancel <= 0 || cancel >= total) return null
         return cancel / total * 100
@@ -180,8 +189,14 @@ object EventCoil {
      * 业绩预亏/大幅下滑、商誉/计提减值、股份司法冻结。
      * 不收：问询函/警示函（流程噪声）、质押（常见操作）、董监高小额减持计划（与小额
      * 增持计划同一标准）、诉讼仲裁进展（金额不明不构成硬利空）。
+     * 反向豁免（与 Governance 同口径）：终止减持、解除冻结、撤销退市风险警示是利好
+     * 方向，不能因带「减持/冻结/退市」关键词被归成利空；「终止重组」仍是真利空。
      */
     fun negativeEventKind(title: String): String? = when {
+        title.contains("减持") &&
+            (title.contains("终止") || title.contains("期满") || title.contains("撤回")) -> null
+        (title.contains("撤销") || title.contains("取消")) && title.contains("退市") -> null
+        title.contains("解除") && title.contains("冻结") -> null
         title.contains("立案") -> "立案调查"
         title.contains("处罚") -> "行政处罚"
         title.contains("退市") -> "退市风险"

@@ -41,7 +41,7 @@ object FundamentalsReport {
 
     private const val INTERNAL_CONTROL_CAVEAT =
         "内控与合规：审计意见、股权质押、监管处罚这些信息在公告里而不在报表里，" +
-            "上面这一段是财报上可观测的财务质量代理指标（商誉、其他应收款、存贷双高、扣非比例、现金流含量），" +
+            "上面这一段是财报上可观测的财务质量代理指标（商誉、其他应收款、存贷双高、扣非比例、现金流含量、存货/应收错配、合同负债），" +
             "下面一节才是公告扫描结果。"
 
     private const val VALUATION_CAVEAT =
@@ -127,6 +127,7 @@ object FundamentalsReport {
             appendLine("结论：${assetQualityConclusion(result)}")
             appendLine()
 
+            appendFinancialQuality(this, result)
             appendGovernance(this, result)
             appendMainBusiness(this, result)
             appendPeers(this, result)
@@ -326,6 +327,57 @@ object FundamentalsReport {
             }
         }
         builder.appendLine("结论：${mainBusinessConclusion(result)}")
+        builder.appendLine()
+    }
+
+    private fun appendFinancialQuality(builder: StringBuilder, result: FundamentalResult) {
+        val quality = result.financialQuality
+        builder.appendLine("财务质量细项（新增规则）")
+        if (!quality.applicable) {
+            builder.appendLine("金融行业适用性：工业企业财务质量规则跳过，不能用存货、应收、净现比和合同负债工业口径直接判断。")
+        } else {
+            val annual = quality.annualNetCashRatios
+            builder.appendLine(
+                "净现比（经营性净现金流/归母净利润）：" +
+                    if (annual.isEmpty()) "—" else annual.takeLast(2).joinToString("、") { "${it.date.take(4)}年 ${numOrDash(it.value)}" } +
+                        "；连续两年低于 0.5 记为风险"
+            )
+            builder.appendLine("扣非归母净利润/归母净利润：${numOrDash(result.deductRatio)}；低于 0.7 说明利润质量偏弱")
+            builder.appendLine(
+                "资产负债率：${pct1(quality.debtRatio?.times(100))}；高于 65% 且经营性净现金流为负，记为高杠杆现金流风险",
+            )
+            builder.appendLine(
+                "存货增速：${pct1(quality.inventoryGrowth?.times(100))}｜营业收入增速：${pct1(quality.revenueGrowth?.times(100))}；存货达到营收增速 2 倍以上，记为备货未兑现风险",
+            )
+            builder.appendLine(
+                "应收账款增速：${pct1(quality.receivableGrowth?.times(100))}｜周转天数：" +
+                    "${numOrDash(quality.previousReceivableTurnoverDays)} → ${numOrDash(quality.receivableTurnoverDays)}；增速高于营收且天数上升，记为回款风险",
+            )
+            if (quality.contractLiabilities != null) {
+                builder.appendLine(
+                    "合同负债/预收款：${yi(quality.contractLiabilities)} 亿（占最新营收 ${pct1(quality.contractLiabilityRatio?.times(100))}）",
+                )
+            } else {
+                builder.appendLine("合同负债/预收款：数据缺失，不能把缺失当作利好或利空")
+            }
+        }
+        if (quality.warnings.isNotEmpty()) {
+            quality.warnings.forEach { warning ->
+                val level = if (warning.startsWith("存货增速") || warning.startsWith("应收账款增速")) {
+                    RiskLevel.WATCH
+                } else {
+                    RiskLevel.ALERT
+                }
+                builder.appendLine("${mark(level)}$warning")
+            }
+        }
+        if (quality.strengths.isNotEmpty()) {
+            quality.strengths.forEach { builder.appendLine("✅ $it") }
+        }
+        if (quality.dataGaps.isNotEmpty()) {
+            builder.appendLine("数据缺口：${quality.dataGaps.joinToString("；")}")
+        }
+        builder.appendLine("口径：预收款/合同负债只是未来履约义务的证据；合同类公告只是线索，需人工核验合同金额、交付、回款和利润确认，不能单独证明持续盈利。")
         builder.appendLine()
     }
 

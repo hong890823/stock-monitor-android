@@ -18,6 +18,19 @@ data class TechnicalTrendSnapshot(
     val allowsAddPosition: Boolean,
     val primaryAdvice: String,
     val adviceReason: String,
+    /**
+     * 行情与关键价位：持仓页等待盘中分析时也能展示支撑/压力、量比与均线结构，
+     * 不用等盘中槽位。旧缓存没有这些字段，缺省 0/null 按暂缺处理。
+     */
+    val price: Double = 0.0,
+    val support: Double = 0.0,
+    val resistance: Double = 0.0,
+    val ma5: Double = 0.0,
+    val ma10: Double = 0.0,
+    val ma20: Double = 0.0,
+    val ma60: Double = 0.0,
+    val volumeRatio: Double? = null,
+    val atrPct: Double? = null,
 ) {
     val summary: String
         get() = "技术 $technicalScore/100｜周K${weeklyTrend.label}｜月K${monthlyTrend.label}"
@@ -33,29 +46,45 @@ data class TechnicalTrendSnapshot(
 }
 
 object TechnicalTrendSnapshotPolicy {
+    /**
+     * entrySetup / trendAssessment 允许传 null：选股快扫等调用方没有独立评估过的
+     * 入场结构或趋势结论时，直接复用 [StockAnalysis.analyze] 自带的默认口径，
+     * 避免为拿同一个「技术 X/100」分重复计算一遍。
+     */
     fun evaluate(
         history: List<DayBar>,
         code: String,
         name: String,
         asOf: String,
-        entrySetup: EntrySetup,
-        trendAssessment: TrendAssessment,
+        entrySetup: EntrySetup? = null,
+        trendAssessment: TrendAssessment? = null,
+        marketRegime: MarketRegime? = null,
+        /** 调用方已算好的多周期摘要直接复用，避免与 TrendAssessmentPolicy 重复计算。 */
+        cycles: MultiTimeframeSummary? = null,
     ): TechnicalTrendSnapshot {
-        val cycles = MultiTimeframeTrend.evaluate(history, asOf)
-        val technical = StockAnalysis.analyze(
+        val effectiveCycles = cycles ?: MultiTimeframeTrend.evaluate(history, asOf)
+        // analyze 只跑一次；调用方传入的 entrySetup/trendAssessment 非空时覆盖默认值，
+        // 为空则沿用 analyze 自带的口径，两套来源进同一套四维评分。
+        val analyzed = StockAnalysis.analyze(
             history = history,
             code = code,
             name = name,
-        ).copy(
-            entrySetup = entrySetup,
-            trendAssessment = trendAssessment,
+        )
+        val effectiveSetup = entrySetup ?: analyzed.entrySetup
+        val effectiveAssessment = trendAssessment ?: analyzed.trendAssessment
+        val technical = analyzed.copy(
+            entrySetup = effectiveSetup,
+            trendAssessment = effectiveAssessment,
         )
         val assessment = TechnicalAssessmentPolicy.evaluate(
             technical = technical,
-            weeklyTrend = cycles.weekTrend,
-            monthlyTrend = cycles.monthTrend,
+            weeklyTrend = effectiveCycles.weekTrend,
+            monthlyTrend = effectiveCycles.monthTrend,
+            marketRegime = marketRegime,
         )
-        val allowsAddPosition = trendAssessment.allowsAddPosition && !entrySetup.trendWeak
+        val allowsAddPosition = effectiveAssessment?.allowsAddPosition == true && !effectiveSetup.trendWeak &&
+            // 塌陷期不给加仓资格：与 primaryAdvice 的环境压制同一口径。
+            marketRegime != MarketRegime.COLLAPSE
         return TechnicalTrendSnapshot(
             code = code,
             name = name,
@@ -65,12 +94,21 @@ object TechnicalTrendSnapshotPolicy {
             structurePoints = assessment.structurePoints,
             momentumPoints = assessment.momentumPoints,
             riskPoints = assessment.riskPoints,
-            weeklyTrend = cycles.weekTrend,
-            monthlyTrend = cycles.monthTrend,
-            trendWeak = entrySetup.trendWeak,
+            weeklyTrend = effectiveCycles.weekTrend,
+            monthlyTrend = effectiveCycles.monthTrend,
+            trendWeak = effectiveSetup.trendWeak,
             allowsAddPosition = allowsAddPosition,
             primaryAdvice = assessment.primaryAdvice,
             adviceReason = assessment.reason,
+            price = analyzed.price,
+            support = analyzed.support,
+            resistance = analyzed.resistance,
+            ma5 = analyzed.ma5,
+            ma10 = analyzed.ma10,
+            ma20 = analyzed.ma20,
+            ma60 = analyzed.ma60,
+            volumeRatio = analyzed.volumeRatio,
+            atrPct = analyzed.volatility.atrPct,
         )
     }
 }

@@ -1,22 +1,22 @@
 package com.example.stockmonitor
 
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MarketWatchlistFundFlowUiTest {
 
     @Test
-    fun watchlistRowShowsCurrentAndMultiDayFundFlow() {
+    fun watchlistShowsMainForceIntentWithConcreteFundFlowEvidence() {
         val source = TestProjectFiles
             .source("com/example/stockmonitor/ui/MarketFragment.kt")
             .readText()
-        val watchlist = source
-            .substringAfter("// ── 自选股 ──")
-            .substringBefore("// ── 行业涨幅榜 / 跌幅榜 ──")
 
-        assertTrue(watchlist.contains("fundFlow = currentFundFlowSummary(code)"))
-        assertTrue(source.contains("FundFlowDisplayPolicy.current(current)"))
-        assertTrue(source.contains("FundFlowDisplayPolicy.multiDay(Repo.fundFlowHistory[code].orEmpty())"))
-        assertTrue(source.contains("builder.append(\"｜${'$'}fundFlow\")"))
+        assertEquals(1, Regex("UiKit\\.DetailRow\\(\\s*\"主力意图\"").findAll(source).count())
+        assertTrue(source.contains("mainForce.summary"))
+        assertTrue(source.contains("UiKit.DetailRow(\n                \"资金依据\","))
+        assertTrue(source.contains("mainForce.evidence.replace(\"｜\", \"\\n\")"))
+        assertFalse(source.contains("可能主力动向"))
     }
 }

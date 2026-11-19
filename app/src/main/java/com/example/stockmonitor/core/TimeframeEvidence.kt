@@ -26,6 +26,8 @@ data class TimeframeEvidence(
     val riskLineBelow: Boolean = false,
     val riskLineConfirmations: Int = 0,
     val riskLineM30Below: Boolean = false,
+    val riskAuditText: String = "",
+    val riskReasonKey: String = "",
 ) {
     companion object {
         private val TIMESTAMP_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
@@ -126,6 +128,21 @@ data class TimeframeEvidence(
                 riskLineBelow = riskLineBelow,
                 riskLineConfirmations = riskLineConfirmations,
                 riskLineM30Below = riskLineM30Below,
+                riskReasonKey = context?.criticalReasons(price)?.joinToString("；").orEmpty(),
+                riskAuditText = buildString {
+                    append("采样时间${now.format(TIMESTAMP_FORMAT)}｜行情日${quoteDate ?: "缺失"}")
+                    append("｜日级依据日期${context?.sourceDate ?: "缺失"}")
+                    append("｜现价$price｜支撑$support｜破位判定价$riskPriceThreshold")
+                    append("｜风险来源：")
+                    append(context?.criticalReasons(price)?.joinToString("；")?.ifBlank { "未命中最高风险标记" } ?: "依据缺失")
+                    append("｜最新15分钟数据${if (fresh15) "完整" else "缺失或过期"}")
+                    append("｜已完成15分钟K线：")
+                    append(completed15.takeLast(3).joinToString("；") { "${it.timestamp} 收盘${it.close}" }.ifBlank { "缺失" })
+                    append("｜最新30分钟数据${if (fresh30) "完整" else "缺失或过期"}")
+                    append("｜已完成30分钟K线：")
+                    append(completed30.lastOrNull()?.let { "${it.timestamp} 收盘${it.close}" } ?: "缺失")
+                    append("｜持有逻辑失效证据及用户清仓授权：未提供")
+                },
             )
         }
 

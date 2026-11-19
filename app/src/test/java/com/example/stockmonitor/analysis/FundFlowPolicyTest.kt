@@ -68,14 +68,27 @@ class FundFlowPolicyTest {
         assertTrue(FundFlowPolicy.assess(2.0, null).reason.contains("订单规模"))
     }
 
+    @Test
+    fun riskReasonNamesTodayNetOutflowAmountAndShare() {
+        val assessment = FundFlowPolicy.assess(
+            -1.2,
+            flow(mainNetPct = -4.0, mainNetYuan = -68_000_000.0),
+        )
+
+        assertTrue(assessment.reason.contains("今日主力资金净流出 6800.0万"))
+        assertTrue(assessment.reason.contains("占成交额 -4.00%"))
+    }
+
     private fun flow(
         mainNetPct: Double? = 0.0,
         amountYuan: Double? = 10_000_000.0,
+        mainNetYuan: Double? = null,
     ) = FundFlow(
         code = "sh600089",
         name = "特变电工",
         asOfMs = 1L,
         amountYuan = amountYuan,
+        mainNetYuan = mainNetYuan,
         mainNetPct = mainNetPct,
     )
 }

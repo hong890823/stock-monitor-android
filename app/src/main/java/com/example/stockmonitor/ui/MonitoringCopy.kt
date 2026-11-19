@@ -3,6 +3,7 @@ package com.example.stockmonitor.ui
 import com.example.stockmonitor.analysis.MarketRiskPolicy
 import com.example.stockmonitor.analysis.MarketVolumeBaseline
 import com.example.stockmonitor.analysis.StockRiskPolicy
+import com.example.stockmonitor.core.IntradayVolumeContext
 
 /** 工具页监控卡片的简短说明，与监控策略常量保持同源。 */
 object MonitoringCopy {
@@ -19,7 +20,8 @@ object MonitoringCopy {
         ),
         Rule(
             "触发限制",
-            "仅交易时段；持仓破位立即提醒风险，确认后分批减仓，高位转弱优先减仓，结构失效时退出；同类信号10分钟冷却。机会提醒每日最多8条，风险升级不受此上限限制；" +
+            "仅交易时段；独立减仓信号须通过证据与数量门控；退出候选只发重大风险待复核，不自动清仓或改成减仓，暂停原计划未执行部分；" +
+                "普通同类信号10分钟冷却，退出复核按风险证据变化去重。机会提醒每日最多8条，风险复核不占机会预算；" +
                 "相邻刷新急跌阈值可在设置修改（当前 ${"%.1f".format(java.util.Locale.CHINA, dropAlertPct)}%）",
         ),
         Rule(
@@ -35,9 +37,15 @@ object MonitoringCopy {
                 "1.5 / 2 / 3倍 = 放量 / 明显 / 异常",
         ),
         Rule(
+            "买入与接回量能",
+            "大盘预估全天成交额须达到近5个完整交易日成交额中位数的" +
+                "${IntradayVolumeContext.MARKET_EXPANDING_RATIO}倍；未放量或数据缺失时不抄底、不买入、不接回，" +
+                "个股拉升只作反弹观察。大盘放量后仍须通过个股量价、15/30分钟与仓位检查。",
+        ),
+        Rule(
             "T+1与双周期",
             "交易批次区分今日可卖旧仓与今日买入锁定；卖出建议只用当日可卖股数。15分钟用于执行触发，30分钟用于方向过滤，" +
-                "数据不完整或方向反向时仅观察；风险卖出不等待30分钟过滤。",
+                "数据不完整或方向反向时仅观察；独立风险减仓按15分钟证据复核，不能据此授权清仓。",
         ),
         Rule(
             "龙头提示",

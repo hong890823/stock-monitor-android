@@ -27,6 +27,8 @@
     <string name="copied">已复制到剪贴板</string>
     <string name="alert_history_title">提醒记录</string>
     <string name="alert_history_empty">暂无提醒记录</string>
+    <string name="trade_history_title">交易记录</string>
+    <string name="trade_history_empty">暂无交易记录</string>
     <string name="news_detail_title">今日要闻</string>
     <string name="news_filter_all">全部</string>
     <string name="news_filter_investment">投资要闻</string>

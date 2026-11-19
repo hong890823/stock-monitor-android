@@ -21,12 +21,20 @@ data class MultiTimeframeSummary(
     val asOf: String,
     val historyStart: String? = null,
     val issue: String? = null,
+    /** 当前尚未结束的周K/月K，仅用于盘中说明，不参与趋势确认和评分。 */
+    val currentWeek: DayBar? = null,
+    val currentMonth: DayBar? = null,
 ) {
     fun summary(): String = "周K${weekTrend.label}｜月K${monthTrend.label}｜250日线" +
         (ma250?.let { String.format(Locale.CHINA, "%.2f", it) } ?: "暂缺")
 }
 
 object MultiTimeframeTrend {
+    const val WEEK_TREND_PERIOD = 20
+    const val WEEK_TREND_LAG = 4
+    const val MONTH_TREND_PERIOD = 12
+    const val MONTH_TREND_LAG = 1
+
     fun evaluate(history: List<DayBar>, asOf: String, tradingDates: List<String>? = null): MultiTimeframeSummary {
         val date = runCatching { LocalDate.parse(asOf) }.getOrNull()
             ?: return MultiTimeframeSummary(asOf = asOf, issue = "行情日期无效")
@@ -50,9 +58,28 @@ object MultiTimeframeTrend {
                 DayBar(bars.last().date, bars.first().open, bars.maxOf { it.high },
                     bars.minOf { it.low }, bars.last().close, bars.sumOf { it.volume })
             }
+        fun aggregateCurrent(start: (LocalDate) -> LocalDate): DayBar? {
+            val currentStart = start(date)
+            val bars = parsed
+                .filter { (_, day) -> day != null && !day.isAfter(date) }
+                .map { it.first }
+                .filter { start(LocalDate.parse(it.date)) == currentStart }
+                .sortedBy { it.date }
+            if (bars.isEmpty()) return null
+            return DayBar(
+                bars.last().date,
+                bars.first().open,
+                bars.maxOf { it.high },
+                bars.minOf { it.low },
+                bars.last().close,
+                bars.sumOf { it.volume },
+            )
+        }
         val weeks = aggregate(weekStart)
         val months = aggregate(monthStart)
         val years = aggregate(yearStart)
+        val currentWeek = aggregateCurrent(weekStart)
+        val currentMonth = aggregateCurrent(monthStart)
         val ma250 = closed.takeIf { it.size >= 250 }?.takeLast(250)?.map { it.close }?.average()
         val expectedDates = tradingDates?.filter { it < asOf }?.distinct()?.sorted()?.takeLast(30)
         val actualDates = closed.map { it.date }.toSet()
@@ -64,8 +91,19 @@ object MultiTimeframeTrend {
                 "历史不足：需250日日线、24个完整周K及13个完整月K"
             else -> null
         }
-        return MultiTimeframeSummary(weeks, months, years, classify(weeks, 20, 4), classify(months, 12, 1),
-            ma250, asOf, closed.first().date, issue)
+        return MultiTimeframeSummary(
+            weeks = weeks,
+            months = months,
+            years = years,
+            weekTrend = classify(weeks, WEEK_TREND_PERIOD, WEEK_TREND_LAG),
+            monthTrend = classify(months, MONTH_TREND_PERIOD, MONTH_TREND_LAG),
+            ma250 = ma250,
+            asOf = asOf,
+            historyStart = closed.first().date,
+            issue = issue,
+            currentWeek = currentWeek,
+            currentMonth = currentMonth,
+        )
     }
 
     /**

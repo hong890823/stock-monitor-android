@@ -157,9 +157,7 @@ class HoldingTContextTest {
         }
         assertNull(evaluate(10.0, 100.0, 1000L))
         assertNull(evaluate(10.02, 110.0, 31000L))
-        val signal = evaluate(10.05, 120.0, 61000L)!!
-        assertEquals(IntradaySignalType.T_BUY, signal.type)
-        assertTrue(signal.body.contains("不推算接回股数"))
+        assertNull(evaluate(10.05, 120.0, 61000L))
         assertNull(evaluate(10.05, 120.0, 76000L))
         assertNull(evaluate(10.06, 130.0, 1000L + 46 * 60000))
     }

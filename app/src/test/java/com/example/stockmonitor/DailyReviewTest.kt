@@ -20,6 +20,10 @@ import com.example.stockmonitor.analysis.VolumePriceSignal
 import com.example.stockmonitor.core.Portfolio
 import com.example.stockmonitor.core.Position
 import com.example.stockmonitor.core.Quote
+import com.example.stockmonitor.core.TradeBook
+import com.example.stockmonitor.core.TradeRecord
+import com.example.stockmonitor.core.TradeSide
+import com.example.stockmonitor.core.TradeSource
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -142,6 +146,7 @@ class DailyReviewTest {
         sectorContexts: Map<String, SectorContext> = emptyMap(),
         strongContinuationEvents: List<StrongContinuationEvent> = emptyList(),
         recentAnnouncements: Map<String, List<Announcement>> = emptyMap(),
+        tradeBook: TradeBook = TradeBook(),
     ): String = DailyReview.generate(
         DailyReview.Inputs(
             positions = positions,
@@ -154,6 +159,7 @@ class DailyReviewTest {
             sectorContexts = sectorContexts,
             strongContinuationEvents = strongContinuationEvents,
             recentAnnouncements = recentAnnouncements,
+            tradeBook = tradeBook,
         ),
     )
 
@@ -197,10 +203,10 @@ class DailyReviewTest {
             results = listOf(risk),
         )
 
-        assertTrue(text.contains("最高优先级操作"))
+        assertTrue(text.contains("当前优先事项"))
         assertTrue(text.contains("乙"))
-        assertTrue(text.contains("分批减仓或退出"))
-        assertTrue(text.indexOf("最高优先级操作") < text.indexOf("持仓整体操作建议"))
+        assertTrue(text.contains("暂无已确认的买卖动作"))
+        assertTrue(text.indexOf("当前优先事项") < text.indexOf("持仓整体操作建议"))
     }
 
     // ── 三、近两日个股重大利好 ────────────────────────────────────────────────
@@ -244,8 +250,9 @@ class DailyReviewTest {
         )
         val body = sectionBody(text, "三、")
 
-        assertTrue(body.contains("近两日没有命中利好或利空的公告"))
-        assertTrue(body.contains("结论：近两日无利好/利空"))
+        // 空态收敛为单行结论：不再「正文 + 同义结论」复读。
+        assertTrue(body.contains("结论：近两日无利好/利空消息面变化"))
+        assertFalse(body.contains("近两日没有命中"))
     }
 
     @Test
@@ -573,7 +580,27 @@ class DailyReviewTest {
         assertEquals("合计：$expected", ReportMarkup.plain(line))
     }
 
-    // ── 两个口径不混 ─────────────────────────────────────────────────────────
+    @Test
+    fun reviewShowsAccountTradePnlAndFeesWhenTradeHistoryIsComplete() {
+        val book = TradeBook(entries = listOf(
+            TradeRecord(
+                id = "sell-1", code = "sh600000", name = "甲", side = TradeSide.SELL,
+                date = "2026-10-12", quantity = 40.0, price = 12.0,
+                source = TradeSource.MANUAL, fee = 1.0,
+            ),
+        ))
+        val text = report(
+            positions = listOf(Position("sh600000", "甲", 60.0, 8.5)),
+            quotes = mapOf("sh600000" to quote("sh600000", 11.0, 10.0, "甲")),
+            results = listOf(result(quantity = 60.0, price = 11.0)),
+            tradeBook = book,
+        )
+        val body = sectionBody(text, "一、")
+
+        assertTrue(body.contains("账户合计"))
+        assertTrue(body.contains("已实现 +80.00 元"))
+        assertTrue(body.contains("费用 1.00 元"))
+    }
 
     @Test
     fun dayPnlAndFloatingPnlUseSeparateBasisLabels() {
@@ -754,7 +781,7 @@ class DailyReviewTest {
         assertTrue("P2 应在 P1 之后", iWeak in 0 until iHold)
         assertTrue(iHold >= 0)
         assertEquals(-1, iWait)
-        assertTrue(body.contains("暂不主动调仓"))
+        assertTrue(body.contains("按证据核实，不自动卖出"))
     }
 
     @Test
@@ -776,7 +803,7 @@ class DailyReviewTest {
         )
         val body = text.substringBefore("一、")
 
-        assertTrue(body.contains("机动仓做T"))
+        assertTrue(body.contains("不自动补仓或做T"))
         assertFalse(body.contains("两种剧本"))
         assertFalse(body.contains("①逻辑/基本面已破坏"))
         assertFalse(body.contains("②逻辑还在"))
@@ -793,7 +820,7 @@ class DailyReviewTest {
         )
         val body = text.substringBefore("一、")
 
-        assertTrue(body.contains("以持有观察为主，暂不主动调仓"))
+        assertTrue(body.contains("暂无已确认的买卖动作"))
     }
 
     @Test

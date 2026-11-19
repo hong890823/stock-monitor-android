@@ -270,14 +270,15 @@ class ObservationPoolTest {
                 stopPrice = 9.6,
                 changePct = -2.5,
                 breakoutRisk = BreakoutRiskDecision(true, "跌破5日线，突破延续转为下杀风险"),
+                evaluatedAtMs = 1_000_000L,
             ),
         )
 
-        assertEquals(ObservationStage.NEAR_ENTRY, risk.stage)
+        assertEquals(ObservationStage.BUY_CANDIDATE, risk.stage)
         assertEquals(1, risk.softRiskRounds)
         assertTrue(risk.reason.contains("下杀风险"))
 
-        val secondRisk = ObservationPool.evaluate(
+        val repeatedRisk = ObservationPool.evaluate(
             risk,
             ObservationSignal(
                 date = "2026-10-14",
@@ -289,13 +290,34 @@ class ObservationPoolTest {
                 stopPrice = 9.6,
                 changePct = -3.5,
                 breakoutRisk = BreakoutRiskDecision(true, "跌破5日线，突破延续转为下杀风险"),
+                evaluatedAtMs = 1_060_000L,
             ),
         )
 
-        assertEquals(ObservationStage.OBSERVING, secondRisk.stage)
-        assertEquals(2, secondRisk.softRiskRounds)
+        assertEquals(ObservationStage.BUY_CANDIDATE, repeatedRisk.stage)
+        assertEquals(1, repeatedRisk.softRiskRounds)
         assertTrue(ObservationBreakoutRiskAlert.shouldNotify(original, risk))
-        assertFalse(ObservationBreakoutRiskAlert.shouldNotify(risk, secondRisk))
+        assertFalse(ObservationBreakoutRiskAlert.shouldNotify(risk, repeatedRisk))
+
+        val confirmedRisk = ObservationPool.evaluate(
+            repeatedRisk,
+            ObservationSignal(
+                date = "2026-10-14",
+                price = 10.0,
+                hasScreenSignal = true,
+                confirmedEntry = true,
+                canBuy = true,
+                trendWeak = false,
+                stopPrice = 9.6,
+                changePct = -4.0,
+                breakoutRisk = BreakoutRiskDecision(true, "跌破5日线，突破延续转为下杀风险"),
+                evaluatedAtMs = 1_900_000L,
+            ),
+        )
+
+        assertEquals(ObservationStage.NEAR_ENTRY, confirmedRisk.stage)
+        assertEquals(2, confirmedRisk.softRiskRounds)
+        assertFalse(ObservationBreakoutRiskAlert.shouldNotify(repeatedRisk, confirmedRisk))
     }
 
     @Test
@@ -343,7 +365,7 @@ class ObservationPoolTest {
             highestStageDate = "2026-10-13",
             highestStageAtMs = 1000L,
         )
-        val downgraded = ObservationPool.evaluate(
+        val firstRisk = ObservationPool.evaluate(
             original,
             ObservationSignal(
                 date = "2026-10-14",
@@ -355,6 +377,22 @@ class ObservationPoolTest {
                 stopPrice = 9.6,
                 changePct = -2.5,
                 breakoutRisk = BreakoutRiskDecision(true, "跌破5日线"),
+                evaluatedAtMs = 1_000_000L,
+            ),
+        )
+        val downgraded = ObservationPool.evaluate(
+            firstRisk,
+            ObservationSignal(
+                date = "2026-10-14",
+                price = 10.1,
+                hasScreenSignal = true,
+                confirmedEntry = true,
+                canBuy = true,
+                trendWeak = false,
+                stopPrice = 9.6,
+                changePct = -3.0,
+                breakoutRisk = BreakoutRiskDecision(true, "跌破5日线"),
+                evaluatedAtMs = 1_900_000L,
             ),
         )
 
@@ -373,5 +411,36 @@ class ObservationPoolTest {
         val quote = Quote(waiting.code, waiting.name, 10.8, 10.0, 10.2, 11.0, 10.1,
             1_000_000.0, 10_000_000.0, "2026-10-14")
         assertTrue(ObservationEligibility.needsRefresh(waiting, "2026-10-14", quote))
+    }
+
+    @Test
+    fun confirmedCandidateGetsIndependentReevaluationWindowAfterEntryInvalidation() {
+        val invalidated = candidate().copy(
+            lastEvaluatedDate = "2026-10-14",
+            stage = ObservationStage.NEAR_ENTRY,
+            highestStage = ObservationStage.BUY_CANDIDATE,
+            observedDays = 30,
+            postConfirmationWatchDays = 14,
+        )
+        val waiting = ObservationSignal(
+            date = "2026-10-15",
+            price = 10.0,
+            hasScreenSignal = true,
+            confirmedEntry = false,
+            canBuy = false,
+            trendWeak = false,
+            stopPrice = 9.6,
+            changePct = -1.0,
+        )
+
+        val first = ObservationPool.evaluate(invalidated, waiting)
+
+        assertEquals(ObservationStage.OBSERVING, first.stage)
+        assertEquals(15, first.postConfirmationWatchDays)
+
+        val expired = ObservationPool.evaluate(first, waiting.copy(date = "2026-10-16"))
+
+        assertEquals(ObservationStage.ELIMINATED, expired.stage)
+        assertTrue(expired.reason.contains("失效后观察超过15个交易日"))
     }
 }

@@ -170,7 +170,6 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
                                 changePct = quote.changePct,
                                 ratio = Repo.volumeRatios[code],
                                 priceContext = Repo.priceContexts[code],
-                                fundFlow = currentFundFlowSummary(code),
                                 technicalTrend = Repo.technicalTrendSnapshots[code],
                             ),
                             details = watchDetails(
@@ -411,7 +410,6 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
         changePct: Double,
         ratio: Double?,
         priceContext: PriceContext?,
-        fundFlow: String,
         technicalTrend: TechnicalTrendSnapshot?,
     ): CharSequence {
         val builder = SpannableStringBuilder()
@@ -438,7 +436,6 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
         } else {
             builder.append("量价中性")
         }
-        builder.append("｜$fundFlow")
         return builder
     }
 
@@ -450,6 +447,11 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
         technicalTrend: TechnicalTrendSnapshot?,
     ): List<UiKit.DetailRow> {
         val signal = VolumePrice.of(ratio, quote.changePct, priceContext)
+        val mainForce = FundFlowDisplayPolicy.mainForceDirection(
+            quote.changePct,
+            quote.quoteDate,
+            Repo.fundFlowHistory[code].orEmpty(),
+        )
         return listOfNotNull(
             UiKit.DetailRow("股票代码", code),
             UiKit.DetailRow(
@@ -460,8 +462,20 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
                 "周/月趋势",
                 technicalTrend?.let { "${it.weeklyTrend.label}/${it.monthlyTrend.label}" } ?: "数据不足",
             ),
-            technicalTrend?.let { UiKit.DetailRow("技术分构成", it.evidenceSummary.removePrefix("技术分构成：")) },
-            technicalTrend?.let { UiKit.DetailRow("操作建议", it.primaryAdvice) },
+            technicalTrend?.let {
+                UiKit.DetailRow(
+                    "技术分构成",
+                    it.evidenceSummary.removePrefix("技术分构成："),
+                    dividerAfter = true,
+                )
+            },
+            technicalTrend?.let {
+                UiKit.DetailRow(
+                    "操作建议",
+                    it.primaryAdvice,
+                    dividerAfter = true,
+                )
+            },
             UiKit.DetailRow("成交额", String.format(Locale.CHINA, "%.2f亿", quote.turnover / 1e8)),
             UiKit.DetailRow(
                 "最高 / 最低",
@@ -469,18 +483,15 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
             ),
             UiKit.DetailRow("量比", ratio?.let { String.format(Locale.CHINA, "%.2f倍", it) } ?: "—"),
             UiKit.DetailRow("量价信号", VolumePrice.tag(signal).ifBlank { "中性" }),
-            UiKit.DetailRow("资金流", currentFundFlowSummary(code)),
-            UiKit.DetailRow("近3日资金流", fundFlowWindowSummary(code).ifBlank { "样本不足" }),
+            UiKit.DetailRow(
+                "主力意图",
+                mainForce.summary,
+            ),
+            UiKit.DetailRow(
+                "资金依据",
+                mainForce.evidence.replace("｜", "\n"),
+            ),
         )
-    }
-
-    private fun currentFundFlowSummary(code: String): String {
-        val current = Repo.fundFlowHistory[code].orEmpty().lastOrNull()
-        return FundFlowDisplayPolicy.current(current)
-    }
-
-    private fun fundFlowWindowSummary(code: String): String {
-        return FundFlowDisplayPolicy.multiDay(Repo.fundFlowHistory[code].orEmpty())
     }
 
 }

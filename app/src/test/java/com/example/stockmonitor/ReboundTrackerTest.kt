@@ -27,6 +27,7 @@ class ReboundTrackerTest {
         cum: Double? = null,
         atrPct: Double? = null,
         held: Boolean = true,
+        marketExpanding: Boolean? = true,
     ) = ReboundTracker.Sample(
         code = "sz000001",
         name = "测试股",
@@ -38,6 +39,7 @@ class ReboundTrackerTest {
         atrPct = atrPct,
         resistance = 0.0,
         held = held,
+        marketExpanding = marketExpanding,
     )
 
     private fun run(tracker: ReboundTracker, samples: List<ReboundTracker.Sample>): List<ReboundTracker.Event> =
@@ -71,6 +73,67 @@ class ReboundTrackerTest {
         // 分层声明：盘中窗口的结论不能被读成趋势反转。
         assertTrue(event.body.contains("不改趋势判断"))
         assertTrue(tracker.isConfirmed("sz000001"))
+    }
+
+    @Test
+    fun strongStockReboundRemainsObservationWithoutMarketExpansion() {
+        listOf(false, null).forEach { expanding ->
+            val tracker = ReboundTracker()
+            val events = run(tracker, listOf(
+                sample(-0.5, at(-30.0), cum = 50e6, marketExpanding = expanding),
+                sample(-3.5, at(0.0), cum = 100e6, marketExpanding = expanding),
+                sample(-1.5, at(10.0), cum = 164e6, marketExpanding = expanding),
+                sample(-1.4, at(12.0), cum = 178e6, marketExpanding = expanding),
+            ))
+
+            assertEquals(1, events.size)
+            assertEquals(ReboundTracker.Kind.CAUTIOUS, events.single().kind)
+            assertFalse(events.single().vibrate)
+            assertTrue(events.single().body.contains("大盘"))
+            assertTrue(events.single().body.contains("不抄底、不接回"))
+            assertFalse(events.single().body.contains("可小仓"))
+            assertFalse(tracker.isConfirmed("sz000001"))
+        }
+    }
+
+    @Test
+    fun marketExpansionCanConfirmPreviouslyBlockedReboundWithoutAnotherDip() {
+        val tracker = ReboundTracker()
+        run(tracker, listOf(
+            sample(-0.5, at(-30.0), cum = 50e6, marketExpanding = false),
+            sample(-3.5, at(0.0), cum = 100e6, marketExpanding = false),
+            sample(-1.5, at(10.0), cum = 164e6, marketExpanding = false),
+        ))
+        assertFalse(tracker.isConfirmed("sz000001"))
+
+        val events = run(tracker, listOf(sample(-1.4, at(12.0), cum = 178e6)))
+
+        assertEquals(ReboundTracker.Kind.CONFIRMED, events.single().kind)
+        assertTrue(tracker.isConfirmed("sz000001"))
+    }
+
+    @Test
+    fun losingMarketExpansionRevokesConfirmationAndKeepsTrapWarnings() {
+        listOf(false, null).forEach { expanding ->
+            val tracker = ReboundTracker()
+            run(tracker, listOf(
+                sample(-0.5, at(-30.0), cum = 50e6),
+                sample(-3.5, at(0.0), cum = 100e6),
+                sample(-1.5, at(10.0), cum = 164e6),
+            ))
+            assertTrue(tracker.isConfirmed("sz000001"))
+
+            val events = run(tracker, listOf(
+                sample(-1.4, at(12.0), cum = 178e6, marketExpanding = expanding),
+            ))
+            assertEquals(ReboundTracker.Kind.CAUTIOUS, events.single().kind)
+            assertFalse(tracker.isConfirmed("sz000001"))
+
+            val trap = run(tracker, listOf(
+                sample(-2.8, at(14.0), cum = 190e6, marketExpanding = expanding),
+            ))
+            assertEquals(ReboundTracker.Kind.TRAP, trap.single().kind)
+        }
     }
 
     @Test

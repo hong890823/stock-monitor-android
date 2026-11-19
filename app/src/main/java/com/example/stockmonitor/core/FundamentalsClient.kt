@@ -29,6 +29,7 @@ data class FundamentalPayload(
     val totalShares: Double,
     val periods: List<FinancialPeriod>,
     val balance: BalanceSheetSnapshot?,
+    val balanceHistory: List<BalanceSheetSnapshot> = emptyList(),
     val valuations: List<ValuationPoint>,
     val peers: PeerContext?,
     val mainBusiness: List<MainBusinessItem>,
@@ -63,9 +64,10 @@ class FundamentalsClient {
         val periods = parsePeriods(income, cash)
         if (periods.isEmpty()) throw Http.HttpError("没有取到 $name 的财报数据")
 
-        val balance = runCatching {
-            parseBalance(fetchF10(REPORT_BALANCE, BALANCE_COLUMNS, secucode, 1))
-        }.getOrNull()
+        val balanceHistory = runCatching {
+            parseBalances(fetchF10(REPORT_BALANCE, BALANCE_COLUMNS, secucode, BALANCE_PAGE_SIZE))
+        }.getOrDefault(emptyList())
+        val balance = balanceHistory.firstOrNull()
 
         val snapshot = runCatching { fetchSnapshot(code) }.getOrNull()
         val (valuations, board) = runCatching { fetchValuations(plain) }.getOrDefault(emptyList<ValuationPoint>() to null)
@@ -95,6 +97,7 @@ class FundamentalsClient {
             totalShares = shares,
             periods = periods,
             balance = balance,
+            balanceHistory = balanceHistory,
             valuations = valuations,
             peers = peers,
             mainBusiness = mainBusiness,
@@ -284,12 +287,14 @@ class FundamentalsClient {
             "SECUCODE,REPORT_DATE,NETCASH_OPERATE,SALES_SERVICES,CONSTRUCT_LONG_ASSET"
         private const val BALANCE_COLUMNS = "SECUCODE,REPORT_DATE,MONETARYFUNDS,NOTE_ACCOUNTS_RECE," +
             "ACCOUNTS_RECE,TOTAL_OTHER_RECE,OTHER_RECE,INVENTORY,GOODWILL,SHORT_LOAN,LONG_LOAN," +
-            "BOND_PAYABLE,LEASE_LIAB,TOTAL_ASSETS,TOTAL_LIABILITIES,TOTAL_PARENT_EQUITY,MINORITY_EQUITY"
+            "BOND_PAYABLE,LEASE_LIAB,TOTAL_ASSETS,TOTAL_LIABILITIES,TOTAL_PARENT_EQUITY,MINORITY_EQUITY," +
+            "CONTRACT_LIAB,ADVANCE_RECEIPTS"
         private const val MAINOP_COLUMNS =
             "SECUCODE,REPORT_DATE,MAINOP_TYPE,ITEM_NAME,MAIN_BUSINESS_INCOME,MBI_RATIO,GROSS_RPOFIT_RATIO"
 
         /** 12 个报告期够算 8 个单季 + 同比；多要两期防止接口漏期。 */
         private const val PERIOD_PAGE_SIZE = 16
+        private const val BALANCE_PAGE_SIZE = 8
         /** 公告每页条数；翻页直到覆盖 [Governance.WINDOW_DAYS] 那么长的窗口。 */
         private const val ANNOUNCEMENT_PAGE_SIZE = 100
         /** 翻页上限：覆盖半年窗口最多用到的页数，防止接口异常时无限翻。 */
@@ -369,12 +374,28 @@ class FundamentalsClient {
 
         fun parseBalance(text: String): BalanceSheetSnapshot? {
             val row = dataArray(text)?.optJSONObject(0) ?: return null
+            return parseBalanceRow(row)
+        }
+
+        fun parseBalances(text: String): List<BalanceSheetSnapshot> =
+            dataArray(text)?.let { rows ->
+                (0 until rows.length()).mapNotNull { index ->
+                    rows.optJSONObject(index)?.let(::parseBalanceRow)
+                }.sortedByDescending { it.date }
+            }.orEmpty()
+
+        private fun parseBalanceRow(row: JSONObject): BalanceSheetSnapshot? {
+            val date = shortDate(row.optString("REPORT_DATE"))
+            if (date.length != 10) return null
             val receivable = row.optDouble("NOTE_ACCOUNTS_RECE", Double.NaN).takeIf { !it.isNaN() }
                 ?: row.optDouble("ACCOUNTS_RECE", 0.0)
             val otherReceivable = row.optDouble("TOTAL_OTHER_RECE", Double.NaN).takeIf { !it.isNaN() }
                 ?: row.optDouble("OTHER_RECE", 0.0)
+            val contractLiabilities = sequenceOf("CONTRACT_LIAB", "ADVANCE_RECEIPTS")
+                .map { key -> row.optDouble(key, Double.NaN) }
+                .firstOrNull { !it.isNaN() }
             return BalanceSheetSnapshot(
-                date = shortDate(row.optString("REPORT_DATE")),
+                date = date,
                 monetaryFunds = row.optDouble("MONETARYFUNDS", 0.0),
                 accountsReceivable = receivable,
                 otherReceivable = otherReceivable,
@@ -388,6 +409,7 @@ class FundamentalsClient {
                 totalLiabilities = row.optDouble("TOTAL_LIABILITIES", 0.0),
                 parentEquity = row.optDouble("TOTAL_PARENT_EQUITY", 0.0),
                 minorityEquity = row.optDouble("MINORITY_EQUITY", 0.0),
+                contractLiabilities = contractLiabilities,
             )
         }
 

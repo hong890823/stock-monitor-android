@@ -32,7 +32,12 @@ import com.example.stockmonitor.analysis.TrendAssessment
 import com.example.stockmonitor.analysis.Volatility
 import com.example.stockmonitor.core.Portfolio
 import com.example.stockmonitor.core.Position
+import com.example.stockmonitor.core.PositionAllocationConfig
 import com.example.stockmonitor.core.RowSnapshot
+import com.example.stockmonitor.core.TradeBook
+import com.example.stockmonitor.core.TradeRecord
+import com.example.stockmonitor.core.TradeSide
+import com.example.stockmonitor.core.TradeSource
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -65,6 +70,43 @@ class PortfolioAnalysisTest {
         val flat = PortfolioAnalysis.todayBrief(emptyList(), config,
             quotes = quotes + ("sh600522" to todayQuote("sh600522", 30.3, 30.0))).joinToString()
         assertTrue(flat.contains("与沪指基本持平"))
+    }
+
+    @Test fun todayBriefShowsAccountTradeComponents() {
+        val date = com.example.stockmonitor.analysis.TimeUtils.todayText()
+        val config = portfolio().copy(positions = mutableListOf(Position("sh600522", "中天科技", 60.0, 8.0)))
+        val quotes = mapOf(
+            "sh600522" to todayQuote("sh600522", 11.0, 10.0, date),
+            "sh000001" to todayQuote("sh000001", 3000.0, 3000.0, date),
+        )
+        val book = TradeBook(entries = listOf(
+            TradeRecord("sell-1", "sh600522", "中天科技", TradeSide.SELL, date, 40.0, 12.0, TradeSource.MANUAL, fee = 1.0),
+        ))
+
+        val text = PortfolioAnalysis.todayBrief(emptyList(), config, quotes = quotes, tradeBook = book).joinToString("\n")
+
+        assertTrue(text.contains("账户今日 +139.00元"))
+        assertTrue(text.contains("已实现 +80.00元"))
+        assertTrue(text.contains("费用 1.00元"))
+    }
+
+    @Test fun todayBriefWaitingStateKeepsComputableLinesWithoutPlaceholderNoise() {
+        val quotes = mapOf(
+            "sh600522" to todayQuote("sh600522", 30.6, 30.0),
+            "sh000001" to todayQuote("sh000001", 3030.0, 3000.0),
+        )
+        val lines = PortfolioAnalysis.todayBrief(emptyList(), portfolio(), quotes = quotes).joinToString()
+
+        // 不依赖个股分析结果的部分照算。
+        assertTrue(lines.contains("账户总盈亏："))
+        assertTrue(lines.contains("今日持仓："))
+        assertTrue(lines.contains("大盘走势："))
+        // 结果态骨架的「暂无」占位不再出现在等待态，一句话交代怎么让分析跑起来。
+        assertFalse(lines.contains("当前优先事项：暂无已确认的买卖动作"))
+        assertFalse(lines.contains("买入机会：暂无"))
+        assertFalse(lines.contains("排序口径"))
+        assertFalse(lines.contains("需要留意"))
+        assertTrue(lines.contains("个股分析尚未完成"))
     }
 
     @Test fun todayBriefDoesNotComparePartialOrStaleHoldingsWithIndex() {
@@ -101,7 +143,7 @@ class PortfolioAnalysisTest {
         assertFalse(text.contains("清仓"))
         assertFalse(text.contains("单股集中度"))
         val missing = PortfolioAnalysis.todayBrief(listOf(result.copy(fundamentalHealth = result.fundamentalHealth!!.copy(reasons = emptyList()))), portfolio()).joinToString()
-        assertTrue(missing.contains("具体原因未提供"))
+        assertTrue(missing.contains("具体原因待核实"))
         assertFalse(missing.contains("经营现金流"))
     }
 
@@ -121,7 +163,8 @@ class PortfolioAnalysisTest {
         )
         val brief = PortfolioAnalysis.todayBrief(listOf(result), configured).joinToString("\n")
         assertTrue(brief.contains("账户总盈亏：+0.00元（+0.00%）"))
-        assertTrue(brief.contains("最值得操作：目前没有哪只需要优先买卖"))
+        assertTrue(brief.contains("整体建议："))
+        assertFalse(brief.contains("当前优先事项："))
         assertFalse(brief.contains("占总资金 50.0%"))
         assertFalse(brief.contains("中天科技："))
     }
@@ -150,7 +193,7 @@ class PortfolioAnalysisTest {
             ),
         )
         val brief = PortfolioAnalysis.todayBrief(listOf(risk, steady), configured).joinToString("\n")
-        assertTrue(brief.contains("最值得操作：中天科技：刚跌破关键价位，先别加仓，看能否站回"))
+        assertFalse(brief.contains("优先观察中天科技"))
         assertTrue(brief.contains("先别继续买入，看能否站回关键价位"))
         assertFalse(brief.contains("稳健持仓："))
     }
@@ -159,8 +202,8 @@ class PortfolioAnalysisTest {
     fun todayBriefDoesNotChangeFullReportBriefContract() {
         val result = evaluate(price = 31.0, support = 30.0, cost = 30.0, trendWeak = false)
         val legacy = PortfolioAnalysis.brief(listOf(result))
-        assertTrue(legacy.size == 5)
-        assertTrue(legacy[0].startsWith("最高优先级操作："))
+        assertTrue(legacy.size == 8)
+        assertTrue(legacy[0].startsWith("当前优先事项："))
         assertTrue(legacy[1].startsWith("今日结果："))
         assertTrue(legacy[3].startsWith("持仓整体操作建议："))
         val report = PortfolioAnalysis.formatReport(listOf(result), "2026-10-16 10:00")
@@ -179,7 +222,7 @@ class PortfolioAnalysisTest {
         assertTrue(result.exitDecision?.stage?.label == "高位转弱·优先减仓")
         assertTrue(result.action.contains("高位"))
         assertFalse(result.action.contains("清仓退出"))
-        assertTrue(PortfolioAnalysis.overallAdvice(listOf(result)).joinToString().contains("高位"))
+        assertTrue(PortfolioAnalysis.overallAdvice(listOf(result)).joinToString().contains("暂无已确认的买卖动作"))
     }
 
     @Test
@@ -203,9 +246,9 @@ class PortfolioAnalysisTest {
         assertTrue(signal.body.contains(result.exitDecision!!.action))
         assertFalse(signal.body.contains("跌破支撑"))
         val advice = PortfolioAnalysis.overallAdvice(listOf(result)).joinToString()
-        assertTrue(advice.contains("高位转弱"))
-        assertFalse(advice.contains("深套处理"))
-        assertTrue(PortfolioAnalysis.formatReport(listOf(result), "2026-10-15 10:00").contains("高位转弱·优先减仓"))
+        assertTrue(advice.contains("风险待确认") || advice.contains("暂无已确认的买卖动作"))
+        assertFalse(advice.contains("机动仓做T"))
+        assertTrue(PortfolioAnalysis.formatReport(listOf(result), "2026-10-15 10:00").contains("状态：风险待确认"))
         val brief = PortfolioAnalysis.brief(listOf(result)).joinToString()
         assertFalse(brief.contains("破位 1 只"))
         assertTrue(brief.contains("高位转弱 1 只"))
@@ -228,8 +271,8 @@ class PortfolioAnalysisTest {
         assertTrue(signal.body.contains(result.exitDecision.action))
         assertTrue(signal.type == com.example.stockmonitor.analysis.IntradaySignalType.EXIT_POSITION)
         val advice = PortfolioAnalysis.overallAdvice(listOf(result)).joinToString("\n")
-        assertTrue(advice.contains("清仓退出"))
-        assertFalse(advice.contains("深套处理"))
+        assertTrue(advice.contains("暂无已确认的买卖动作"))
+        assertFalse(advice.contains("机动仓做T"))
         assertFalse(advice.contains("企稳后再评估接回"))
     }
 
@@ -287,7 +330,7 @@ class PortfolioAnalysisTest {
         assertTrue(result.action.contains("保留观察仓等待二波"))
         assertTrue(result.action.contains("已有浮盈不是卖出理由"))
         val advice = PortfolioAnalysis.overallAdvice(listOf(result)).joinToString("\n")
-        assertTrue(advice.contains("保留观察仓等待二波"))
+        assertTrue(advice.contains("暂无已确认的买卖动作"))
         assertFalse(advice.contains("冲高到压力附近滞涨再考虑分批止盈"))
     }
 
@@ -324,17 +367,21 @@ class PortfolioAnalysisTest {
         val plan = com.example.stockmonitor.analysis.SwingPlan(listOf(row), "2026-10-15", null)
         val report = PortfolioAnalysis.formatReport(listOf(result), "2026-10-15 10:00", swingPlan = plan)
         assertFalse(report.contains("波段加仓优先级"))
-        assertTrue(report.contains("追加100股"))
+        assertTrue(report.contains("暂不新增"))
         assertFalse(report.contains("今天不用动"))
         assertFalse(report.contains("建议风险仓位"))
-        assertTrue(PortfolioAnalysis.brief(listOf(result), swingPlan = plan)[3].contains("追加100股"))
+        // brief 去重后：优先级摘要只在头尾各一次（③不再内嵌），「买入机会」行在尾部。
+        assertTrue(
+            PortfolioAnalysis.brief(listOf(result), swingPlan = plan).joinToString("\n")
+                .contains("暂无通过入场与资金检查的候选"),
+        )
     }
 
     @Test
     fun swingReportExplicitlyKeepsZeroWhenNoQualifiedHoldingExists() {
         val plan = com.example.stockmonitor.analysis.SwingPlan(emptyList(), "2026-10-15", "可用资金为0")
         val report = PortfolioAnalysis.formatReport(emptyList(), "2026-10-15 10:00", swingPlan = plan)
-        assertTrue(report.contains("本轮不建议新增买入，追加0股"))
+        assertTrue(report.contains("暂无通过入场与资金检查的候选"))
         assertTrue(report.indexOf("本轮不建议新增买入") == report.lastIndexOf("本轮不建议新增买入"))
         assertTrue(report.contains("可用资金为0"))
     }
@@ -352,7 +399,7 @@ class PortfolioAnalysisTest {
             assertTrue(report.substringBefore("今日要点").contains(line))
         }
         assertFalse(report.substringAfter("今日要点").substringBefore("波段加仓优先级").contains("持仓整体操作建议"))
-        assertTrue(advice.any { it.contains("追加0股") })
+        assertTrue(advice.any { it.contains("暂无通过入场与资金检查的候选") })
     }
 
     @Test
@@ -376,12 +423,36 @@ class PortfolioAnalysisTest {
             com.example.stockmonitor.analysis.SwingStatus.READY, 90, "基本面与技术条件通过",
             price = 31.0, addQuantity = 100.0)
         val plan = com.example.stockmonitor.analysis.SwingPlan(listOf(row), "2026-10-15", null)
-        val brief = PortfolioAnalysis.brief(listOf(risk, preferred), swingPlan = plan)[3]
+        // brief 去重后优先级摘要在头（当前优先事项）尾（风险核实/买入机会/排序口径）各一次，
+        // ③ 只剩风险观察/现有仓位等正文；断言针对整份 brief 而不是某个固定下标。
+        val brief = PortfolioAnalysis.brief(listOf(risk, preferred), swingPlan = plan).joinToString("\n")
         assertTrue(brief.contains("风险持仓"))
-        assertTrue(brief.contains("持续未收回则减仓"))
-        assertTrue(brief.contains("优先持仓"))
-        assertTrue(brief.contains("追加100股"))
+        assertTrue(brief.contains("暂无已确认的买卖动作"))
+        assertFalse(brief.contains("追加100股"))
+        assertTrue(brief.contains("暂不新增"))
         assertFalse(brief.contains("今天不用动"))
+    }
+
+    @Test
+    fun todayBriefShowsApprovedAdditionalCapitalForHeldStock() {
+        val result = evaluate(price = 31.0, support = 30.0, trendWeak = false)
+            .copy(priorityBuyApproved = true)
+        val row = com.example.stockmonitor.analysis.SwingDecision(
+            result.code,
+            result.name,
+            com.example.stockmonitor.analysis.SwingStatus.READY,
+            90,
+            "周月向好且日线企稳",
+            price = 31.0,
+            addQuantity = 100.0,
+            estimatedCash = 3105.0,
+            afterPositionPct = 6.0,
+        )
+        val plan = com.example.stockmonitor.analysis.SwingPlan(listOf(row), "2026-10-15", null)
+
+        val brief = PortfolioAnalysis.todayBrief(listOf(result), portfolio(), swingPlan = plan)
+
+        assertTrue(brief.any { it.contains("追加买入机会") && it.contains("追加100股") })
     }
 
     @Test
@@ -392,12 +463,14 @@ class PortfolioAnalysisTest {
         val watch = deep.copy(code = "sz000002", name = "非持仓观察", quantity = 0.0)
         val advice = PortfolioAnalysis.overallAdvice(listOf(deep, alert, watch)).joinToString("\n")
         assertTrue(advice.contains("深套持仓"))
-        assertTrue(advice.contains("机动仓做T"))
-        assertTrue(advice.contains("深套不盲目补仓"))
+        assertTrue(advice.contains("不自动补仓或做T"))
+        assertTrue(advice.contains("浮亏不自动升级或豁免风险"))
         assertTrue(advice.contains("红灯持仓"))
-        assertTrue(advice.contains("基本面"))
+        // 统一优先级合约：红灯持仓进「风险核实」层，提示核实财报/公告而不是卖出指令。
+        assertTrue(advice.contains("风险核实"))
+        assertTrue(advice.contains("不是让你马上卖出"))
         assertFalse(advice.contains("非持仓观察"))
-        assertTrue(advice.contains("暂不新增买入"))
+        assertTrue(advice.contains("暂不新增"))
         assertFalse(advice.contains("割肉"))
     }
 
@@ -441,6 +514,7 @@ class PortfolioAnalysisTest {
         code = "sh600522",
         name = "中天科技",
         asOf = "2026-10-09 10:00",
+        dataDate = com.example.stockmonitor.analysis.TimeUtils.todayText(),
         rows = 240,
         price = price,
         priceSource = "实时",
@@ -482,7 +556,7 @@ class PortfolioAnalysisTest {
         relativeStrength = null,
         ma5 = price * 1.01,
         ma10 = price * 1.02,
-        ma20 = price * 1.03,
+        ma20 = price * if (trendWeak) 1.03 else 0.98,
         ma60 = price * 1.08,
         support = support,
         resistance = resistance,
@@ -534,7 +608,7 @@ class PortfolioAnalysisTest {
     ) = PortfolioAnalysis.evaluate(
         position = Position("sh600522", "中天科技", 500.0, cost),
         technical = technical(price = price, support = support, atrPct = atrPct, trendWeak = trendWeak),
-        live = null,
+        live = todayQuote("sh600522", price, price / 0.988),
         portfolio = portfolio(),
         fundamentalHealth = health,
         envContext = env,
@@ -597,15 +671,40 @@ class PortfolioAnalysisTest {
     }
 
     @Test
-    fun redFundamentalsPrefersExitScript() {
+    fun noticeStageBreakReportsNoticeSignalNotReduceRisk() {
+        // 三项缓释（无红灯 + 低位 + 轻仓）的确认破位走 NOTICE 档：signal 与详情的
+        // exitStage.label（「破位风险提示」）同口径为「破位提示」，不再混写成「减仓风险」。
+        val result = PortfolioAnalysis.evaluate(
+            position = Position("sh600522", "中天科技", 500.0, 31.0),
+            technical = technical(price = 30.0, support = 30.5).copy(
+                priceContext = com.example.stockmonitor.analysis.PriceContext(
+                    com.example.stockmonitor.analysis.PriceLocation.LOW,
+                    1.0,
+                ),
+            ),
+            live = todayQuote("sh600522", 30.0, 30.0 / 0.988),
+            portfolio = portfolio(),
+            breakObservation = com.example.stockmonitor.analysis.HoldingBreakObservation(30.5, 29.89, true),
+        )
+        assertEquals(com.example.stockmonitor.analysis.HoldingExitStage.NOTICE, result.exitDecision?.stage)
+        assertEquals("破位提示", result.signal)
+        assertTrue(result.action.contains("不强制卖出"))
+    }
+
+    @Test
+    fun redFundamentalsNeedsVerificationNotAutomaticLiquidation() {
         val health = FundamentalHealth(
             level = HealthLevel.ALERT, score = 40, verdict = "较差",
             reasons = listOf("公告提示：业绩预亏"), analyzedAt = "2026-10-09 10:00",
         )
         val result = evaluate(price = 30.0, support = 30.5, health = health,
             breakObservation = com.example.stockmonitor.analysis.HoldingBreakObservation(30.5, 29.89, true))
-        assertTrue(result.action.contains("退出优先"))
-        assertTrue(result.action.contains("清仓退出"))
+        // 统一优先级合约（PortfolioPriorityPolicyTest 同口径）：基本面警报只进风险核实层，
+        // 不把确认破位升级成清仓指令。深套（默认 cost 45）保持深套口径：结构失效或
+        // 核实后的基本面风险才升级退出，红灯本身要核实而不是直接割肉。
+        assertTrue(result.action.contains("优先退出"))
+        assertTrue(result.action.contains("做T"))
+        assertFalse(result.action.contains("清仓退出"))
         assertFalse(result.action.contains("剧本②"))
         assertTrue(result.fundamentalHealth != null)
     }
@@ -750,7 +849,7 @@ class PortfolioAnalysisTest {
         assertTrue(result.signal == "持有观察")
         assertTrue(result.action.contains("今天"))
         assertTrue(result.action.contains("量比"))
-        assertTrue(result.action.contains("较支撑"))
+        assertTrue(result.action.contains("距支撑"))
         assertTrue(result.action.contains("不动"))
     }
 
@@ -863,7 +962,7 @@ class PortfolioAnalysisTest {
 
         assertFalse(report.contains("状态含义"))
         // 但「状态」「应对」这些有信息量的行必须还在。
-        assertTrue(report.contains("状态：深套风险观察"))
+        assertTrue(report.contains("状态：风险待确认"))
         assertTrue(report.contains("应对："))
     }
 
@@ -924,8 +1023,8 @@ class PortfolioAnalysisTest {
             market = env(MarketRegime.WEAK).market,
         )
 
-        assertTrue(brief.size == 5)
-        assertTrue(brief[0].startsWith("最高优先级操作："))
+        assertTrue(brief.size == 8)
+        assertTrue(brief[0].startsWith("当前优先事项："))
         assertTrue(brief[1].startsWith("今日结果："))
         assertTrue(brief[2].startsWith("市场环境："))
         assertTrue(brief[3].startsWith("持仓整体操作建议："))
@@ -942,7 +1041,7 @@ class PortfolioAnalysisTest {
             ),
         )
 
-        assertTrue(brief[3].contains("机动仓做T"))
+        assertTrue(brief[3].contains("不自动补仓或做T"))
         assertTrue(brief[3].contains("持有观察"))
     }
 
@@ -964,7 +1063,7 @@ class PortfolioAnalysisTest {
         )
 
         val briefAt = report.indexOf("📌 今日要点")
-        val detailAt = report.indexOf("状态：深套风险观察")
+        val detailAt = report.indexOf("状态：风险待确认")
         assertTrue(briefAt in 0 until detailAt)
     }
 
@@ -976,14 +1075,28 @@ class PortfolioAnalysisTest {
             name = "破位股",
             signal = "减仓风险",
             action = "跌破支撑，分批减仓或退出",
+            price = 29.0,
         )
 
         val priority = PortfolioAnalysis.highestPriorityAction(listOf(hold, risk))
         val today = PortfolioAnalysis.todayBrief(listOf(hold, risk), portfolio())
 
         assertTrue(priority!!.contains("破位股"))
-        assertTrue(priority.contains("分批减仓或退出"))
-        assertTrue(today.first().startsWith("最高优先级操作："))
-        assertTrue(today.first().contains("破位股"))
+        assertTrue(priority.contains("暂无已确认的买卖动作"))
+        assertFalse(today.any { it.startsWith("当前优先事项：") })
+        assertTrue(today.any { it.startsWith("整体建议：") })
+    }
+
+    @Test
+    fun reportUsesDerivedPositionAllocationWhenConfigIsProvided() {
+        val result = evaluate(price = 31.0, support = 30.0, cost = 30.0, trendWeak = false)
+
+        val report = PortfolioAnalysis.formatReport(
+            results = listOf(result),
+            analyzedAt = "2026-10-12 16:05",
+            positionAllocations = mapOf(result.code to PositionAllocationConfig.normal(200.0)),
+        )
+
+        assertTrue(report.contains("分仓：底仓 200 股｜滚动仓 300 股"))
     }
 }

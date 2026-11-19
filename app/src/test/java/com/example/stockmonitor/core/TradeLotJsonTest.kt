@@ -80,6 +80,21 @@ class TradeLotJsonTest {
     }
 
     @Test
+    fun feeAndManualAdjustmentRoundTrip() {
+        val book = TradeBook(
+            entries = listOf(record.copy(fee = 5.0)),
+            adjustments = listOf(
+                PositionAdjustment("sz000001", "测试股", "2026-10-20", -100.0, "manual_position_edit"),
+            ),
+        )
+
+        val decoded = TradeLotJson.decode(TradeLotJson.encode(book))
+
+        assertEquals(5.0, decoded.entries.single().fee, 0.0)
+        assertEquals(book.adjustments, decoded.adjustments)
+    }
+
+    @Test
     fun negativeCostLotIsDropped() {
         val book = TradeBook(lots = listOf(TradeLot("sz000001", "测试股", 300.0, -1.0, "2026-10-21")))
 

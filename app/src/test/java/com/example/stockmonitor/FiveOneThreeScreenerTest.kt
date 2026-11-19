@@ -17,6 +17,7 @@ class FiveOneThreeScreenerTest {
 
         assertEquals(FiveOneThreeStage.OBSERVING, result?.stage)
         assertEquals("5连阳 5/5｜倍量阳 0/1｜缩量确认 0/3", result?.detail)
+        assertTrue(result!!.rangePositionPct in 0.0..100.0)
     }
 
     @Test
@@ -36,7 +37,10 @@ class FiveOneThreeScreenerTest {
         val result = FiveOneThreeScreener.evaluate(
             "sh600000",
             "测试股份",
-            barsWithPattern(includeDoubleVolume = true, confirmationVolumes = listOf(1_500.0, 1_200.0, 900.0)),
+            barsWithPattern(
+                includeDoubleVolume = true,
+                confirmationVolumes = listOf(15_000_000.0, 12_000_000.0, 9_000_000.0),
+            ),
         )
 
         assertEquals(FiveOneThreeStage.CONFIRMED, result?.stage)
@@ -57,7 +61,7 @@ class FiveOneThreeScreenerTest {
             "测试股份",
             barsWithPattern(
                 includeDoubleVolume = true,
-                confirmationVolumes = listOf(1_500.0, 1_200.0, 900.0),
+                confirmationVolumes = listOf(15_000_000.0, 12_000_000.0, 9_000_000.0),
                 breakSignalOpenOnConfirmation = true,
             ),
         )
@@ -72,7 +76,7 @@ class FiveOneThreeScreenerTest {
             "测试股份",
             barsWithPattern(
                 includeDoubleVolume = true,
-                confirmationVolumes = listOf(1_500.0, 1_800.0, 900.0),
+                confirmationVolumes = listOf(15_000_000.0, 18_000_000.0, 9_000_000.0),
                 wideRangeOnConfirmation = true,
             ),
         )
@@ -83,6 +87,28 @@ class FiveOneThreeScreenerTest {
     @Test
     fun stStockIsExcluded() {
         assertNull(FiveOneThreeScreener.evaluate("sh600000", "ST测试", barsWithPattern()))
+    }
+
+    @Test
+    fun lowLiquidityStockIsExcluded() {
+        val thin = barsWithPattern().map { it.copy(volume = it.volume / 10_000.0) }
+
+        assertNull(FiveOneThreeScreener.evaluate("sh600000", "测试股份", thin))
+    }
+
+    @Test
+    fun fiveGreenCandlesMustAlsoCloseAbovePriorClose() {
+        val bars = decliningBaseBars().toMutableList()
+        var previousClose = bars.last().close
+        repeat(4) {
+            val close = previousClose * 1.02
+            bars += bar(close = close, open = previousClose, volume = 10_000_000.0)
+            previousClose = close
+        }
+        val gapDownClose = previousClose * 0.99
+        bars += bar(close = gapDownClose, open = gapDownClose / 1.02, volume = 10_000_000.0)
+
+        assertNull(FiveOneThreeScreener.evaluate("sh600000", "测试股份", bars))
     }
 
     @Test
@@ -100,7 +126,7 @@ class FiveOneThreeScreenerTest {
         // 513 是短线形态：确认完成后过了几天就不再是今天的买点，不该一直挂着「形态已确认」。
         val confirmed = barsWithPattern(
             includeDoubleVolume = true,
-            confirmationVolumes = listOf(1_500.0, 1_200.0, 900.0),
+            confirmationVolumes = listOf(15_000_000.0, 12_000_000.0, 9_000_000.0),
         )
         assertEquals(
             FiveOneThreeStage.CONFIRMED,
@@ -120,7 +146,7 @@ class FiveOneThreeScreenerTest {
     /** 确认之后的安静交易日：不构成新形态、也不影响旧候选的判定。 */
     private fun quietDays(count: Int): List<DayBar> = (0 until count).map { index ->
         val close = 11.5 - index * 0.02
-        bar(close = close, open = close * 1.005, volume = 800.0)
+        bar(close = close, open = close * 1.005, volume = 8_000_000.0)
     }
 
     private fun barsWithPattern(
@@ -139,7 +165,7 @@ class FiveOneThreeScreenerTest {
                 open = signalOpen,
                 high = signalClose * 1.01,
                 low = signalOpen * 0.99,
-                volume = 2_200.0,
+                volume = 22_000_000.0,
             )
             confirmationVolumes.forEachIndexed { index, volume ->
                 val open = if (breakSignalOpenOnConfirmation && index == 0) signalOpen * 0.98 else signalClose * 0.995
@@ -158,18 +184,18 @@ class FiveOneThreeScreenerTest {
 
     private fun decliningBaseBars(): List<DayBar> = (0 until 60).map { index ->
         val close = 20.0 - minOf(index, 55) * 0.16
-        bar(close = close, open = close * 1.01, volume = 1_000.0)
+        bar(close = close, open = close * 1.01, volume = 10_000_000.0)
     }
 
     private fun risingBaseBars(): List<DayBar> = (0 until 60).map { index ->
         val close = 10.0 + index * 0.12
-        bar(close = close, open = close * 0.99, volume = 1_000.0)
+        bar(close = close, open = close * 0.99, volume = 10_000_000.0)
     }
 
     private fun bullishPattern(startClose: Double): List<DayBar> = (1..5).map { index ->
         val close = startClose * (1.02.pow(index))
         val open = close / 1.02
-        bar(close = close, open = open, volume = 1_000.0)
+        bar(close = close, open = open, volume = 10_000_000.0)
     }
 
     private fun bar(

@@ -76,6 +76,12 @@ class IntradaySignalState(
 
     private fun signalKey(code: String, type: IntradaySignalType): String = "$code|${type.name}"
 
+    /** 该 code 是否已有同类型信号在激活（含风险 stage 变体）——用来区分「重发」与「首发」。 */
+    fun hasActiveRisk(code: String, type: IntradaySignalType): Boolean {
+        val active = activeByCode[code] ?: return false
+        return active == type.name || active.startsWith("${type.name}|")
+    }
+
     private fun activeKey(type: IntradaySignalType, riskStage: Int): String =
         if (riskStage > 0) "${type.name}|$riskStage" else type.name
 }

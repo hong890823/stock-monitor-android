@@ -156,7 +156,7 @@ class TimeframeEvidenceTest {
             riskLine = 10.0,
         )
 
-        assertEquals(10.0, evidence.riskLine, 0.00001)
+        assertEquals(10.0, evidence.riskLine ?: -1.0, 0.00001)
         assertTrue(evidence.riskLineThresholdPct > 0.0)
         assertTrue(evidence.riskLineBelow)
         assertTrue(evidence.riskLineConfirmations in 1..3)

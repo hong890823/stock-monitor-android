@@ -5,6 +5,7 @@ import com.example.stockmonitor.core.Quote
 
 object ObservationEntryPolicy {
     const val RELATIVE_STRENGTH_PCT = 3.0
+    const val MAX_LEADER_MA5_BIAS_PCT = 8.0
 
     fun leaderCanBuy(
         recentLimitUpDays: Int,
@@ -31,6 +32,7 @@ object ObservationEntryPolicy {
         }
         val effectiveStop = stopPrice ?: trend?.stopPrice
         if (effectiveStop?.let { it.isFinite() && it > 0.0 && it < price } != true) return false
+        if (biasFromMa5Pct?.let { it.isFinite() && it > MAX_LEADER_MA5_BIAS_PCT } == true) return false
         val riskEvidence = BreakoutRiskEvidence(
             price = price,
             dailyHighPrice = null,
@@ -50,7 +52,7 @@ object ObservationEntryPolicy {
             trend.confirmed && trend.canBuy && trend.volumeConfirmed && !trend.trendWeak
         val strongHoldPath = trend?.trendWeak != true &&
             trendAssessment?.riskOnly == false &&
-            trendAssessment?.shortTerm in setOf(ShortTermTrend.UP, ShortTermTrend.EXTENDED, ShortTermTrend.REBOUND)
+            trendAssessment?.shortTerm in setOf(ShortTermTrend.UP, ShortTermTrend.REBOUND)
         return pullbackPath || strongHoldPath
     }
 

@@ -95,9 +95,10 @@ object MarketSummary {
                 breadthSentence("行业板块", secRising, secFalling, secFlat),
                 breadthSentence("概念板块", conRising, conFalling, conFlat),
             ).joinToString("；")
+            // 量能全文在第五节展开，今日要点另有单行摘要，这里不再整段复读 turnoverLines。
             out.appendLine(
-                String.format(Locale.CHINA, "%s。沪指%+.2f%%、深成指%+.2f%%、创业板%+.2f%%。定性：%s。%s。量能：%s。",
-                    trend, sp, szp, cyp, qual, breadth, inputs.turnoverLines.joinToString("；"))
+                String.format(Locale.CHINA, "%s。沪指%+.2f%%、深成指%+.2f%%、创业板%+.2f%%。定性：%s。%s。",
+                    trend, sp, szp, cyp, qual, breadth)
             )
         } else if (sh != null) {
             out.appendLine(String.format(Locale.CHINA, "沪指%+.2f%%。", sh.changePct))
@@ -134,7 +135,7 @@ object MarketSummary {
                     if (sector.volume > 0) "成交${formatYi(sector.volume)}亿" else "",
                 )
             }
-            out.appendLine(table(listOf("板块", "跌幅", "说明"), rows))
+            out.appendLine(table(listOf("板块", "跌幅", "成交额"), rows))
         } else {
             out.appendLine("（当前没有检测到下跌行业板块）")
         }
@@ -165,9 +166,7 @@ object MarketSummary {
             val fallingVolume = volumeSorted.filter { it.change < 0 }
             when {
                 risingVolume.isNotEmpty() && fallingVolume.isNotEmpty() -> out.appendLine(
-                    "点评：成交额靠前板块中，${risingVolume.first().name}等上涨，" +
-                        "${fallingVolume.first().name}等下跌；这里只能说明成交活跃，" +
-                        "不能直接等同于资金净流入或净流出。"
+                    "点评：成交额靠前板块中，${risingVolume.first().name}等上涨，${fallingVolume.first().name}等下跌。"
                 )
                 risingVolume.isNotEmpty() -> out.appendLine("点评：成交额靠前板块整体偏强，但仍需结合涨停扩散和后续量能确认。")
                 fallingVolume.isNotEmpty() -> out.appendLine("点评：成交额靠前板块整体偏弱，放量下跌需警惕资金承接不足。")
@@ -191,8 +190,9 @@ object MarketSummary {
         )
         if (upLimit.isNotEmpty() || downLimit.isNotEmpty()) {
             out.appendLine("- 涨停${upLimit.size}只，跌停${downLimit.size}只")
-            if (upLimit.isNotEmpty()) out.appendLine("  涨停代表：${upLimit.take(12).joinToString("、") { it.name }}")
-            if (downLimit.isNotEmpty()) out.appendLine("  跌停代表：${downLimit.take(8).joinToString("、") { it.name }}")
+            // 数据源的股票名可能带内空格（如「生 意 宝」），展示前滤掉。
+            if (upLimit.isNotEmpty()) out.appendLine("  涨停代表：${upLimit.take(12).joinToString("、") { it.name.replace(" ", "") }}")
+            if (downLimit.isNotEmpty()) out.appendLine("  跌停代表：${downLimit.take(8).joinToString("、") { it.name.replace(" ", "") }}")
         } else {
             out.appendLine("- 涨跌停数据暂缺")
         }
@@ -237,36 +237,26 @@ object MarketSummary {
             }
             out.appendLine(table(listOf("日期", valueLabel, "变化"), rows))
             out.appendLine()
-            if (klines.size >= 2 && useAmount) {
-                val firstValue = klineValue(klines.first(), inputs.amounts, true)
-                val lastValue = klineValue(klines.last(), inputs.amounts, true)
+            if (klines.size >= 2) {
+                val firstValue = klineValue(klines.first(), inputs.amounts, useAmount)
+                val lastValue = klineValue(klines.last(), inputs.amounts, useAmount)
                 if (firstValue > 0) {
                     val totalPct = (lastValue - firstValue) / firstValue * 100
-                    if (totalPct < -10) {
-                        out.appendLine(
-                            String.format(Locale.CHINA, "→ 较%d个交易日前%s减少%.0f%%", klines.size, valueLabel, abs(totalPct))
-                        )
-                        if (sh != null && sh.changePct < 0) {
-                            out.appendLine("→ 缩量下跌，承接力度偏弱，仍需观察后续量能。")
+                    // 每种结果都给一行：±10% 以内也写「基本持平」，不让这节只剩一张裸表格。
+                    when {
+                        totalPct < -10 -> {
+                            out.appendLine(
+                                String.format(Locale.CHINA, "→ 较%d个交易日前%s减少%.0f%%", klines.size, valueLabel, abs(totalPct))
+                            )
+                            if (useAmount && sh != null && sh.changePct < 0) {
+                                out.appendLine("→ 缩量下跌，承接力度偏弱，仍需观察后续量能。")
+                            }
                         }
-                    } else if (totalPct > 10) {
-                        out.appendLine(
+                        totalPct > 10 -> out.appendLine(
                             String.format(Locale.CHINA, "→ 较%d个交易日前%s增加%.0f%%", klines.size, valueLabel, totalPct)
                         )
-                    }
-                }
-            } else if (klines.size >= 2) {
-                val firstValue = klineValue(klines.first(), inputs.amounts, false)
-                val lastValue = klineValue(klines.last(), inputs.amounts, false)
-                if (firstValue > 0) {
-                    val totalPct = (lastValue - firstValue) / firstValue * 100
-                    if (totalPct < -10) {
-                        out.appendLine(
-                            String.format(Locale.CHINA, "→ 较%d个交易日前%s减少%.0f%%", klines.size, valueLabel, abs(totalPct))
-                        )
-                    } else if (totalPct > 10) {
-                        out.appendLine(
-                            String.format(Locale.CHINA, "→ 较%d个交易日前%s增加%.0f%%", klines.size, valueLabel, totalPct)
+                        else -> out.appendLine(
+                            String.format(Locale.CHINA, "→ 较%d个交易日前基本持平（%+.0f%%）", klines.size, totalPct)
                         )
                     }
                 }
@@ -344,21 +334,20 @@ object MarketSummary {
             val first = topSectors[0]
             val volume1 = if (first.volume > 0) "成交${formatYi(first.volume)}亿" else "成交额暂缺"
             out.appendLine(String.format(Locale.CHINA, "主线①：%s（%+.2f%%，%s）", first.name, first.change, volume1))
-            out.appendLine(String.format(Locale.CHINA, "  板块涨幅%+.2f%%，领涨股字段暂不核验展示", first.change))
             if (topSectors.size > 1) {
                 val second = topSectors[1]
                 val volume2 = if (second.volume > 0) "成交${formatYi(second.volume)}亿" else "成交额暂缺"
                 out.appendLine(String.format(Locale.CHINA, "主线②：%s（%+.2f%%，%s）", second.name, second.change, volume2))
-                out.appendLine(String.format(Locale.CHINA, "  板块涨幅%+.2f%%", second.change))
             }
+            // 标题行已带涨幅与成交额，不再逐行复读「板块涨幅x%」；领涨股的错配风险第二节已有说明。
         }
         val bottomSectors = sectors?.bottom ?: emptyList()
         if (bottomSectors.isNotEmpty()) {
-            val names = bottomSectors.take(3).joinToString("、") { it.name }
-            out.appendLine("风险方向：$names（远离）")
-            bottomSectors.take(3).forEach {
-                out.appendLine(String.format(Locale.CHINA, "  %s%+.2f%%", it.name, it.change))
+            // 涨幅并入名单行，逐只明细第二节表格已有，不重复列出。
+            val riskText = bottomSectors.take(3).joinToString("、") {
+                String.format(Locale.CHINA, "%s%+.2f%%", it.name, it.change)
             }
+            out.appendLine("风险方向：$riskText（远离）")
         }
         if (topSectors.isNotEmpty()) {
             out.appendLine("机会：${topSectors[0].name}当前强度最高，关注涨幅能否延续并扩散。")
@@ -414,10 +403,14 @@ object MarketSummary {
         // ② 量能：turnoverLines 已经是格式化好的「今日 vs 昨日同一时刻」
         lines.add("量能：${inputs.turnoverLines.firstOrNull() ?: "暂缺"}")
 
-        // ③ 赚钱效应
+        // ③ 赚钱效应。分母口径与正文/environmentQuality 一致（line 54 同款）：
+        // 有明细时含平盘（sectors.size），否则退回 rising+falling——brief 以前不含平盘，
+        // 同一份报告里「概念上涨占比」会比正文系统性偏高。
         val conRising = inputs.concept?.rising ?: 0
         val conFalling = inputs.concept?.falling ?: 0
-        val conTotal = conRising + conFalling
+        val conTotal = inputs.concept?.let {
+            if (it.sectors.isNotEmpty()) it.sectors.size else it.rising + it.falling
+        } ?: 0
         lines.add(
             "赚钱效应：" + if (conTotal <= 0) {
                 "暂缺"
@@ -539,26 +532,34 @@ object MarketSummary {
     fun turnoverLines(today: Double, snapshot: TurnoverTracker.Snapshot?): List<String> {
         if (today <= 0) return listOf("暂无市场成交数据")
         val lines = mutableListOf<String>()
-        lines.add("两市总成交  ${formatYi(today)}亿")
+        lines.add("两市总成交 ${formatYi(today)}亿")
 
-        val sampled = snapshot?.today ?: 0.0
-        val previous = snapshot?.previousSameTime
+        val snap = snapshot
+        if (snap == null) {
+            lines.add("昨日同期数据暂缺，已开始记录，明天起可对比")
+            return lines
+        }
+        val sampled = snap.today
+        val previous = snap.previousSameTime
         if (previous != null && previous > 0 && sampled > 0) {
             val delta = sampled - previous
+            // 收盘后当日就是全日数，「昨日同期 15:00」即昨日全日——盘后改口径，
+            // 别让人以为在拿半日比半日。
+            val compareLabel = if (snap.sampleMinute >= 900) "较昨日全日" else "较昨日同期（${snap.sampledAt}）"
             lines.add(
                 String.format(
-                    Locale.CHINA, "较昨日同期（%s）  %+,.0f亿  (%+.1f%%)",
-                    snapshot.sampledAt, delta / 1e8, delta / previous * 100,
+                    Locale.CHINA, "%s %+,.0f亿（%+.1f%%）",
+                    compareLabel, delta / 1e8, delta / previous * 100,
                 )
             )
         } else {
             lines.add("昨日同期数据暂缺，已开始记录，明天起可对比")
         }
 
-        val predicted = snapshot?.predictedFullDay
-        if (predicted != null && predicted > 0 && snapshot.sampleMinute < 900) {
+        val predicted = snap.predictedFullDay
+        if (predicted != null && predicted > 0 && snap.sampleMinute < 900) {
             val basis = if (previous != null && previous > 0) "按昨日同期推算" else "按已过交易时间线性推算"
-            lines.add("${basis}全天约  ${formatYi(predicted)}亿")
+            lines.add("${basis}全天约 ${formatYi(predicted)}亿")
         }
         return lines
     }

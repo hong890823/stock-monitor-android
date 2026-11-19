@@ -59,8 +59,10 @@ object HoldingExitPolicy {
             input.positionPct != null && input.positionPct.isFinite() &&
             input.positionPct >= 0.0 && input.positionPct < LIGHT_POSITION_PCT
         val stage = when {
-            !mitigated && confirmed && (structureFailed || input.fundamentalAlert) -> HoldingExitStage.EXIT
-            broken && input.fundamentalAlert -> HoldingExitStage.WATCH
+            // 口径同 PortfolioPriorityPolicy：EXIT 需要结构失效（趋势转弱 + 失守退出参考价），
+            // 基本面红灯不把「确认破位」自动升级成清仓指令——红灯只进核实层，也不参与缓释。
+            !mitigated && confirmed && structureFailed -> HoldingExitStage.EXIT
+            broken && !confirmed && input.fundamentalAlert -> HoldingExitStage.WATCH
             (confirmed && high) || highWeakness != null -> HoldingExitStage.HIGH_REDUCE
             DeepLossPolicy.isDeepLoss(input.cost, input.price, input.atrPct) -> HoldingExitStage.DEEP_T
             confirmed && mitigated -> HoldingExitStage.NOTICE
@@ -78,13 +80,14 @@ object HoldingExitPolicy {
         val referenceText = reference?.let { "自动风险参考 ${String.format(Locale.CHINA, "%.2f", it)}" } ?: "风险参考暂缺"
         val action = when (stage) {
             HoldingExitStage.WATCH -> "$evidence；暂不加仓，短时观察能否收回；确认未收回则分批减仓。$referenceText。" +
-                (if (input.fundamentalAlert) "基本面红灯需核实，暂停做T接回；破位确认后优先退出。" else "")
+                (if (input.fundamentalAlert) "基本面红灯需核实，暂停做T接回；破位确认后按减仓评估，结构失效才升级退出。" else "")
             HoldingExitStage.REDUCE -> "$evidence：优先分批减仓降低风险，不必等待反弹；首次可评估减出约1/3可卖仓位。" +
-                "剩余仓位若进一步失守${referenceText}且趋势转弱，升级为退出评估。"
+                "剩余仓位若进一步失守${referenceText}且趋势转弱，升级为退出评估。" +
+                (if (input.fundamentalAlert) "另叠加基本面红灯，请核实财务与公告后再定剩余仓位去留。" else "")
             HoldingExitStage.HIGH_REDUCE -> "现价处于阶段高位，叠加$evidence；优先分批减仓，首次可评估减出约1/3可卖仓位，暂停加仓和做T接回。" +
-                "高位本身不是清仓依据；剩余仓位按确认破位后的趋势失效或基本面风险评估退出。"
-            HoldingExitStage.EXIT -> "$evidence；" +
-                (if (structureFailed) "趋势转弱且失守$referenceText" else "叠加基本面红灯，需核实财务与公告风险") +
+                "高位本身不是清仓依据；剩余仓位按确认破位后的趋势失效或基本面风险评估退出。" +
+                (if (input.fundamentalAlert) "基本面红灯需核实后再定剩余仓位去留。" else "")
+            HoldingExitStage.EXIT -> "$evidence；趋势转弱且失守$referenceText" +
                 "，退出优先：核对证据后以清仓退出为目标，可按流动性分笔执行，不再只减1/3或等反弹做T。"
             HoldingExitStage.DEEP_T -> "当前优先：$evidence；深套先不补仓，未触发退出条件前只评估机动仓滚动做T，反弹减出、企稳接回，尝试降低成本但不保证解套；" +
                 "若持续破位叠加结构失效或基本面风险，优先退出，不因深套无限等待。$referenceText。"

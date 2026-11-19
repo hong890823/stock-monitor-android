@@ -5,7 +5,12 @@ import com.example.stockmonitor.core.Position
 import com.example.stockmonitor.core.Quote
 import com.example.stockmonitor.core.TradeBook
 import com.example.stockmonitor.core.TradeLot
+import com.example.stockmonitor.core.TradeRecord
+import com.example.stockmonitor.core.TradeSide
+import com.example.stockmonitor.core.TradeSource
+import com.example.stockmonitor.core.PositionAdjustment
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -49,7 +54,7 @@ class DayPnlTest {
     }
 
     @Test
-    fun todayAcquisitionUsesBuyCostInsteadOfPrevClose() {
+    fun todayAcquisitionStillUsesPrevCloseForCurrentHoldingPnl() {
         val summary = DayPnl.summarize(
             positions = listOf(Position("sz002421", "达实智能", 6_000.0, 3.517)),
             quotes = mapOf("sz002421" to quote("sz002421", price = 3.44, prevClose = 3.43)),
@@ -58,9 +63,9 @@ class DayPnlTest {
             ),
         )
 
-        assertEquals(-462.0, summary.rows.single().pnl!!, 1e-9) // (3.44 - 3.517) × 6000
-        assertEquals(-462.0, summary.totalPnl, 1e-9)
-        assertEquals(0.0, summary.prevMarketValue, 1e-9)
+        assertEquals(60.0, summary.rows.single().pnl!!, 1e-9) // (3.44 - 3.43) × 6000
+        assertEquals(60.0, summary.totalPnl, 1e-9)
+        assertEquals(20_580.0, summary.prevMarketValue, 1e-9)
     }
 
     @Test
@@ -79,6 +84,36 @@ class DayPnlTest {
         assertEquals(1, acquisitions.size)
         assertEquals(6_000.0, acquisitions.getValue("sz002421").quantity, 1e-9)
         assertEquals(3.5166666666666666, acquisitions.getValue("sz002421").unitCost, 1e-9)
+    }
+
+    @Test
+    fun accountPnlIncludesRealizedSellAndFees() {
+        val positions = listOf(Position("sh600000", "甲", 60.0, 8.0))
+        val quotes = mapOf("sh600000" to quote("sh600000", 11.0, 10.0))
+        val book = TradeBook(entries = listOf(
+            TradeRecord("sell-1", "sh600000", "甲", TradeSide.SELL, "2026-10-27", 40.0, 12.0, TradeSource.MANUAL, fee = 1.0),
+        ))
+
+        val account = DayPnl.accountSummary(positions, quotes, book, "2026-10-27")
+
+        assertTrue(account.complete)
+        assertEquals(60.0, account.holdingsPnl!!, 1e-9)
+        assertEquals(80.0, account.realizedPnl!!, 1e-9)
+        assertEquals(1.0, account.fees!!, 1e-9)
+        assertEquals(139.0, account.totalPnl!!, 1e-9)
+    }
+
+    @Test
+    fun manualQuantityAdjustmentMarksAccountPnlIncomplete() {
+        val book = TradeBook(adjustments = listOf(
+            PositionAdjustment("sh600000", "甲", "2026-10-27", -100.0, "manual_position_edit"),
+        ))
+
+        val account = DayPnl.accountSummary(emptyList(), emptyMap(), book, "2026-10-27")
+
+        assertFalse(account.complete)
+        assertNull(account.totalPnl)
+        assertTrue(account.reasons.single().contains("未记录成交价/费用"))
     }
 
     @Test

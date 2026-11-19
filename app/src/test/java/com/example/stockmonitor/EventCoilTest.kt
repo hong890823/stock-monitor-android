@@ -141,6 +141,9 @@ class EventCoilTest {
         assertEquals(2.13, EventCoil.ratioPct("关于注销部分回购股份并相应减少注册资本的公告", shanshan)!!, 0.01)
         // 股数解析错位（注销数 ≥ 总股本）宁缺勿滥。
         assertNull(EventCoil.ratioPct("注销 5,000,000 股", "股份总数 4,000,000。"))
+        // 表格型披露常用「万股/亿」写法；旧正则不认单位倍率，会静默漏判。
+        val wanStyle = "本次注销回购股份4,773万股。公司总股本22.46亿股。"
+        assertEquals(2.13, EventCoil.ratioPct("关于注销部分回购股份的公告", wanStyle)!!, 0.05)
     }
 
     @Test
@@ -161,5 +164,26 @@ class EventCoilTest {
         assertNull(EventCoil.negativeEventKind("甲:关于股东办理股份质押的公告"))
         assertNull(EventCoil.negativeEventKind("甲:关于部分董事减持股份计划的公告"))
         assertNull(EventCoil.negativeEventKind("甲:关于诉讼事项进展的公告"))
+
+        // 反向豁免：终止减持、解除冻结、撤销退市风险警示（摘帽）都是利好方向，
+        // 不能因带「减持/冻结/退市」关键词被归成利空；「终止重组」仍是真利空。
+        assertNull(EventCoil.negativeEventKind("甲:关于控股股东终止减持计划的公告"))
+        assertNull(EventCoil.negativeEventKind("甲:关于控股股东减持计划期满暨不再减持的公告"))
+        assertNull(EventCoil.negativeEventKind("甲:关于撤销公司股票退市风险警示的公告"))
+        assertNull(EventCoil.negativeEventKind("甲:关于解除控股股东股份司法冻结的公告"))
+        assertEquals("终止重组", EventCoil.negativeEventKind("甲:关于终止重大资产重组事项的公告"))
+    }
+
+    @Test
+    fun eventOnLatestLiveBarDoesNotCrash() {
+        // 盘中链路会把今日实时段追加为最后一根K线；公告恰好当日发布且被市场注意到
+        // （量比≥1.15 或涨幅≥2%）时，事件日就是最后一根——旧实现 subList(size, size-1) 抛异常。
+        val bars = mutableListOf<DayBar>()
+        for (i in 1..20) bars += bar("2026-09-%02d".format(i + 4), close = 14.0, volume = 100.0)
+        bars += bar("2026-10-22", close = 14.35, volume = 130.0) // 当日事件：+3.2% 放量（实时段）
+        val sameDayAnnouncement = landingAnnouncement.copy(date = "2026-10-22")
+        val signal = EventCoil.evaluate(listOf(sameDayAnnouncement), bars, today)
+        // 没有中间日可验证蓄势，最新一根即事件日本身守住回踩线：给出线索而不是崩溃。
+        assertEquals("2026-10-22", signal?.eventDate)
     }
 }

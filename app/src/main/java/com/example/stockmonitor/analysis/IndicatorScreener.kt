@@ -22,7 +22,7 @@ import kotlinx.coroutines.withContext
  *
  * 按池子和成本拆成两个入口，对应两个手动按钮：
  * - [screenIndicators]：成交量前 200、只算 MACD / RSI / KDJ 两档——秒级，随时可点；
- * - [screenPatterns]：全市场趋势 + 513（指标两档仍只对活跃前 200 算）——数千根日K，
+ * - [screenPatterns]：全市场趋势 + 513，并顺带全量刷新指标两档——数千根日K，
  *   盘中不自动跑，只在夜间窗口自动一轮或手动触发。
  *
  * 严格策略：MACD DIF/DEA 零轴上方金叉 且 RSI < 30 且 KDJ 低位金叉（K < 30）。
@@ -44,8 +44,7 @@ class IndicatorScreener(private val sina: SinaClient) {
     }
 
     /**
-     * 形态深扫：全市场。列表按成交量降序返回，前 [INDICATOR_UNIVERSE_LIMIT] 只天然就是
-     * 指标档的活跃池，不必再单独拉一次列表。
+     * 形态深扫：全市场。指标两档也覆盖同一批全市场日线，避免深扫命中却漏掉非活跃股。
      */
     suspend fun screenPatterns(
         onProgress: ((done: Int, total: Int) -> Unit)? = null,
@@ -53,7 +52,7 @@ class IndicatorScreener(private val sina: SinaClient) {
         val universe = sina.allAStocks()
         return scan(
             universe = universe,
-            indicatorCodes = universe.take(INDICATOR_UNIVERSE_LIMIT).mapTo(HashSet()) { it.code },
+            indicatorCodes = universe.mapTo(HashSet()) { it.code },
             runPatterns = true,
             onProgress = onProgress,
         )
@@ -88,21 +87,24 @@ class IndicatorScreener(private val sina: SinaClient) {
 
         val successful = evaluated.count { it != null }
         val coverage = if (total > 0) successful.toDouble() / total else 0.0
-        if (total == 0 || coverage < 0.5) {
+        if (total == 0 || coverage < MIN_SCAN_COVERAGE) {
             throw Http.HttpError("历史数据成功率过低: $successful/$total")
         }
 
         val filled = fillLiveData(evaluated)
         val strict = orderStrictHits(
             evaluated.mapNotNull { item -> item?.takeIf { it.strict }?.hit?.let { filled[it.code] } }
-        )
-        val relaxed = RelaxedScreenSelection.select(
-            evaluated.mapNotNull { item -> item?.takeIf { it.relaxed }?.hit?.let { filled[it.code] } }
+        ).distinctBy { it.code }
+        val strictCodes = strict.mapTo(HashSet()) { it.code }
+        val relaxed = selectRelaxedExcludingStrict(
+            evaluated.mapNotNull { item -> item?.takeIf { it.relaxed }?.hit?.let { filled[it.code] } },
+            strictCodes,
         )
         if (!runPatterns) {
             return@withContext ScreenResult(strict, relaxed)
         }
         val fiveOneThree = orderFiveOneThreeHits(evaluated.mapNotNull { it?.fiveOneThree })
+            .take(MAX_FIVE_ONE_THREE_CANDIDATES)
         val trend = TrendScreenSelection.select(evaluated.mapNotNull { it?.trend })
         val fiveOneThreeStats = FiveOneThreeStats(
             totalStocks = total,
@@ -218,12 +220,19 @@ class IndicatorScreener(private val sina: SinaClient) {
                     elapsedTradingMinutes = elapsedTradingMinutes,
                 )
                 trendSetup.takeIf { it.type != EntrySetupType.NONE }?.let {
-                    val technical = TechnicalQualityPolicy.evaluateBars(
-                        history = bars,
-                        asOf = TimeUtils.todayText(),
-                        dailyEvidenceRatio = TechnicalQualityPolicy.dailyEvidenceRatio(bars, TimeUtils.todayText(), it),
-                        trendWeak = it.trendWeak,
-                    )
+                    // 为什么：趋势命中项的「技术 X/100」并入统一四维综合评分（快照链路），
+                    // 入场结构复用本轮已算出的 trendSetup（含大盘过滤），周/月趋势与全套
+                    // 指标由快照一次性算齐。短历史（<60 根）或计算失败时退回默认档，
+                    // 不让个股从扫描结果里消失。
+                    val technical = runCatching {
+                        TechnicalTrendSnapshotPolicy.evaluate(
+                            history = bars,
+                            code = stock.code,
+                            name = stock.name,
+                            asOf = TimeUtils.todayText(),
+                            entrySetup = it,
+                        )
+                    }.getOrNull()
                     TrendScreenHit(
                         code = stock.code,
                         name = stock.name,
@@ -235,9 +244,9 @@ class IndicatorScreener(private val sina: SinaClient) {
                         },
                         volumeRatio = VolumeRatio.of(stock.volume, avgVolume20, elapsedTradingMinutes),
                         entrySetup = it,
-                        technicalScore = technical.score,
-                        weeklyTrendLabel = technical.weeklyTrend.label,
-                        monthlyTrendLabel = technical.monthlyTrend.label,
+                        technicalScore = technical?.technicalScore ?: 40,
+                        weeklyTrendLabel = technical?.weeklyTrend?.label ?: "数据不足",
+                        monthlyTrendLabel = technical?.monthlyTrend?.label ?: "数据不足",
                     )
                 }
             } else {
@@ -296,10 +305,21 @@ class IndicatorScreener(private val sina: SinaClient) {
             val relaxedRsi = !latestRsi.isNaN() && latestRsi < 45
             val relaxedKdj = latestK > latestD && latestK < 50
             val relaxedScore = listOf(relaxedMacd, relaxedRsi, relaxedKdj).count { it }
-            val technical = TechnicalQualityPolicy.evaluateBars(
-                history = bars,
-                asOf = TimeUtils.todayText(),
-                dailyEvidenceRatio = relaxedScore / 3.0,
+            // 为什么：指标两档的技术分同样并入统一「技术 X/100」口径——四维评分的动量/
+            // 结构维度已覆盖原 relaxedScore（MACD/RSI/KDJ）的含义。短历史或计算失败时
+            // 沿用 ScreenHit 的旧默认档（按当日指标最多 40 分），保持列表不缺行。
+            val technical = runCatching {
+                TechnicalTrendSnapshotPolicy.evaluate(
+                    history = bars,
+                    code = stock.code,
+                    name = stock.name,
+                    asOf = TimeUtils.todayText(),
+                )
+            }.getOrNull()
+            val scoredFiveOneThree = fiveOneThree?.copy(
+                technicalScore = technical?.technicalScore ?: 40,
+                weeklyTrendLabel = technical?.weeklyTrend?.label ?: "数据不足",
+                monthlyTrendLabel = technical?.monthlyTrend?.label ?: "数据不足",
             )
 
             Evaluated(
@@ -318,13 +338,13 @@ class IndicatorScreener(private val sina: SinaClient) {
                     rsiOk = relaxedRsi,
                     kdjOk = relaxedKdj,
                     relaxedTrendEligible = RelaxedScreenSelection.trendEligible(bars),
-                    technicalScore = technical.score,
-                    weeklyTrendLabel = technical.weeklyTrend.label,
-                    monthlyTrendLabel = technical.monthlyTrend.label,
+                    technicalScore = technical?.technicalScore ?: (relaxedScore.coerceIn(0, 3) * 40 / 3),
+                    weeklyTrendLabel = technical?.weeklyTrend?.label ?: "数据不足",
+                    monthlyTrendLabel = technical?.monthlyTrend?.label ?: "数据不足",
                 ),
                 strict = strictMacd && strictRsi && strictKdj,
                 relaxed = relaxedMacd && (relaxedRsi || relaxedKdj),
-                fiveOneThree = fiveOneThree,
+                fiveOneThree = scoredFiveOneThree,
                 fiveOneThreeInspection = fiveOneThreeInspection,
                 trend = trendHit,
             )
@@ -334,6 +354,8 @@ class IndicatorScreener(private val sina: SinaClient) {
     }
 
     companion object {
+        private const val MIN_SCAN_COVERAGE = 0.7
+        private const val MAX_FIVE_ONE_THREE_CANDIDATES = 50
         /** 指标两档的扫描池：成交量前 N 只活跃股。 */
         const val INDICATOR_UNIVERSE_LIMIT = 200
     }
@@ -346,6 +368,12 @@ internal fun orderStrictHits(hits: List<ScreenHit>): List<ScreenHit> =
             .thenBy { it.rsi }
             .thenBy { it.code },
     )
+
+/** 先排除严格档已展示的代码，再应用宽松档数量上限；否则严格档会占掉宽松档名额并造成漏选。 */
+internal fun selectRelaxedExcludingStrict(
+    hits: List<ScreenHit>,
+    strictCodes: Set<String>,
+): List<ScreenHit> = RelaxedScreenSelection.select(hits.filterNot { it.code in strictCodes })
 
 /**
  * 宽松档先按满足项数降序，再优先DIF非负、KDJ修复；不把更低RSI视为更高优先级。
@@ -363,7 +391,10 @@ internal fun orderRelaxedHits(hits: List<ScreenHit>): List<ScreenHit> =
 internal fun orderFiveOneThreeHits(hits: List<FiveOneThreeHit>): List<FiveOneThreeHit> =
     hits.sortedWith(
         compareByDescending<FiveOneThreeHit> { it.stage.ordinal }
-            .thenByDescending { it.gain60Pct }
+            // 513 的目标是低位形态：同阶段优先区间位置更低、近60日涨幅更小的标的，
+            // 避免在 50 只上限截断时反而把已经接近区间高位的股票留下。
+            .thenBy { hit -> hit.rangePositionPct.takeIf { it.isFinite() } ?: Double.POSITIVE_INFINITY }
+            .thenBy { hit -> hit.gain60Pct.takeIf { it.isFinite() } ?: Double.POSITIVE_INFINITY }
             .thenBy { it.name },
     )
 
@@ -372,5 +403,19 @@ internal fun orderTrendHits(hits: List<TrendScreenHit>): List<TrendScreenHit> =
         compareByDescending<TrendScreenHit> { it.entrySetup.canBuy }
             .thenByDescending { it.entrySetup.confirmed }
             .thenBy { it.entrySetup.type.ordinal }
-            .thenByDescending { it.volumeRatio ?: 0.0 },
+            // 回踩要看缩量是否充分，量比越低越好；突破则相反，量能越强越优先。
+            .thenComparator { left, right ->
+                if (left.entrySetup.type == EntrySetupType.M20_PULLBACK) {
+                    compareValues(
+                        left.volumeRatio?.takeIf { it.isFinite() } ?: Double.POSITIVE_INFINITY,
+                        right.volumeRatio?.takeIf { it.isFinite() } ?: Double.POSITIVE_INFINITY,
+                    )
+                } else {
+                    compareValues(
+                        right.volumeRatio?.takeIf { it.isFinite() } ?: 0.0,
+                        left.volumeRatio?.takeIf { it.isFinite() } ?: 0.0,
+                    )
+                }
+            }
+            .thenBy { it.code },
     )

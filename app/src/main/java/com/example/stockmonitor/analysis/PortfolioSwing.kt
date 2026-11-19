@@ -29,6 +29,81 @@ enum class SwingStatus(val label: String) {
     T_ONLY("仅机动仓波段观察"), BLOCKED("暂不加仓"),
 }
 
+enum class SwingDiagnosticKind {
+    ELIGIBLE,
+    WAITING_CONFIRMATION,
+    DATA_GAP,
+    FUNDING_BLOCKED,
+    RISK_BLOCKED,
+    OBSERVE_ONLY,
+    STRATEGY_BLOCKED,
+}
+
+data class SwingDiagnosis(
+    val kind: SwingDiagnosticKind,
+    val passedConditions: List<String> = emptyList(),
+    val blockers: List<String> = emptyList(),
+    val dataGaps: List<String> = emptyList(),
+    val fundingIssues: List<String> = emptyList(),
+) {
+    fun summary(): String = when (kind) {
+        SwingDiagnosticKind.ELIGIBLE ->
+            "已通过条件：${passedConditions.joinToString("、").ifBlank { "多周期、基本面、趋势和日线入场条件" }}"
+        SwingDiagnosticKind.WAITING_CONFIRMATION ->
+            "等待确认：${blockers.joinToString("；").ifBlank { "入场条件尚未完成" }}"
+        SwingDiagnosticKind.DATA_GAP ->
+            "数据缺口：${dataGaps.joinToString("；").ifBlank { "证据不完整或已过期" }}"
+        SwingDiagnosticKind.FUNDING_BLOCKED ->
+            "资金问题：${fundingIssues.joinToString("；").ifBlank { "现金、仓位或风险预算不足" }}"
+        SwingDiagnosticKind.RISK_BLOCKED ->
+            "策略阻碍：${blockers.joinToString("；").ifBlank { "风险优先，暂不新增资金" }}"
+        SwingDiagnosticKind.OBSERVE_ONLY ->
+            "仅观察：${blockers.joinToString("；").ifBlank { "保留机动仓观察" }}"
+        SwingDiagnosticKind.STRATEGY_BLOCKED ->
+            "策略阻碍：${blockers.joinToString("；").ifBlank { "普通加仓条件未通过" }}"
+    }
+
+    companion object {
+        fun from(decision: SwingDecision): SwingDiagnosis {
+            val reason = decision.reason.trim()
+            if (decision.addQuantity > 0.0) {
+                return SwingDiagnosis(
+                    kind = SwingDiagnosticKind.ELIGIBLE,
+                    passedConditions = listOf("多周期背景", "基本面", "趋势", "日线回踩", "潜在盈亏比"),
+                )
+            }
+            val funding = listOf("现金", "仓位", "风险余额", "最低申报", "最多聚焦", "资金优先")
+                .filter { reason.contains(it) }
+            if (funding.isNotEmpty()) {
+                return SwingDiagnosis(
+                    kind = SwingDiagnosticKind.FUNDING_BLOCKED,
+                    fundingIssues = listOf(reason),
+                )
+            }
+            val data = listOf("缺少", "缺失", "过期", "无法核实", "数据不足", "证据")
+                .filter { reason.contains(it) }
+            if (data.isNotEmpty()) {
+                return SwingDiagnosis(
+                    kind = SwingDiagnosticKind.DATA_GAP,
+                    dataGaps = listOf(reason),
+                )
+            }
+            if (decision.status == SwingStatus.T_ONLY) {
+                return SwingDiagnosis(SwingDiagnosticKind.OBSERVE_ONLY, blockers = listOf(reason))
+            }
+            if (decision.status == SwingStatus.WAIT) {
+                return SwingDiagnosis(SwingDiagnosticKind.WAITING_CONFIRMATION, blockers = listOf(reason))
+            }
+            val risk = listOf("风险", "高位", "退出", "深套", "封板", "偏弱", "破位", "不新增")
+                .any { reason.contains(it) }
+            return SwingDiagnosis(
+                kind = if (risk) SwingDiagnosticKind.RISK_BLOCKED else SwingDiagnosticKind.STRATEGY_BLOCKED,
+                blockers = listOf(reason),
+            )
+        }
+    }
+}
+
 data class SwingDecision(
     val code: String,
     val name: String,
@@ -46,9 +121,11 @@ data class SwingDecision(
     val estimatedCash: Double = 0.0,
     val afterPositionPct: Double? = null,
 ) {
+    val diagnosis: SwingDiagnosis get() = SwingDiagnosis.from(this)
+
     fun action(): String = if (addQuantity > 0) {
         "按分析价${money(price!!)}测算，本次最多追加${shares(addQuantity)}股，预计占用${money(estimatedCash)}元（含预留费用），加后仓位${money(afterPositionPct!!)}%"
-    } else "新增资金0股：$reason"
+    } else "新增资金0股：${diagnosis.summary()}（$reason）"
 
     fun levels(): String = if (entryLow != null && entryHigh != null && riskPrice != null && target != null) {
         "参考区间${money(entryLow)}～${money(entryHigh)}｜失效参考${money(riskPrice)}｜压力参考${money(target)}"
@@ -63,6 +140,7 @@ data class SwingPlan(
     val allocationCapital: Double? = null,
 ) {
     val preferredCode: String? get() = rows.firstOrNull { it.addQuantity > 0 }?.code
+    val focusedRows: List<SwingDecision> get() = rows.filter { it.addQuantity > 0 }
 
     fun validatedFor(portfolio: Portfolio): SwingPlan {
         if (portfolioSnapshot == portfolio) return this
@@ -73,9 +151,10 @@ data class SwingPlan(
     }
 
     fun headline(): String {
-        val preferred = rows.firstOrNull { it.addQuantity > 0 }
-        return if (preferred == null) "本轮不建议新增买入，追加0股" else
-            "本轮优先${preferred.name}，最多追加${shares(preferred.addQuantity)}股（按分析价测算）"
+        if (focusedRows.isEmpty()) return "本轮不建议新增买入，追加0股"
+        val names = focusedRows.joinToString("、") { it.name }
+        val quantity = focusedRows.sumOf { it.addQuantity }
+        return "本轮重点${names}，合计最多追加${shares(quantity)}股（按分析价测算）"
     }
 
     fun reportLines(): List<String> = buildList {
@@ -83,12 +162,13 @@ data class SwingPlan(
         add(headline())
         capitalIssue?.let { add("资金检查：$it") }
         allocationCapital?.let { add("额度基数：${money(it)}元（配置总资金与已录入持仓市值加现金取较小值）") }
-        rows.firstOrNull { it.addQuantity > 0 }?.let {
-            add(it.action())
-            add(it.levels())
+        focusedRows.forEachIndexed { index, row ->
+            add("重点${index + 1}：${row.name}｜${row.action()}")
+            add(row.levels())
         }
         rows.take(3).forEachIndexed { index, row ->
-            add("${index + 1}. ${row.name}｜${row.status.label}｜${if (row.addQuantity > 0) "本轮首选" else "追加0股"}：${row.reason}")
+            add("${index + 1}. ${row.name}｜${row.status.label}｜${if (row.addQuantity > 0) "重点${focusedRows.indexOf(row) + 1}" else "追加0股"}：${row.reason}")
+            add("诊断：${row.diagnosis.summary()}")
         }
         if (rows.size > 3) add("其余${rows.size - 3}只见逐股依据，均未分配本轮追加资金")
         if (rows.any { it.status == SwingStatus.T_ONLY }) {
@@ -100,6 +180,7 @@ data class SwingPlan(
 
 object PortfolioSwing {
     const val MIN_REWARD_RISK = 2.0
+    const val MAX_FOCUS_POSITIONS = 3
     private const val FEE_RATE = 0.001
     private const val MIN_FEE = 5.0
 
@@ -120,17 +201,36 @@ object PortfolioSwing {
             val decision = assess(position, input, market, asOf, nowMs)
             if (decision.status != SwingStatus.READY || input == null) decision
             else if (capitalIssue != null) decision.copy(reason = capitalIssue)
-            else allocate(decision, position, portfolio.copy(totalCapital = allocationCapital!!))
+            else decision
         }.sortedWith(compareByDescending<SwingDecision> { it.addQuantity > 0 }
             .thenBy { it.status.ordinal }.thenByDescending { it.score }.thenBy { it.code })
-        var allocated = false
+        var remainingCash = availableCapital
+        var focusCount = 0
         val rows = candidates.map { row ->
-            if (row.addQuantity <= 0) row
-            else if (!allocated) {
-                allocated = true
-                row
-            } else row.copy(addQuantity = 0.0, estimatedCash = 0.0, afterPositionPct = null,
-                reason = "技术条件通过，本轮资金优先给首选，保留候补")
+            if (row.status != SwingStatus.READY || capitalIssue != null || focusCount >= MAX_FOCUS_POSITIONS) {
+                if (row.status == SwingStatus.READY && capitalIssue == null && focusCount >= MAX_FOCUS_POSITIONS) {
+                    row.copy(
+                        reason = "技术条件通过，本轮最多聚焦${MAX_FOCUS_POSITIONS}只，保留候补",
+                    )
+                } else {
+                    row
+                }
+            } else {
+                val position = holdings.first { it.code == row.code }
+                val allocated = allocate(
+                    decision = row,
+                    position = position,
+                    portfolio = portfolio.copy(totalCapital = allocationCapital!!),
+                    cashBudget = remainingCash,
+                )
+                if (allocated.addQuantity > 0) {
+                    focusCount += 1
+                    remainingCash = (remainingCash - allocated.estimatedCash).coerceAtLeast(0.0)
+                    allocated
+                } else {
+                    allocated
+                }
+            }
         }
         return SwingPlan(rows, asOf, capitalIssue, portfolio.copy(positions = portfolio.positions.toMutableList()), allocationCapital)
     }
@@ -255,9 +355,19 @@ object PortfolioSwing {
             price = quote.price, entryLow = low, entryHigh = high, riskPrice = stop, target = target, rewardRisk = rewardRisk)
     }
 
-    private fun allocate(decision: SwingDecision, position: Position, portfolio: Portfolio): SwingDecision {
+    /**
+     * 限额与「加后仓位」都按额度基数（min(总资金, 市值+现金)）计算：浮亏时基数缩水、
+     * 更保守，浮盈被钳回总资金、不会放大可用现金（见 unverifiedCapitalCannotEnlarge
+     * TheAllocationBudget 用例）。与 AddPositionStrategy 的 totalCapital 口径差异是有意的。
+     */
+    private fun allocate(
+        decision: SwingDecision,
+        position: Position,
+        portfolio: Portfolio,
+        cashBudget: Double,
+    ): SwingDecision {
         val price = decision.price!!
-        val availableCapital = portfolio.resolvedAvailableCapital()
+        val availableCapital = cashBudget.coerceAtLeast(0.0)
         val headroom = portfolio.totalCapital * portfolio.maxPositionPct / 100 - position.quantity * price
         val limits = mutableListOf(
             (availableCapital - MIN_FEE).coerceAtLeast(0.0) / (price * (1 + FEE_RATE)),

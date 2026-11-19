@@ -562,6 +562,10 @@ class ToolsFragment : BaseFragment(R.layout.fragment_scroll) {
         appendTechnicalNumber(context, builder, StockAnalysis.price(result.resistance))
         builder.append("｜MA20 ")
         appendTechnicalNumber(context, builder, StockAnalysis.price(result.ma20))
+        builder.append(distanceSuffix(result, result.ma20))
+        builder.append("｜MA60 ")
+        appendTechnicalNumber(context, builder, StockAnalysis.price(result.ma60))
+        builder.append(distanceSuffix(result, result.ma60))
         builder.append("｜ATR ")
         appendTechnicalNumber(context, builder, StockAnalysis.price(result.volatility.atr))
         builder.append("（")
@@ -572,6 +576,12 @@ class ToolsFragment : BaseFragment(R.layout.fragment_scroll) {
         )
         builder.append("%）")
         return builder
+    }
+
+    /** 现价相对均线的距离，如「（-5.6%）」；均线或现价缺失时留空。 */
+    private fun distanceSuffix(result: TechnicalResult, reference: Double): String {
+        if (!reference.isFinite() || reference <= 0 || !result.price.isFinite() || result.price <= 0) return ""
+        return String.format(Locale.CHINA, "（%+.1f%%）", (result.price / reference - 1) * 100)
     }
 
     private fun appendTechnicalNumber(

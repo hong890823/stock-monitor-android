@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.stockmonitor.R
 import com.example.stockmonitor.analysis.DayPnl
 import com.example.stockmonitor.analysis.PortfolioAnalysis
+import com.example.stockmonitor.analysis.PortfolioSwing
 import com.example.stockmonitor.analysis.TimeUtils
 import com.example.stockmonitor.core.Store
 import com.example.stockmonitor.monitor.MonitorService
@@ -29,12 +30,20 @@ internal fun portfolioBriefCard(context: Context, store: Store): UiKit.Card = Ui
         market = Repo.marketState,
         swingPlan = plan,
         quotes = Repo.quotes,
+        tradeBook = store.tradeBook,
         todayAcquisitions = DayPnl.acquisitions(store.tradeBook, TimeUtils.todayText()),
+        technicalTrends = Repo.technicalTrendSnapshots,
     )
         .forEach { addText(it, 12f) }
     if (results.isEmpty()) {
-        addText("暂无个股分析结果，最值得操作的股票需等分析完成后判断。", 11.5f)
+        // 等待态文案由 todayBrief 统一给出（账户盈亏照算 + 一句「等分析」），不再另加重复提示。
+        if (Repo.portfolioTask.phase == com.example.stockmonitor.monitor.TaskPhase.FAILURE) {
+            addText("上次分析失败：${Repo.portfolioTask.displayText}", 11.5f, UiKit.color(context, R.color.warn))
+        }
     } else {
         plan?.capitalIssue?.let { issue -> addText(issue, 11.5f) }
+        if (plan?.focusedRows?.isNotEmpty() == true) {
+            addText("本轮重点改善 ${plan.focusedRows.size} 只持仓（最多${PortfolioSwing.MAX_FOCUS_POSITIONS}只）", 11.5f)
+        }
     }
 }

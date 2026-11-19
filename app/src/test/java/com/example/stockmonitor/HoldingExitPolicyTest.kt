@@ -16,7 +16,8 @@ class HoldingExitPolicyTest {
         assertEquals(HoldingExitStage.HIGH_REDUCE, HoldingExitPolicy.evaluate(high.copy(confirmed = true))?.stage)
         assertEquals(HoldingExitStage.EXIT,
             HoldingExitPolicy.evaluate(high.copy(confirmed = true, trendWeak = true, price = 19.3))?.stage)
-        assertEquals(HoldingExitStage.EXIT,
+        // 基本面红灯不把「确认破位」升级成清仓（口径同 PortfolioPriorityPolicy）：高位叠加红灯仍按高位减仓处理。
+        assertEquals(HoldingExitStage.HIGH_REDUCE,
             HoldingExitPolicy.evaluate(high.copy(confirmed = true, fundamentalAlert = true))?.stage)
         assertEquals(HoldingExitStage.REDUCE, HoldingExitPolicy.evaluate(input.copy(confirmed = true,
             priceContext = PriceContext(PriceLocation.LOW, 0.0)))?.stage)
@@ -71,8 +72,10 @@ class HoldingExitPolicyTest {
         assertEquals(HoldingExitStage.DEEP_T, HoldingExitPolicy.evaluate(input.copy(cost = 40.0, confirmed = true))?.stage)
     }
 
-    @Test fun redFlagAndConfirmedBreakPrioritizesExitButUnknownHealthDoesNot() {
-        assertEquals(HoldingExitStage.EXIT,
+    @Test fun redFlagNeedsVerificationAndDoesNotPromoteConfirmedBreakToExit() {
+        // 统一优先级合约：基本面警报只进风险核实层，不是自动卖出指令；
+        // 确认破位 + 红灯 = REDUCE（减仓评估），EXIT 只由结构失效触发（见上/下方 structureFailed 用例）。
+        assertEquals(HoldingExitStage.REDUCE,
             HoldingExitPolicy.evaluate(input.copy(confirmed = true, fundamentalAlert = true))?.stage)
         assertEquals(HoldingExitStage.REDUCE, HoldingExitPolicy.evaluate(input.copy(confirmed = true))?.stage)
         assertNull(HoldingExitPolicy.evaluate(input.copy(price = 20.1, fundamentalAlert = true)))

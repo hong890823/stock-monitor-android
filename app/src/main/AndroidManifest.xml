@@ -49,6 +49,11 @@
             android:parentActivityName=".ui.MainActivity" />
 
         <activity
+            android:name=".ui.TradeHistoryActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.MainActivity" />
+
+        <activity
             android:name=".ui.NewsDetailActivity"
             android:exported="false"
             android:parentActivityName=".ui.MainActivity" />

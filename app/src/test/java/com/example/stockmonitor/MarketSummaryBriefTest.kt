@@ -1,6 +1,7 @@
 package com.example.stockmonitor
 
 import com.example.stockmonitor.analysis.MarketSummary
+import com.example.stockmonitor.analysis.TurnoverTracker
 import com.example.stockmonitor.core.ConceptSummary
 import com.example.stockmonitor.core.LimitData
 import com.example.stockmonitor.core.Quote
@@ -24,6 +25,40 @@ class MarketSummaryBriefTest {
         code = code, name = name, price = 100.0, prevClose = 100.0 / (1 + changePct / 100),
         open = 100.0, high = 100.0, low = 100.0, volume = 1_000.0, turnover = 10_000.0,
     )
+
+    @Test
+    fun turnoverLinesSwitchToFullDayComparisonAfterClose() {
+        // 收盘后当日累计就是全日数，对比口径要写「较昨日全日」，别让人以为半日比半日。
+        val afterClose = MarketSummary.turnoverLines(
+            today = 1.9e12,
+            snapshot = TurnoverTracker.Snapshot(
+                sampledAt = "15:00",
+                sampleMinute = 900,
+                today = 1.9e12,
+                previousSameTime = 1.6e12,
+                previousFullDay = 1.6e12,
+                predictedFullDay = null,
+                source = TurnoverTracker.Source.CURVE,
+            ),
+        )
+        val afterCloseText = afterClose.joinToString()
+        assertTrue(afterCloseText.contains("较昨日全日 +3,000亿"))
+        assertFalse(afterCloseText.contains("昨日同期"))
+
+        val intraday = MarketSummary.turnoverLines(
+            today = 1.2e12,
+            snapshot = TurnoverTracker.Snapshot(
+                sampledAt = "10:30",
+                sampleMinute = 630,
+                today = 1.2e12,
+                previousSameTime = 1.0e12,
+                previousFullDay = 1.6e12,
+                predictedFullDay = null,
+                source = TurnoverTracker.Source.CURVE,
+            ),
+        )
+        assertTrue(intraday.joinToString().contains("较昨日同期（10:30）"))
+    }
 
     private fun inputs(
         rising: Int = 20,

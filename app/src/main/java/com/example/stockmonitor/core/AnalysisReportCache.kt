@@ -14,6 +14,11 @@ data class CachedAnalysisReports(
     val technicalReport: String?,
     val fundamentalReport: String?,
     val updatedAt: String,
+    /** 各半份报告自己的生成时刻：merge 只更新真正写入的那半，另一半沿用旧时刻——
+     *  [updatedAt] 反映的是「本次合并时间」，会掩盖「另一半其实是旧的」，消费方
+     *  （AI 工具的本地缓存出口）要判断新旧必须用这两个字段。 */
+    val technicalUpdatedAt: String = updatedAt,
+    val fundamentalUpdatedAt: String = updatedAt,
     val snapshot: RowSnapshot? = null,
 )
 
@@ -27,6 +32,9 @@ object AnalysisReportCache {
             technicalReport = item.optString("technical_report").takeIf { it.isNotBlank() },
             fundamentalReport = item.optString("fundamental_report").takeIf { it.isNotBlank() },
             updatedAt = item.optString("updated_at"),
+            // 旧档没有分报告时刻：回落到整体时刻（好过没有）。
+            technicalUpdatedAt = item.optString("technical_updated_at").ifBlank { item.optString("updated_at") },
+            fundamentalUpdatedAt = item.optString("fundamental_updated_at").ifBlank { item.optString("updated_at") },
             snapshot = decodeRow(item.optJSONObject("snapshot")),
         )
     }
@@ -49,6 +57,17 @@ object AnalysisReportCache {
                 .put("technical_report", technical ?: previous?.optString("technical_report").orEmpty())
                 .put("fundamental_report", fundamental ?: previous?.optString("fundamental_report").orEmpty())
                 .put("updated_at", updatedAt)
+                // 只更新真正写入那半份的时刻；另一半沿用旧时刻，别被 updatedAt 掩盖。
+                .put(
+                    "technical_updated_at",
+                    technical?.let { updatedAt } ?: previous?.optString("technical_updated_at")
+                        ?: previous?.optString("updated_at").orEmpty(),
+                )
+                .put(
+                    "fundamental_updated_at",
+                    fundamental?.let { updatedAt } ?: previous?.optString("fundamental_updated_at")
+                        ?: previous?.optString("updated_at").orEmpty(),
+                )
                 // 没给新快照就沿用旧的，别把「较上次」的对照数据弄丢。
                 .put("snapshot", snapshot?.let { encodeRow(it) } ?: previous?.optJSONObject("snapshot")),
         )

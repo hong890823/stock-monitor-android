@@ -10,14 +10,19 @@ import androidx.core.widget.NestedScrollView
 import com.example.stockmonitor.R
 import com.example.stockmonitor.analysis.FiveOneThreeHit
 import com.example.stockmonitor.analysis.FiveOneThreeStage
+import com.example.stockmonitor.analysis.FundFlowDisplayPolicy
 import com.example.stockmonitor.analysis.VolumePrice
 import com.example.stockmonitor.analysis.VolumePriceSignal
+import com.example.stockmonitor.analysis.ObservationBuyAlert
 import com.example.stockmonitor.analysis.ObservationEligibility
+import com.example.stockmonitor.analysis.ObservationDisplayRankingPolicy
 import com.example.stockmonitor.analysis.LimitUpFilterPolicy
 import com.example.stockmonitor.analysis.StrongSectorRankingPolicy
 import com.example.stockmonitor.core.ScreenHit
 import com.example.stockmonitor.core.TrendScreenHit
 import com.example.stockmonitor.core.LimitStock
+import com.example.stockmonitor.core.ObservationAlertState
+import com.example.stockmonitor.core.ObservationCandidate
 import com.example.stockmonitor.core.ObservationStage
 import com.example.stockmonitor.core.ObservationStrategy
 import com.example.stockmonitor.monitor.MonitorService
@@ -73,7 +78,10 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
         val changePct: Double,
         val summary: CharSequence,
         val details: List<UiKit.DetailRow>,
-        val technicalScore: Int = 0,
+        /** null 表示这行不属于候选池，沿用通用选股列表的板块综合排序。 */
+        val observationCandidate: ObservationCandidate? = null,
+        /** 仅由真实 TechnicalTrendSnapshot 填入；缺失时不允许用资格分回退。 */
+        val technicalScore: Int? = null,
         val weeklyTrendLabel: String = "数据不足",
         val monthlyTrendLabel: String = "数据不足",
     )
@@ -248,11 +256,26 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
         titleColor: Int? = null,
         emptyText: String = "暂无符合条件的股票。",
     ) {
-        val rankedItems = StrongSectorRankingPolicy.rankByCombined(
-            items,
-            scoreOf = { strongSectorRanking(rankingContext, it.code, it.changePct) },
-            technicalScoreOf = { it.technicalScore },
-        )
+        val isObservationSection = items.isNotEmpty() && items.all { it.observationCandidate != null }
+        val rankedItems = if (isObservationSection) {
+            val rowsByCode = items.associateBy { requireNotNull(it.observationCandidate).code }
+            ObservationDisplayRankingPolicy.rank(
+                candidates = rowsByCode.keys.map { code ->
+                    requireNotNull(rowsByCode.getValue(code).observationCandidate)
+                },
+                tierOf = ObservationEligibility::displayTier,
+                boardTieBreakOf = { candidate ->
+                    val row = rowsByCode.getValue(candidate.code)
+                    strongSectorRanking(rankingContext, row.code, row.changePct)
+                },
+            ).map { candidate -> rowsByCode.getValue(candidate.code) }
+        } else {
+            StrongSectorRankingPolicy.rankByCombined(
+                items,
+                scoreOf = { strongSectorRanking(rankingContext, it.code, it.changePct) },
+                technicalScoreOf = { it.technicalScore },
+            ).map { it.item }
+        }
         val heading = android.widget.LinearLayout(context).apply {
             orientation = android.widget.LinearLayout.HORIZONTAL
             gravity = android.view.Gravity.CENTER_VERTICAL
@@ -304,11 +327,11 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
             pages.edit().putInt(pageKey, currentPage).apply()
             pageContent.removeAllViews()
             val visibleItems = rankedItems.drop(currentPage * pageSize).take(pageSize)
-            rowKeys = visibleItems.map { "selection:${it.item.key}" }
+            rowKeys = visibleItems.map { "selection:${it.key}" }
             val pageRows = mutableListOf<UiKit.ExpandableQuoteRowView>()
-            visibleItems.forEach { ranked ->
-                val item = ranked.item
-                val ranking = ranked.result
+            visibleItems.forEach { item ->
+                val ranking = strongSectorRanking(rankingContext, item.code, item.changePct)
+                val observation = item.observationCandidate
                 val markerParts = buildList {
                     val sustainedMainline = ranking.labels.any { it.startsWith("主线板块") }
                     if (sustainedMainline) {
@@ -322,24 +345,51 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                     if ("情绪核心" in ranking.labels) add("情绪核心")
                 }
                 val markerText = markerParts.joinToString("｜")
-                val breakdown = StrongSectorRankingPolicy.scoreBreakdown(item.technicalScore, ranking)
-                val overallScore = breakdown.total
-                val scoreLine = "综合质量分 $overallScore/100"
-                val rankedSummary = SpannableStringBuilder()
-                    .append(scoreLine)
-                    .append("\n")
-                    .apply {
-                        if (markerText.isNotBlank()) append("$markerText\n")
-                    }
-                    .append(item.summary)
-                val scoreDetails = listOf(
-                    UiKit.DetailRow("综合质量分", "$overallScore/100"),
-                    UiKit.DetailRow("评分构成",
-                        "技术 ${breakdown.technicalPoints}/35（原始${item.technicalScore}/100）｜板块 ${breakdown.sectorPoints}/35｜" +
-                            "核心角色 ${breakdown.rolePoints}/20｜数据可信度 ${breakdown.confidencePoints}/10",
-                    ),
-                    UiKit.DetailRow("技术趋势", "周K${item.weeklyTrendLabel}｜月K${item.monthlyTrendLabel}"),
-                )
+                val rankedSummary: SpannableStringBuilder
+                val rankingDetails: List<UiKit.DetailRow>
+                if (observation != null) {
+                    val relativeStrength = observation.relativeStrengthPct?.takeIf { it.isFinite() }
+                        ?.let { String.format(Locale.CHINA, "%+.1f%%", it) } ?: "数据暂缺"
+                    val marketRisk = observation.marketRisk?.label ?: "数据暂缺"
+                    val technicalSnapshot = item.technicalScore?.let { "技术 $it/100" } ?: "技术快照暂缺"
+                    val priorityLine = "排序：${observation.structureQuality.label}｜相对强度 $relativeStrength｜市场风险 $marketRisk｜$technicalSnapshot"
+                    rankedSummary = SpannableStringBuilder()
+                        .append(priorityLine)
+                        .append("\n")
+                        .apply {
+                            if (markerText.isNotBlank()) append("$markerText\n")
+                        }
+                        .append(item.summary)
+                    rankingDetails = listOf(
+                        UiKit.DetailRow(
+                            "结构 / 相对强度",
+                            "${observation.structureQuality.label}｜$relativeStrength",
+                        ),
+                        UiKit.DetailRow(
+                            "市场 / 技术",
+                            "$marketRisk｜$technicalSnapshot｜周K${item.weeklyTrendLabel}｜月K${item.monthlyTrendLabel}",
+                        ),
+                    )
+                } else {
+                    val breakdown = StrongSectorRankingPolicy.scoreBreakdown(item.technicalScore, ranking)
+                    val overallScore = breakdown.total
+                    rankedSummary = SpannableStringBuilder()
+                        .append("综合质量分 $overallScore/100")
+                        .append("\n")
+                        .apply {
+                            if (markerText.isNotBlank()) append("$markerText\n")
+                        }
+                        .append(item.summary)
+                    rankingDetails = listOf(
+                        UiKit.DetailRow("综合质量分", "$overallScore/100"),
+                        UiKit.DetailRow(
+                            "评分构成",
+                            "技术 ${breakdown.technicalPoints}/35（原始${item.technicalScore ?: "暂缺"}/100）｜板块 ${breakdown.sectorPoints}/35｜" +
+                                "核心角色 ${breakdown.rolePoints}/20｜数据可信度 ${breakdown.confidencePoints}/10",
+                        ),
+                        UiKit.DetailRow("技术趋势", "周K${item.weeklyTrendLabel}｜月K${item.monthlyTrendLabel}"),
+                    )
+                }
                 val mainlineDetails = if (ranking.mainlineWindowDays > 0) {
                     val mainlineStatus = when {
                         ranking.mainlineDiverging -> "｜主线正常分歧，暂保留1个交易日"
@@ -353,9 +403,9 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                     emptyList()
                 }
                 val rankedDetails = if (markerParts.isEmpty()) {
-                    item.details + scoreDetails + mainlineDetails
+                    item.details + rankingDetails + mainlineDetails
                 } else {
-                    item.details + scoreDetails + mainlineDetails + UiKit.DetailRow("板块标记", markerText)
+                    item.details + rankingDetails + mainlineDetails + UiKit.DetailRow("板块标记", markerText)
                 }
                 val row = UiKit.expandableQuoteRow(
                     context = context,
@@ -459,13 +509,14 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
         limitFilterSnapshot(rankingContext, it.code, it.name)
     }
 
-    private fun <T> filterLimitUpItems(
+    /** 候选池按证券本身的 10cm/20cm/30cm 涨跌停制度筛选，不要求当前涨停。 */
+    private fun <T> filterObservationBandItems(
         items: List<T>,
         option: LimitUpFilterPolicy.Option,
         rankingContext: SelectionRankingContext,
         codeOf: (T) -> String,
         nameOf: (T) -> String,
-    ): List<T> = LimitUpFilterPolicy.filterBy(items, option) {
+    ): List<T> = LimitUpFilterPolicy.filterByMarketBand(items, option) {
         limitFilterSnapshot(rankingContext, codeOf(it), nameOf(it))
     }
 
@@ -553,7 +604,8 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
 
         screenCard(context, "observation_pool", "👀 持续观察池").apply {
             val sections = ObservationEligibility.sections(Repo.observationPool, Repo.quotes)
-            val active = filterLimitUpItems(
+            // 扫描结果按“当前涨停”筛选；持续观察池按股票所属涨跌停制度筛选。
+            val active = filterObservationBandItems(
                 items = sections.values.flatten(),
                 option = limitFilter,
                 rankingContext = rankingContext,
@@ -569,25 +621,24 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
             val prioritizedRaw = ObservationEligibility.prioritizedSections(
                 candidates = Repo.observationPool,
                 quotes = Repo.quotes,
-            ) { item ->
-                strongSectorRanking(
-                    rankingContext,
-                    item.code,
-                    Repo.quotes[item.code]?.changePct ?: Double.NaN,
-                ).strongWatch
-            }
+            )
             val prioritized = prioritizedRaw.copy(
-                buy = filterLimitUpItems(prioritizedRaw.buy, limitFilter, rankingContext, { it.code }, { it.name }),
-                strong = filterLimitUpItems(prioritizedRaw.strong, limitFilter, rankingContext, { it.code }, { it.name }),
-                waiting = filterLimitUpItems(prioritizedRaw.waiting, limitFilter, rankingContext, { it.code }, { it.name }),
-                other = filterLimitUpItems(prioritizedRaw.other, limitFilter, rankingContext, { it.code }, { it.name }),
+                buy = filterObservationBandItems(prioritizedRaw.buy, limitFilter, rankingContext, { it.code }, { it.name }),
+                priorityReentry = filterObservationBandItems(prioritizedRaw.priorityReentry, limitFilter, rankingContext, { it.code }, { it.name }),
+                near = filterObservationBandItems(prioritizedRaw.near, limitFilter, rankingContext, { it.code }, { it.name }),
+                observing = filterObservationBandItems(prioritizedRaw.observing, limitFilter, rankingContext, { it.code }, { it.name }),
+                temporarilyDeferred = filterObservationBandItems(prioritizedRaw.temporarilyDeferred, limitFilter, rankingContext, { it.code }, { it.name }),
+                risk = filterObservationBandItems(prioritizedRaw.risk, limitFilter, rankingContext, { it.code }, { it.name }),
             )
             val buyItems = prioritized.buy
-            val strongWaitItems = prioritized.strong
-            val nearItems = prioritized.waiting
-            val otherWaitItems = prioritized.other
+            val priorityReentryItems = prioritized.priorityReentry
+            val nearItems = prioritized.near
+            val observingItems = prioritized.observing
+            val temporarilyDeferredItems = prioritized.temporarilyDeferred
+            val riskItems = prioritized.risk
             val buyCandidates = buyItems.size
-            val nearEntry = nearItems.size
+            val displayableCandidates = buyItems.size + priorityReentryItems.size + nearItems.size +
+                observingItems.size + temporarilyDeferredItems.size + riskItems.size
             val highestBuy = active.count {
                 (it.highestStage ?: it.stage) == ObservationStage.BUY_CANDIDATE
             }
@@ -596,13 +647,22 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
             }
             addKeyValue(
                 "状态总览",
-                "可参与候选 ${buyCandidates}只｜强势观察 ${strongWaitItems.size}只｜等待确认 ${nearEntry}只｜其他观察 ${otherWaitItems.size}只",
+                "可展示候选 ${displayableCandidates}只｜可参与 ${buyCandidates}只｜待确认 ${nearItems.size + priorityReentryItems.size}只（优先复参与 ${priorityReentryItems.size}只）｜观察中 ${observingItems.size}只｜暂缓 ${temporarilyDeferredItems.size}只｜风险 ${riskItems.size}只",
             )
-            addKeyValue("强弱顺序", "由强到弱")
+            addText(
+                "持续观察池按股票所属 10cm / 20cm / 30cm 涨跌停制度分类，不要求当前涨停；下方扫描结果仍按当前涨停筛选。",
+                11.5f,
+                UiKit.color(context, R.color.text_secondary),
+            )
+            addKeyValue("状态顺序", "由强到弱；待确认内先看优先复参与；暂缓参与高于风险观察")
+            addKeyValue("候选排序", "状态档位优先，同档再看结构；板块只作同条件裁决")
             addText("1️⃣ ✅ 可参与候选（买点已确认）")
-            addText("2️⃣ 🔥 强势观察（强而未确认）")
-            addText("3️⃣ 🕐 等待确认（条件未齐）")
-            addText("4️⃣ ⏸ 其他观察（封板 / 缩量 / 风险 / 数据不足）")
+            addText("2️⃣ 🧭 待确认（尚不能直接参与）")
+            addText("　⭐ 优先复参与：曾确认买点、结构仍有效，等待新的盘中确认")
+            addText("　⏳ 其他待确认：回踩、量价或连续复评仍差最后确认")
+            addText("3️⃣ 👀 观察中（继续跟踪结构演变）")
+            addText("4️⃣ ⏸ 暂缓参与（封板或已明确标记暂缓）")
+            addText("5️⃣ ⚠ 风险观察（只列有明确证据的个股风险）")
             val observationDetails = buildString {
                 appendLine("历史最高")
                 appendLine("买点已确认 ${highestBuy}只｜买点待确认 ${highestNear}只｜个股详情保留首次达到时间与状态变化")
@@ -611,10 +671,10 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                 appendLine("${active.size}只｜涨停持续观察 ${limitContinuations.size}只｜强势龙头 ${leaders.size}只｜启动前潜力 ${preBreakout.size}只")
                 appendLine()
                 appendLine("晋级规则")
-                appendLine("启动前潜力：趋势启动确认可参与｜强势龙头：连续2轮复评｜涨停持续：封板只看、开板确认（3板3轮）｜从未确认者3日走弱/10日未确认淘汰；已确认且趋势未破则保留回踩复评")
+                appendLine("启动前潜力：趋势启动确认可参与｜强势龙头：连续2轮复评｜涨停持续：封板只看、开板确认；普通2轮，三板以上仅在封板质量偏弱或明确风险时3轮｜从未确认者3日走弱/10日未确认淘汰；已确认且趋势未破则保留回踩复评")
                 appendLine()
                 appendLine("排序标记")
-                appendLine("强势板块决定强势观察档位；容量中军、情绪核心提高综合质量分。")
+                appendLine("状态档位优先；同档按个股结构、相对强度、市场风险、真实技术快照和复评进度排序。板块仅作标签与同条件裁决。 ")
                 appendLine()
                 appendLine("验证数据")
                 appendLine("${Repo.observationSnapshots.size}条快照｜纸上交易${Repo.paperTrades.size}笔（未平${Repo.paperTrades.count { it.isOpen }}笔）")
@@ -649,11 +709,24 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
             )
             fun observationRow(item: com.example.stockmonitor.core.ObservationCandidate): SelectionRowData {
                 val quote = Repo.quotes[item.code]
+                val currentFlow = Repo.fundFlowHistory[item.code]?.lastOrNull()
+                val flowHistory = Repo.fundFlowHistory[item.code].orEmpty().filter {
+                    (it.tradingDate ?: "") >= item.addedDate
+                }
                 val limitUpDeferred = isLimitUpDeferred(item)
+                val priorityReentry = ObservationEligibility.isPriorityReentry(item)
+                val priorityReentryAwaitingFreshEvaluation =
+                    ObservationEligibility.priorityReentryAwaitingFreshEvaluation(item, quote)
                 val stockStrategies = Repo.observationPool
                     .filter { it.code == item.code }
                     .map { it.strategy }
                     .toSet()
+                val stockSources = Repo.observationPool
+                    .filter { it.code == item.code }
+                    .flatMap { it.allSources }
+                    .distinct()
+                val riskSummary = ObservationEligibility.riskSummary(item, currentFlow, flowHistory)
+                val sourceLabel = stockSources.joinToString("＋").ifBlank { item.allSources.joinToString("＋") }
                 val routeLabel = ObservationStrategy.entries
                     .filter { it in stockStrategies }
                     .joinToString("＋") { it.label }
@@ -663,23 +736,46 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                     limitUpDeferred && item.continuousObservation ->
                         "⏸ 涨停封板持续观察"
                     limitUpDeferred -> "⏸ 封板后待重新确认"
+                    priorityReentryAwaitingFreshEvaluation &&
+                        (item.highestStage ?: item.stage) == ObservationStage.BUY_CANDIDATE ->
+                        "⭐ 曾确认买点，待当日行情复评"
+                    priorityReentryAwaitingFreshEvaluation -> "⭐ 优先复评，待当日行情刷新"
+                    priorityReentry -> "⭐ 优先复参与"
+                    riskSummary != null -> when (item.stage) {
+                        ObservationStage.BUY_CANDIDATE -> "⚠ 买点已确认，存在风险"
+                        ObservationStage.NEAR_ENTRY -> "⚠ 买点待确认，存在风险"
+                        else -> "⚠ 风险观察"
+                    }
                     else -> item.stage.label
                 }
-                val summaryLine = "$statusLabel｜$routeLabel｜已观察${item.observedDays}天"
-                val currentFlow = Repo.fundFlowHistory[item.code]?.lastOrNull()
-                val flowHistory = Repo.fundFlowHistory[item.code].orEmpty().filter {
-                    (it.tradingDate ?: "") >= item.addedDate
-                }
+                val qualification = "资格${item.score.coerceIn(0, 3)}/3"
+                val technical = item.technicalScore?.let { "技术$it/100" } ?: "技术快照暂缺"
+                val postConfirmationWatch = item.postConfirmationWatchDays
+                    .takeIf { it > 0 }?.let { "｜失效后复评${it}天" }.orEmpty()
+                val summaryLine =
+                    "$statusLabel｜$routeLabel｜$qualification｜$technical｜已观察${item.observedDays}天$postConfirmationWatch"
                 val flowWindow = com.example.stockmonitor.analysis.FundFlowWindowPolicy.assess(flowHistory)
-                val flowSummary =
-                    listOf(
-                        com.example.stockmonitor.analysis.LimitReport.fundFlowSummary(currentFlow),
-                        flowWindow.summary,
-                    ).filter { it.isNotBlank() }.joinToString("｜")
+                val flowSummary = FundFlowDisplayPolicy.candidateSummary(currentFlow, flowWindow)
+                fun concise(text: String, maxLength: Int = 42): String {
+                    val first = text.substringBefore("｜").substringBefore("；").trim()
+                    return if (first.length <= maxLength) first else first.take(maxLength - 1) + "…"
+                }
+                val alertSummary = when (item.alertState) {
+                    ObservationAlertState.BLOCKED ->
+                        "｜买点通知未发送：${concise(item.alertDetail.ifBlank { "原因暂缺" }, 28)}"
+                    ObservationAlertState.PENDING -> "｜买点通知待发送"
+                    ObservationAlertState.SENT_CAUTION -> "｜已通知，执行条件待满足"
+                    else -> ""
+                }
+                val focusPoint = riskSummary?.let { "风险：$it；处理：暂不参与，风险消失后再复评" }
+                    ?: "下一步：${concise(ObservationEligibility.displayReason(item).ifBlank { "继续等待条件确认" }, 60)}$alertSummary"
+                val tierBasis = riskSummary
+                    ?: ObservationEligibility.displayReason(item).ifBlank { "当前没有明确风险，按状态与确认条件分档" }
                 val summary = SpannableStringBuilder(summaryLine).apply {
                     val color = when {
                         item.limitUpShrinkAcceleration -> UiKit.color(context, R.color.warn)
                         limitUpDeferred -> UiKit.color(context, R.color.risk_watch)
+                        riskSummary != null -> UiKit.color(context, R.color.risk_alert)
                         item.stage == ObservationStage.BUY_CANDIDATE ->
                             UiKit.color(context, R.color.risk_good)
                         else -> UiKit.color(context, R.color.text_secondary)
@@ -691,14 +787,22 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                         Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
                     )
                     append("\n")
-                    append("下一步：${item.reason.ifBlank { "继续观察" }}")
-                    if (flowSummary.isNotBlank()) {
-                        append("\n资金流：$flowSummary")
-                    }
+                    append(focusPoint)
                 }
-                val limitFlow = if (item.continuousObservation) {
-                    Repo.limits?.up?.find { it.code == item.code }
-                        ?.let { com.example.stockmonitor.analysis.LimitReport.metricLine(it) }
+                val limitFlow = Repo.limits?.up
+                    ?.find { it.code == item.code }
+                    ?.let(com.example.stockmonitor.analysis.LimitReport::metricLine)
+                val focusDetail = riskSummary?.let { "风险：$it\n处理：暂不参与，风险消失后再复评" }
+                    ?: "下一步：${concise(ObservationEligibility.displayReason(item).ifBlank { "继续等待条件确认" }, 80)}"
+                val stateChanges = item.statusChanges.takeLast(3).joinToString("\n") { change ->
+                    val previous = change.previousStage?.label ?: "新入池"
+                    "${change.date}：$previous → ${change.stage.label}"
+                }.ifBlank { "暂无状态变化" }
+                val alertRow = if (
+                    (item.highestStage ?: item.stage) == ObservationStage.BUY_CANDIDATE ||
+                    item.alertState != ObservationAlertState.UNKNOWN
+                ) {
+                    UiKit.DetailRow("买点通知", ObservationBuyAlert.deliveryText(item))
                 } else {
                     null
                 }
@@ -709,53 +813,29 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                     price = String.format(Locale.CHINA, "%.2f", quote?.price ?: item.lastPrice),
                     changePct = quote?.changePct ?: Double.NaN,
                     summary = summary,
-                    technicalScore = item.technicalScore
-                        ?: (item.score.coerceIn(0, 3) * 40 / 3),
+                    technicalScore = item.technicalScore,
+                    observationCandidate = item,
                     weeklyTrendLabel = item.weeklyTrendLabel ?: "数据不足",
                     monthlyTrendLabel = item.monthlyTrendLabel ?: "数据不足",
                     details = listOf(
                         UiKit.DetailRow("状态", statusLabel),
-                        UiKit.DetailRow(
-                            "历史最高",
-                            (item.highestStage ?: item.stage).label,
-                        ),
-                        UiKit.DetailRow(
-                            "首次达到时间",
-                            item.highestStageDate ?: item.lastEvaluatedDate ?: item.addedDate,
-                        ),
-                        UiKit.DetailRow("策略路线", routeLabel),
-                        UiKit.DetailRow("下一步", item.reason.ifBlank { "继续观察" }),
-                        UiKit.DetailRow(
-                            "路线口径",
-                            when (item.strategy) {
-                                ObservationStrategy.PRE_BREAKOUT ->
-                                    "趋势入场和风险门槛通过后可晋级，不强制强势龙头式多轮确认"
-                                ObservationStrategy.LEADER ->
-                                    "回踩企稳需连续2轮复评确认，属于强势结构候选"
-                                ObservationStrategy.LIMIT_UP_CONTINUATION ->
-                                    "封板期间持续观察；开板后重新确认，三板及以上需连续3轮复评"
-                            },
-                        ),
-                        UiKit.DetailRow("观察天数", "${item.observedDays}天"),
-                        UiKit.DetailRow("最近复评", item.lastEvaluatedDate ?: "尚未复评"),
-                        UiKit.DetailRow(
-                            "状态变化",
-                            item.statusChanges.takeLast(3).joinToString("；") { change ->
-                                val previous = change.previousStage?.let { "←${it.label}" }.orEmpty()
-                                "${change.date} ${change.stage.label}$previous"
-                            }.ifBlank { "暂无记录" },
-                        ),
-                        UiKit.DetailRow("止损价", item.stopPrice?.let { String.format(Locale.CHINA, "%.2f", it) } ?: "—"),
-                        UiKit.DetailRow("当前资金流", flowSummary.ifBlank { "暂无" }),
-                        UiKit.DetailRow("涨停与资金流", limitFlow ?: "未处于涨停持续观察"),
-                        UiKit.DetailRow("多日资金流", flowWindow.reason),
-                        UiKit.DetailRow("支持证据", item.evidence.supporting.joinToString("；").ifBlank { "暂无" }),
-                        UiKit.DetailRow("风险证据", item.evidence.counter.joinToString("；").ifBlank { "暂无记录，不代表无风险" }),
-                        UiKit.DetailRow("缺失证据", item.evidence.missing.joinToString("；").ifBlank { "暂无记录" }),
-                        UiKit.DetailRow("失效条件", item.evidence.invalidators.joinToString("；").ifBlank { "需持续复评" }),
+                        UiKit.DetailRow("来源池", sourceLabel.ifBlank { "来源暂缺" }),
+                        UiKit.DetailRow("策略路线", routeLabel.ifBlank { item.strategy.label }),
+                        UiKit.DetailRow("档位依据", concise(tierBasis, 100)),
+                        UiKit.DetailRow("资格 / 技术", "$qualification（入场资格命中数）｜$technical（独立技术快照）"),
                         UiKit.DetailRow("入池日期", item.addedDate),
-                        UiKit.DetailRow("来源", item.source),
-                    ),
+                        UiKit.DetailRow("关注要点", focusDetail),
+                        UiKit.DetailRow(
+                            "止损参考",
+                            item.stopPrice?.let { String.format(Locale.CHINA, "%.2f", it) } ?: "暂缺",
+                        ),
+                        UiKit.DetailRow("资金流", flowSummary.ifBlank { "暂无" }),
+                        limitFlow?.let { limitText: String ->
+                            UiKit.DetailRow("涨停观察", limitText, dividerBefore = true)
+                        },
+                        alertRow,
+                        UiKit.DetailRow("状态变化", stateChanges),
+                    ).filterNotNull(),
                 )
             }
             fun addStatusGroup(
@@ -766,14 +846,49 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                 titleColor: Int,
             ) {
                 addDivider()
-                addText(description, 11.5f, UiKit.color(context, R.color.text_secondary))
+                val accentColor = UiKit.color(context, titleColor)
+                val banner = android.widget.LinearLayout(context).apply {
+                    orientation = android.widget.LinearLayout.VERTICAL
+                    setPadding(
+                        UiKit.dp(context, 12),
+                        UiKit.dp(context, 9),
+                        UiKit.dp(context, 12),
+                        UiKit.dp(context, 9),
+                    )
+                    val fillColor = android.graphics.Color.argb(
+                        20,
+                        android.graphics.Color.red(accentColor),
+                        android.graphics.Color.green(accentColor),
+                        android.graphics.Color.blue(accentColor),
+                    )
+                    background = android.graphics.drawable.GradientDrawable().apply {
+                        setColor(fillColor)
+                        setStroke(UiKit.dp(context, 1), accentColor)
+                        cornerRadius = UiKit.dp(context, 10).toFloat()
+                    }
+                    layoutParams = android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT,
+                    ).apply { bottomMargin = UiKit.dp(context, 5) }
+                }
+                banner.addView(
+                    UiKit.body(context, title, 14f, accentColor).apply {
+                        setTypeface(typeface, android.graphics.Typeface.BOLD)
+                    },
+                )
+                banner.addView(
+                    UiKit.body(context, description, 11.5f, UiKit.color(context, R.color.text_secondary)).apply {
+                        setPadding(0, UiKit.dp(context, 3), 0, 0)
+                    },
+                )
+                add(banner)
                 addExpandableSelectionSection(
                     context = context,
                     rankingContext = rankingContext,
-                    title = title,
+                    title = "${title.substringBefore("（")}列表",
                     items = items.map(::observationRow),
                     pageKey = pageKey,
-                    titleColor = UiKit.color(context, titleColor),
+                    titleColor = accentColor,
                 )
             }
             addStatusGroup(
@@ -784,31 +899,45 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                 titleColor = R.color.risk_good,
             )
             addStatusGroup(
-                title = "🔥 强势观察（${strongWaitItems.size}只）",
-                description = "强度次高：强势板块或核心角色，但尚未确认买点；封板仍只看不买。",
-                items = strongWaitItems,
-                pageKey = "observation:status:strong-wait",
-                titleColor = R.color.warn,
+                title = "⭐ 优先复参与（${priorityReentryItems.size}只）",
+                description = "曾进入可参与候选、当前仍有明确结构且无暂停型重大风险；等待新的盘中确认。缺少当日行情时只作优先复评，不作为可执行参与依据。",
+                items = priorityReentryItems,
+                pageKey = "observation:status:priority-reentry",
+                titleColor = R.color.brand_primary,
             )
             addStatusGroup(
-                title = "🕐 等待确认（${nearItems.size}只）",
-                description = "强度一般：还差趋势、回踩或连续复评确认；先看每只股票的“下一步”。",
+                title = "⏳ 其他待确认（${nearItems.size}只）",
+                description = "次高优先级：已有结构但仍差回踩、量价或连续复评确认；先看每只股票的“下一步”。",
                 items = nearItems,
                 pageKey = "observation:status:near",
                 titleColor = R.color.risk_watch,
             )
             addStatusGroup(
-                title = "⏸ 其他暂缓 / 封板 / 观察（${otherWaitItems.size}只）",
-                description = "封板、缩量加速、环境/趋势风险或数据不足；本组不是直接买入列表。",
-                items = otherWaitItems,
-                pageKey = "observation:status:wait",
+                title = "👀 观察中（${observingItems.size}只）",
+                description = "条件尚未齐备、但也未触发明确风险；继续按分钟复评，不会直接产生买入提醒。",
+                items = observingItems,
+                pageKey = "observation:status:observing",
                 titleColor = R.color.text_secondary,
+            )
+            addStatusGroup(
+                title = "⏸ 暂缓参与（${temporarilyDeferredItems.size}只）",
+                description = "当前不具备执行条件，但未出现个股趋势或结构风险；例如封板、数据缺失或市场整体风险，等待条件恢复后重新复评。",
+                items = temporarilyDeferredItems,
+                pageKey = "observation:status:deferred",
+                titleColor = R.color.risk_watch,
+            )
+            addStatusGroup(
+                title = "⚠ 风险观察（${riskItems.size}只）",
+                description = "只列有明确证据的个股风险，并在每只股票下方写明具体原因：趋势走弱、突破失效、缩量加速、高位派发、量价背离或资金流出（含今日/近3日主力净流出金额）。无明确证据的候选不会进入本组；市场整体风险导致的暂停在“暂缓参与”查看。",
+                items = riskItems,
+                pageKey = "observation:status:risk",
+                titleColor = R.color.risk_alert,
             )
             container.addView(view)
         }
 
         screenCard(context, "indicator_scan", "📊 指标两档 · 快扫").apply {
-            addKeyValue("池子", "成交量前200只 / 近120日日线")
+            addKeyValue("池子", "快扫成交量前200只；深扫覆盖全市场 / 最多420根前复权日线")
             addKeyValue("耗时", "秒级")
             addKeyValue("上次刷新", Repo.screenIndicatorAt ?: "尚未扫描")
             addText(ScreenHelpCopy.INDICATOR_SCAN_SUMMARY, 12f)
@@ -917,7 +1046,7 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
         }
 
         screenCard(context, "trend_scan", "🔭 513 与趋势 · 深扫").apply {
-            addKeyValue("池子", "全部沪深A股 / 近120日日线")
+            addKeyValue("池子", "全部沪深A股 / 最多420根前复权日线")
             addKeyValue("耗时", "数分钟（数千根日K）")
             addKeyValue("上次刷新", Repo.screenPatternAt ?: "尚未扫描")
             addText(ScreenHelpCopy.DEEP_SCAN_SUMMARY, 12f)
@@ -965,7 +1094,9 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                         changePct = Double.NaN,
                         summary = fiveOneThreeNote(context, hit),
                         details = fiveOneThreeDetails(hit),
-                        technicalScore = 40,
+                        technicalScore = hit.technicalScore,
+                        weeklyTrendLabel = hit.weeklyTrendLabel,
+                        monthlyTrendLabel = hit.monthlyTrendLabel,
                     )
                 },
                 option = limitFilter,
@@ -1073,6 +1204,8 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
     private fun screenDetails(hit: ScreenHit): List<UiKit.DetailRow> = listOf(
         UiKit.DetailRow("股票代码", hit.code),
         UiKit.DetailRow("观察池去向", "启动前潜力"),
+        UiKit.DetailRow("支持证据", "MACD ${hit.macdDetail.ifBlank { "—" }}｜RSI ${String.format(Locale.CHINA, "%.1f", hit.rsi)}｜KDJ K%.1f/D%.1f",),
+        UiKit.DetailRow("失效条件", "RSI重新走高、DIF/DEA转弱或有效跌破M20后取消观察"),
         UiKit.DetailRow("RSI", String.format(Locale.CHINA, "%.1f", hit.rsi)),
         UiKit.DetailRow("KDJ", String.format(Locale.CHINA, "K %.1f / D %.1f", hit.k, hit.d)),
         UiKit.DetailRow("DIF", String.format(Locale.CHINA, "%.3f", hit.dif)),
@@ -1127,9 +1260,19 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
             UiKit.DetailRow("股票代码", hit.code),
             UiKit.DetailRow("观察池去向", "启动前潜力"),
             UiKit.DetailRow("阶段", stage),
+            UiKit.DetailRow("支持证据", "5连阳后倍量阳，并以3日缩量完成确认"),
+            UiKit.DetailRow("失效条件", "跌破倍量阳开盘价或确认期出现放量破位"),
             UiKit.DetailRow("进度", hit.progress),
             UiKit.DetailRow("形态明细", hit.detail),
             UiKit.DetailRow("近60日涨幅", hit.gain60Pct.formatPct()),
+            UiKit.DetailRow(
+                "60日区间位置",
+                hit.rangePositionPct.takeIf { it.isFinite() }
+                    ?.let { String.format(Locale.CHINA, "%.1f%%", it) }
+                    ?: "—",
+            ),
+            UiKit.DetailRow("技术质量分", "${hit.technicalScore}/100"),
+            UiKit.DetailRow("周/月趋势", "周K${hit.weeklyTrendLabel}｜月K${hit.monthlyTrendLabel}"),
         )
     }
 
@@ -1159,6 +1302,8 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
         UiKit.DetailRow("确认状态", if (hit.entrySetup.confirmed) "已确认" else "待确认"),
         UiKit.DetailRow("交易属性", if (hit.entrySetup.canBuy) "可执行" else "仅作观察"),
         UiKit.DetailRow("结构原因", hit.entrySetup.reason),
+        UiKit.DetailRow("支持证据", "量比${hit.volumeRatio?.let { String.format(Locale.CHINA, "%.2f", it) } ?: "—"}｜M20斜率${hit.entrySetup.ma20SlopePct?.let { String.format(Locale.CHINA, "%+.2f%%", it) } ?: "—"}"),
+        UiKit.DetailRow("失效条件", hit.entrySetup.stopPrice?.let { String.format(Locale.CHINA, "跌破%.2f视为结构失效", it) } ?: "跌破M20或趋势转弱"),
         UiKit.DetailRow("止损价", hit.entrySetup.stopPrice?.let { String.format(Locale.CHINA, "%.2f", it) } ?: "—"),
         UiKit.DetailRow("量比", hit.volumeRatio?.let { String.format(Locale.CHINA, "%.2f倍", it) } ?: "—"),
         UiKit.DetailRow("前高", hit.entrySetup.priorHigh?.let { String.format(Locale.CHINA, "%.2f", it) } ?: "—"),

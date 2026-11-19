@@ -24,7 +24,11 @@ object WatchlistBuyCandidatePool {
             val existing = previousByCode[item.code]
             when {
                 existing == null -> candidate(item.code, item.name, today)
-                existing.stage == ObservationStage.ELIMINATED -> candidate(item.code, item.name, today)
+                // 淘汰当日不复活：sync 每个盘中 tick（约 15 秒）都会跑，立即重置的话
+                // 「10日未确认/连续走弱」淘汰最多存活一个 tick、淘汰原因与状态轨迹
+                // 全部丢失。保留到收盘，次日才开始新一轮观察（原测试语义）。
+                existing.stage == ObservationStage.ELIMINATED &&
+                    existing.lastEvaluatedDate != today -> candidate(item.code, item.name, today)
                 else -> existing.copy(name = item.name)
             }
         }
@@ -42,6 +46,7 @@ object WatchlistBuyCandidatePool {
             observedDays = 0,
             lastPrice = 0.0,
             source = SOURCE,
+            sources = setOf(SOURCE),
             reason = "自选股持续评估有效买点",
             strategy = ObservationStrategy.PRE_BREAKOUT,
         )

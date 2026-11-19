@@ -44,6 +44,10 @@ class ScreenResultJsonTest {
                 code = "sz000001", name = "样本二", price = 8.8,
                 stage = FiveOneThreeStage.CONFIRMED, progress = "形态已确认",
                 detail = "5连阳 5/5｜倍量阳 1/1｜缩量确认 3/3", gain60Pct = 12.0,
+                rangePositionPct = 36.5,
+                technicalScore = 71,
+                weeklyTrendLabel = "修复中",
+                monthlyTrendLabel = "向上",
             ),
         ),
         fiveOneThreeStats = FiveOneThreeStats(
@@ -94,6 +98,9 @@ class ScreenResultJsonTest {
         assertEquals("向上", decoded.result.strict.single().weeklyTrendLabel)
         assertEquals("修复中", decoded.result.strict.single().monthlyTrendLabel)
         assertEquals(sampleResult().fiveOneThree, decoded.result.fiveOneThree)
+        assertEquals(36.5, decoded.result.fiveOneThree.single().rangePositionPct, 0.001)
+        assertEquals(71, decoded.result.fiveOneThree.single().technicalScore)
+        assertEquals("修复中", decoded.result.fiveOneThree.single().weeklyTrendLabel)
         assertEquals(sampleResult().fiveOneThreeStats, decoded.result.fiveOneThreeStats)
         val setup = decoded.result.trend.first().entrySetup
         assertEquals(76, decoded.result.trend.single().technicalScore)

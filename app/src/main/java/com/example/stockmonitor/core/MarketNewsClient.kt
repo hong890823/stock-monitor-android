@@ -13,6 +13,7 @@ import org.json.JSONObject
 import java.util.Calendar
 
 enum class NewsSource(val label: String) {
+    WALLSTREETCN("华尔街见闻"),
     EASTMONEY("东方财富"),
     SINA("新浪财经"),
 }
@@ -28,6 +29,8 @@ data class NewsSourceProfile(
     val track: NewsTrack,
     val trustScore: Int,
     val url: String,
+    /** 同一新闻聚类中的展示优先级。它与来源可信度分开，数值越大越优先。 */
+    val sourcePriority: Int = 0,
 )
 
 data class NewsItem(
@@ -39,6 +42,8 @@ data class NewsItem(
     val sourceId: String = "",
     val track: NewsTrack = NewsTrack.INVESTMENT,
     val trustScore: Int = 50,
+    /** 与 [NewsSourceProfile.sourcePriority] 对应，避免将接口首选顺序伪装成可信度。 */
+    val sourcePriority: Int = 0,
 )
 
 data class NewsSourceAttempt(
@@ -62,6 +67,8 @@ data class NewsFetchResult(
 }
 
 object MarketNewsClient {
+    private const val WALLSTREETCN_URL =
+        "https://api-one.wallstcn.com/apiv1/content/lives?channel=global-channel&limit=50&score=2"
     private const val EASTMONEY_URL =
         "https://np-listapi.eastmoney.com/comm/web/getNewsByColumns?client=web&biz=web_news&column=350&order=1&needInteractData=0&page_index=1&page_size=50"
     private const val SINA_URL =
@@ -69,6 +76,8 @@ object MarketNewsClient {
     private val shanghaiTimeZone = TimeZone.getTimeZone("Asia/Shanghai")
 
     val sourceProfiles: List<NewsSourceProfile> = listOf(
+        // 仅请求华尔街见闻“只看重要”快讯；priority 是首选展示顺序，不是内容可信度评分。
+        NewsSourceProfile("wallstreetcn", NewsSource.WALLSTREETCN.label, NewsTrack.INVESTMENT, 75, WALLSTREETCN_URL, 100),
         NewsSourceProfile("eastmoney", "东方财富", NewsTrack.INVESTMENT, 68, EASTMONEY_URL),
         NewsSourceProfile("sina", "新浪财经", NewsTrack.INVESTMENT, 65, SINA_URL),
         NewsSourceProfile("infoq_cn", "InfoQ 中文", NewsTrack.TECHNOLOGY, 82, "https://www.infoq.cn/feed/"),
@@ -123,28 +132,65 @@ object MarketNewsClient {
         )
     }
 
+    /**
+     * AI 综合分析和持仓复盘每次均单独调用此方法，避免依赖今日要闻的刷新缓存。
+     * 这里只返回接口已筛选 score=2 的重要快讯，并再次校验响应中的 score，防止上游静默忽略参数。
+     */
+    fun wallstreetcnImportant(nowMs: Long, maxAgeDays: Int = 1): List<NewsItem> {
+        val profile = sourceProfiles.first { it.id == "wallstreetcn" }
+        return fetch(profile)
+            .filter { isWithinLocalDays(it.publishedAtMs, nowMs, maxAgeDays) }
+            .sortedByDescending { it.publishedAtMs }
+    }
+
+    /** 用于 AI 综合分析的实时重要快讯上下文。 */
+    fun wallstreetcnImportantSummary(nowMs: Long, maxItems: Int = 8): String =
+        formatWallstreetcnImportantNews(wallstreetcnImportant(nowMs), maxItems)
+
+    private fun formatWallstreetcnImportantNews(
+        items: List<NewsItem>,
+        maxItems: Int,
+        noMatchMessage: String = "接口未返回可用的重要快讯。",
+    ): String = buildString {
+        appendLine("来源：华尔街见闻 7×24 快讯（只看重要，score=2）。")
+        if (items.isEmpty()) {
+            append(noMatchMessage)
+        } else {
+            items.take(maxItems.coerceIn(1, 10)).forEach { item ->
+                append("- ${formatWallstreetcnTime(item.publishedAtMs)}｜${item.title}")
+                item.url?.let { append("｜$it") }
+                appendLine()
+            }
+        }
+    }.trim()
+
+    private fun formatWallstreetcnTime(timestampMs: Long): String =
+        SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.CHINA)
+            .apply { timeZone = shanghaiTimeZone }
+            .format(timestampMs)
+
     private fun fetch(profile: NewsSourceProfile): List<NewsItem> = when (profile.id) {
+        "wallstreetcn" -> parseWallstreetcn(
+            Http.getText(profile.url, referer = "https://wallstreetcn.com/live/global"),
+        ).withProfile(profile)
         "eastmoney" -> parseEastMoney(
             Http.getText(profile.url, referer = "https://finance.eastmoney.com/"),
-        ).map { item ->
-            item.copy(
-                sourceId = profile.id,
-                track = profile.track,
-                trustScore = profile.trustScore,
-            )
-        }
+        ).withProfile(profile)
         "sina" -> parseSina(
             Http.getText(profile.url, referer = "https://finance.sina.com.cn/"),
-        ).map { item ->
-            item.copy(
-                sourceId = profile.id,
-                track = profile.track,
-                trustScore = profile.trustScore,
-            )
-        }
+        ).withProfile(profile)
         else -> TechNewsFeedParser.parse(
             Http.getText(profile.url, referer = profile.url),
             profile,
+        )
+    }
+
+    private fun List<NewsItem>.withProfile(profile: NewsSourceProfile): List<NewsItem> = map { item ->
+        item.copy(
+            sourceId = profile.id,
+            track = profile.track,
+            trustScore = profile.trustScore,
+            sourcePriority = profile.sourcePriority,
         )
     }
 
@@ -166,6 +212,34 @@ object MarketNewsClient {
                         ?.takeIf { it.isNotBlank() } ?: NewsSource.EASTMONEY.label,
                     url = normalizeUrl(row.firstString("url", "link", "wapurl")),
                     rawCategory = row.firstString("category", "column", "type"),
+                )
+            }
+        }.toList()
+    }
+
+    fun parseWallstreetcn(text: String): List<NewsItem> {
+        val root = parseJson(text)
+        require(root.optInt("code") == 20000) { "华尔街见闻快讯返回失败：${root.optString("message", "未知错误")}" }
+        val rows = firstArray(root, "data.items")
+        return rows.objects().mapNotNull { row ->
+            // 接口部分 live 的 title 为空，正文首行才是唯一可展示的标题。
+            val content = row.firstString("content_text", "content")?.replace(Regex("\\s+"), " ")?.trim().orEmpty()
+            val title = row.firstString("title", "highlight_title")?.trim().takeUnless { it.isNullOrBlank() }
+                ?: content.take(220)
+            val publishedAtMs = parseTimestamp(row.firstString("display_time"))
+            if (row.optInt("score") != 2 || title.isBlank() || publishedAtMs <= 0L) {
+                null
+            } else {
+                NewsItem(
+                    title = title,
+                    publishedAtMs = publishedAtMs,
+                    source = NewsSource.WALLSTREETCN.label,
+                    url = normalizeUrl(row.firstString("uri")),
+                    rawCategory = row.optJSONArray("channels")?.let { channels ->
+                        (0 until channels.length()).mapNotNull { index ->
+                            channels.optString(index).trim().takeIf { it.isNotBlank() }
+                        }.joinToString(",").takeIf { it.isNotBlank() }
+                    },
                 )
             }
         }.toList()

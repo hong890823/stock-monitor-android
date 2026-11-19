@@ -2,6 +2,12 @@ package com.example.stockmonitor.core
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.example.stockmonitor.analysis.AdviceReservation
+import com.example.stockmonitor.analysis.AdviceDirection
+import com.example.stockmonitor.analysis.AdviceKind
+import com.example.stockmonitor.analysis.DailyAdvicePlan
+import com.example.stockmonitor.analysis.DailyAdvicePolicy
+import com.example.stockmonitor.analysis.IntradayAdditionState
 import com.example.stockmonitor.analysis.PaperTradeRecord
 import com.example.stockmonitor.analysis.SectorStrengthDay
 import org.json.JSONArray
@@ -39,6 +45,33 @@ class Store(
                 )
             prefs.edit().putString(KEY_PORTFOLIO, toPortfolioJson(sanitized).toString()).apply()
         }
+
+    /** 每只股票的分仓配置独立落盘；实时底仓/滚动仓/风险观察仓由当前持仓数量派生。 */
+    var positionAllocations: Map<String, PositionAllocationConfig>
+        get() = runCatching {
+            PositionAllocationJson.decode(prefs.getString(KEY_POSITION_ALLOCATIONS, null))
+        }.getOrElse {
+            // 配置损坏时保留原始字符串，显示为未设置，避免静默覆盖用户配置。
+            emptyMap()
+        }
+        set(value) {
+            val sanitized = value
+                .filterKeys { it.isNotBlank() }
+                .toSortedMap()
+            prefs.edit().putString(KEY_POSITION_ALLOCATIONS, PositionAllocationJson.encode(sanitized)).apply()
+        }
+
+    /** 盘中补仓窗口的当天状态；损坏时由调用方暂停机会链路，不自动清空重建。 */
+    var intradayAdditionStates: Map<String, IntradayAdditionState>
+        get() = IntradayAdditionJson.decode(prefs.getString(KEY_INTRADAY_ADDITION_STATES, null))
+        set(value) = prefs.edit()
+            .putString(KEY_INTRADAY_ADDITION_STATES, IntradayAdditionJson.encode(value))
+            .apply()
+
+    val intradayAdditionStateCorrupted: Boolean
+        get() = prefs.getString(KEY_INTRADAY_ADDITION_STATES, null)?.let {
+            runCatching { IntradayAdditionJson.decode(it) }.isFailure
+        } == true
 
     /**
      * 两市成交额的盘中采样，结构 {"2026-09-23":{"570":1234567.0,...}}，单位元。
@@ -264,6 +297,134 @@ class Store(
         get() = TradeLotJson.decode(prefs.getString(KEY_TRADE_BOOK, null))
         set(value) = prefs.edit().putString(KEY_TRADE_BOOK, TradeLotJson.encode(value)).apply()
 
+    /** 当天按股票保存的建议计划；数量反馈和通知状态与真实成交分开记录。 */
+    var dailyAdvicePlans: List<DailyAdvicePlan>
+        get() = synchronized(dailyAdviceLock) {
+            val saved = DailyAdviceJson.decode(prefs.getString(KEY_DAILY_ADVICE_PLANS, null))
+            val reviewed = saved.map { plan ->
+                if (plan.riskPriority >= 2) RiskExitReview.pause(plan, System.currentTimeMillis()) else plan
+            }
+            if (reviewed != saved) writeDailyAdvicePlans(reviewed)
+            reviewed
+        }
+        set(value) = synchronized(dailyAdviceLock) {
+            prefs.edit().putString(KEY_DAILY_ADVICE_PLANS, DailyAdviceJson.encode(value)).commit()
+        }
+
+    fun pauseDailyAdviceForExitReview(date: String, code: String, atMs: Long): Boolean = synchronized(dailyAdviceLock) {
+        val plans = dailyAdvicePlans
+        val existing = plans.firstOrNull { it.date == date && it.code == code } ?: return@synchronized true
+        val reviewed = RiskExitReview.pause(existing, atMs)
+        reviewed == existing || writeDailyAdvicePlans(upsertDailyAdvicePlan(plans, reviewed))
+    }
+
+    fun prepareDailyAdvice(
+        date: String,
+        code: String,
+        direction: AdviceDirection,
+        kind: AdviceKind,
+        targetQuantity: Double,
+        currentQuantity: Double,
+        atMs: Long = System.currentTimeMillis(),
+        riskPriority: Int = 0,
+    ): DailyAdvicePlan = synchronized(dailyAdviceLock) {
+        val existing = dailyAdvicePlans.firstOrNull { it.date == date && it.code == code }
+        val preparation = DailyAdvicePolicy.prepare(
+            date = date,
+            code = code,
+            direction = direction,
+            kind = kind,
+            targetQuantity = targetQuantity,
+            currentQuantity = currentQuantity,
+            existing = existing,
+            riskPriority = riskPriority,
+        )
+        if (preparation.plan == existing) return@synchronized preparation.plan
+        val plan = preparation.plan.copy(
+            createdAtMs = if (preparation.reused) existing?.createdAtMs?.takeIf { it > 0L } ?: atMs else atMs,
+            updatedAtMs = atMs,
+        )
+        writeDailyAdvicePlans(upsertDailyAdvicePlan(dailyAdvicePlans, plan))
+        plan
+    }
+
+    fun reserveDailyAdvice(
+        plan: DailyAdvicePlan,
+        date: String,
+        code: String,
+    ): AdviceReservation = synchronized(dailyAdviceLock) {
+        val plans = dailyAdvicePlans
+        val current = plans.firstOrNull { it.date == date && it.code == code } ?: plan
+        if (current != plan) return@synchronized AdviceReservation(false, current, "计划已更新，请使用最新计划重新评估。")
+        val result = DailyAdvicePolicy.reserve(current, plans, date, code)
+        if (!writeDailyAdvicePlans(upsertDailyAdvicePlan(plans, result.plan))) {
+            return@synchronized AdviceReservation(false, current, "计划未能持久化，不发送操作指令。")
+        }
+        result
+    }
+
+    fun commitDailyAdvice(plan: DailyAdvicePlan, sentAtMs: Long = System.currentTimeMillis()): DailyAdvicePlan? =
+        synchronized(dailyAdviceLock) {
+            val current = dailyAdvicePlans
+            val latest = current.firstOrNull { it.date == plan.date && it.code == plan.code }
+            if (latest != plan) return@synchronized null
+            val updated = DailyAdvicePolicy.markSent(plan, sentAtMs)
+            updated.takeIf { writeDailyAdvicePlans(upsertDailyAdvicePlan(current, it)) }
+        }
+
+    fun rollbackDailyAdvice(
+        plan: DailyAdvicePlan,
+        failedAtMs: Long = System.currentTimeMillis(),
+        reason: String? = null,
+    ): DailyAdvicePlan = synchronized(dailyAdviceLock) {
+        val current = dailyAdvicePlans
+        val latest = current.firstOrNull { it.date == plan.date && it.code == plan.code }
+        if (latest != plan) return@synchronized latest ?: plan
+        val updated = DailyAdvicePolicy.rollback(plan, failedAtMs, reason)
+        writeDailyAdvicePlans(upsertDailyAdvicePlan(current, updated))
+        updated
+    }
+
+    fun markDailyAdviceDeliveryUnknown(
+        plan: DailyAdvicePlan,
+        atMs: Long = System.currentTimeMillis(),
+        reason: String,
+    ): DailyAdvicePlan = synchronized(dailyAdviceLock) {
+        val current = dailyAdvicePlans
+        val latest = current.firstOrNull { it.date == plan.date && it.code == plan.code }
+        if (latest != plan) return@synchronized latest ?: plan
+        val updated = DailyAdvicePolicy.markDeliveryUnknown(plan, atMs, reason)
+        writeDailyAdvicePlans(upsertDailyAdvicePlan(current, updated))
+        updated
+    }
+
+    fun applyDailyAdviceQuantityFeedback(
+        date: String,
+        code: String,
+        previousQuantity: Double,
+        currentQuantity: Double,
+        feedbackAtMs: Long = System.currentTimeMillis(),
+    ): DailyAdvicePlan? = synchronized(dailyAdviceLock) {
+        val plans = dailyAdvicePlans
+        val plan = plans.firstOrNull { it.date == date && it.code == code } ?: return@synchronized null
+        val updated = DailyAdvicePolicy.applyQuantityFeedback(
+            plan = plan,
+            previousQuantity = previousQuantity,
+            currentQuantity = currentQuantity,
+            feedbackAtMs = feedbackAtMs,
+        )
+        writeDailyAdvicePlans(upsertDailyAdvicePlan(plans, updated))
+        updated
+    }
+
+    private fun writeDailyAdvicePlans(plans: List<DailyAdvicePlan>): Boolean =
+        prefs.edit().putString(KEY_DAILY_ADVICE_PLANS, DailyAdviceJson.encode(plans)).commit()
+
+    private fun upsertDailyAdvicePlan(
+        plans: List<DailyAdvicePlan>,
+        plan: DailyAdvicePlan,
+    ): List<DailyAdvicePlan> = plans.filterNot { it.date == plan.date && it.code == plan.code } + plan
+
     /** 已成功发送的通知正文记录。点击通知消失后仍可在应用内完整查看。 */
     var alertRecords: List<AlertRecord>
         get() = synchronized(prefs) {
@@ -316,6 +477,18 @@ class Store(
         if (key in existing) return@synchronized false
         existing += key
         prefs.edit().putStringSet(KEY_CANDIDATE_BUY_ALERT_KEYS, existing).commit()
+    }
+
+    /** 系统拒绝投递时释放预占键，允许同一买点在有效窗口内下轮重试。 */
+    fun releaseCandidateBuyAlertKey(key: String, today: String): Boolean = synchronized(prefs) {
+        val existing = prefs.getStringSet(KEY_CANDIDATE_BUY_ALERT_KEYS, emptySet()).orEmpty()
+        if (key !in existing) return@synchronized false
+        prefs.edit()
+            .putStringSet(
+                KEY_CANDIDATE_BUY_ALERT_KEYS,
+                existing.filterTo(linkedSetOf()) { !it.startsWith("$today:") || it != key },
+            )
+            .commit()
     }
 
     /** 已发送过尾盘候选复核的“交易日:代码”集合，独立于通用通知历史，防止历史裁剪或重启造成重复推送。 */
@@ -553,8 +726,11 @@ class Store(
         )
 
     companion object {
+        private val dailyAdviceLock = Any()
         private const val KEY_WATCHLIST = "watchlist"
         private const val KEY_PORTFOLIO = "portfolio"
+        private const val KEY_POSITION_ALLOCATIONS = "position_allocations"
+        private const val KEY_INTRADAY_ADDITION_STATES = "intraday_addition_states"
         private const val KEY_INDICATOR_STATE = "indicator_state"
         private const val KEY_PORTFOLIO_SLOT = "portfolio_slot"
         private const val KEY_PORTFOLIO_REPORT = "portfolio_report"
@@ -599,6 +775,7 @@ class Store(
         private const val KEY_AI_REPORT_TITLE = "ai_report_title"
         private const val KEY_AI_REPORT_AT = "ai_report_at"
         private const val KEY_TRADE_BOOK = "trade_book"
+        private const val KEY_DAILY_ADVICE_PLANS = "daily_advice_plans"
         private const val KEY_ALERT_RECORDS = "alert_records"
         private const val KEY_CANDIDATE_BUY_ALERT_KEYS = "candidate_buy_alert_keys"
         private const val KEY_TAIL_OBSERVATION_ALERT_KEYS = "tail_observation_alert_keys"

@@ -84,8 +84,7 @@ class HoldingTPolicyTest {
             holdingTContext = context().copy(weekTrend = SwingTrend.WEAK),
             holdingTObservation = rebound.copy(reboundPct = 0.35))
         assertNull(IntradayTactics.evaluate(base))
-        assertEquals(IntradaySignalType.T_BUY,
-            IntradayTactics.evaluate(base.copy(holdingTObservation = rebound))!!.type)
+        assertNull(IntradayTactics.evaluate(base.copy(holdingTObservation = rebound)))
         assertNull(IntradayTactics.evaluate(base.copy(holdingTObservation = rebound, marketRegime = MarketRegime.WEAK)))
     }
 

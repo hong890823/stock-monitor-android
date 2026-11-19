@@ -1,14 +1,18 @@
 package com.example.stockmonitor.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Typeface
 import android.graphics.Rect
 import android.os.Build
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import androidx.annotation.ColorRes
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -130,6 +134,68 @@ object UiKit {
 
     fun dp(context: Context, value: Int): Int =
         (value * context.resources.displayMetrics.density).toInt()
+
+    /** 打上这个 tag 的控件是「展开/收起」「立即分析」这类操作入口，其文字不进复制文案。 */
+    private const val SKIP_COPY = "ui:skip-copy"
+
+    /** 挂在视图 tag 上的整段文案（如收缩行的完整详情）；[collectText] 优先读它，避免折叠未展开时漏内容。 */
+    private class CopyableText(val value: String)
+
+    /** 复制到剪贴板，带 Toast 反馈（13+ 系统只在后台写入时才自带提示，前台还是自己报）。 */
+    fun copyToClipboard(context: Context, text: String, label: String? = null) {
+        if (text.isBlank()) {
+            Toast.makeText(context, "这张卡片还没有可复制的文字", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("卡片文案", text))
+        Toast.makeText(context, if (label == null) "已复制到剪贴板" else "已复制「$label」", Toast.LENGTH_SHORT).show()
+    }
+
+    /**
+     * 深度优先收集视图树里的文字，拼成纯文本：
+     * 横向一行里只有文本时拼成一行（「总资金」+「123 元」→「总资金：123 元」），
+     * 按钮与操作入口不进文案；折叠中的内容也收集——复制的是卡片全部内容，不是当前可见快照。
+     */
+    fun collectText(root: View): String {
+        val out = StringBuilder()
+        fun textOf(view: View): String? =
+            (view as? TextView)?.text?.toString()?.trim()?.takeUnless { it.isNullOrEmpty() }
+        fun appendLine(text: String) {
+            if (text.isEmpty()) return
+            if (out.isNotEmpty()) out.append('\n')
+            out.append(text)
+        }
+        fun walk(view: View) {
+            val tag = view.tag
+            if (tag is CopyableText) {
+                appendLine(tag.value)
+                return
+            }
+            if (tag == SKIP_COPY) return
+            when (view) {
+                // MaterialButton 也是 Button：操作按钮不是文案。
+                is android.widget.Button -> return
+                is TextView -> appendLine(textOf(view) ?: return)
+                is ViewGroup -> {
+                    val children = (0 until view.childCount).map { view.getChildAt(it) }
+                    if (view is LinearLayout && view.orientation == LinearLayout.HORIZONTAL &&
+                        children.isNotEmpty() &&
+                        children.all { it is TextView && it !is android.widget.Button }
+                    ) {
+                        val texts = children.filter { it.tag != SKIP_COPY }.mapNotNull { textOf(it) }
+                        // 两个文本的行是「标签 + 数值」，用冒号；三个以上（行情行）用空格。
+                        val joiner = if (children.size == 2) "：" else " "
+                        appendLine(texts.joinToString(joiner))
+                    } else {
+                        children.forEach(::walk)
+                    }
+                }
+            }
+        }
+        walk(root)
+        return out.toString()
+    }
 
     fun label(context: Context, text: String, size: Float = 12f): TextView = TextView(context).apply {
         this.text = text
@@ -283,6 +349,7 @@ object UiKit {
                     header.addView(
                         TextView(context).apply {
                             text = actionText
+                            tag = SKIP_COPY
                             textSize = 13f
                             setTextColor(color(context, R.color.brand_primary))
                             setPadding(dp(context, 8), dp(context, 4), 0, dp(context, 4))
@@ -293,6 +360,7 @@ object UiKit {
                 if (secondaryAction != null) {
                     val secondaryLabel = TextView(context).apply {
                         textSize = 12f
+                        tag = SKIP_COPY
                         setTextColor(color(context, R.color.brand_primary))
                         setPadding(dp(context, 8), dp(context, 4), 0, dp(context, 4))
                         setOnClickListener {
@@ -314,6 +382,7 @@ object UiKit {
                     var expanded = initialExpanded
                     val toggleLabel = TextView(context).apply {
                         textSize = 12f
+                        tag = SKIP_COPY
                         setTextColor(color(context, R.color.brand_primary))
                         setPadding(dp(context, 8), 0, 0, 0)
                         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
@@ -335,10 +404,27 @@ object UiKit {
                         onExpansionChanged?.invoke(expanded)
                     }
                 }
+                // 整卡复制的常驻入口；自身打 SKIP_COPY，免得「复制」二字混进文案。
+                header.addView(
+                    TextView(context).apply {
+                        text = "📋 复制"
+                        textSize = 12f
+                        setTextColor(color(context, R.color.brand_primary))
+                        setPadding(dp(context, 8), dp(context, 4), 0, dp(context, 4))
+                        tag = SKIP_COPY
+                        contentDescription = "复制整张卡片的文字"
+                        setOnClickListener { copyToClipboard(context, collectText(view), title) }
+                    }
+                )
                 inner.addView(header)
                 inner.addView(headerDivider)
             }
             inner.addView(body)
+            // 长按卡片的文字区域同样整卡复制；行内可点击区域（展开、按钮）各自消费事件，不受影响。
+            view.setOnLongClickListener {
+                copyToClipboard(context, collectText(view), title)
+                true
+            }
         }
 
         fun setSecondaryExpanded(allExpanded: Boolean) {
@@ -482,7 +568,13 @@ object UiKit {
         return row
     }
 
-    data class DetailRow(val label: String, val value: String)
+    data class DetailRow(
+        val label: String,
+        val value: String,
+        /** 用于把操作建议、持仓视角等相关信息组成独立的视觉区块。 */
+        val dividerBefore: Boolean = false,
+        val dividerAfter: Boolean = false,
+    )
 
     class ExpandableQuoteRowView(
         val view: View,
@@ -515,6 +607,15 @@ object UiKit {
                 LinearLayout.LayoutParams.WRAP_CONTENT,
             )
         }
+        // 本行的完整纯文本：名称/行情/摘要 + 全部详情（结构化数据现拼，不依赖详情是否展开过）。
+        val rowText = buildString {
+            append(name).append("（").append(code).append("）现价 ").append(price)
+            if (!changePct.isNaN()) append(String.format(java.util.Locale.CHINA, " %+.2f%%", changePct))
+            summary.toString().trim().takeUnless { it.isEmpty() }?.let { append('\n').append(it) }
+            details.filter { it.value.isNotBlank() }.forEach { detail ->
+                append('\n').append(detail.label).append("：").append(detail.value)
+            }
+        }
         val core = quoteRow(context, name, code, price, changePct, summary)
         root.addView(core)
 
@@ -525,6 +626,7 @@ object UiKit {
         }
         fun buildDetails() {
             details.forEach { detail ->
+                if (detail.dividerBefore) detailsView.addView(divider(context))
                 val row = LinearLayout(context).apply {
                     orientation = LinearLayout.HORIZONTAL
                     gravity = Gravity.CENTER_VERTICAL
@@ -551,12 +653,14 @@ object UiKit {
                     }
                 )
                 detailsView.addView(row)
+                if (detail.dividerAfter) detailsView.addView(divider(context))
             }
         }
         root.addView(detailsView)
 
         val toggleLabel = TextView(context).apply {
             textSize = 11.5f
+            tag = SKIP_COPY
             setTextColor(color(context, R.color.brand_primary))
             gravity = Gravity.END
             setPadding(dp(context, 8), 0, dp(context, 4), dp(context, 4))
@@ -581,6 +685,13 @@ object UiKit {
         core.contentDescription = "$name $code"
         core.setOnClickListener(toggleExpansion)
         toggleLabel.setOnClickListener(toggleExpansion)
+        // 长按这一行：复制本股完整文案（详情没展开也照抄），方便喂给 AI 或转发；与单击展开互不打架。
+        core.setOnLongClickListener {
+            copyToClipboard(context, rowText, name)
+            true
+        }
+        // 整卡复制时 [collectText] 优先读这份全文，折叠未展开也不会漏详情。
+        root.tag = CopyableText(rowText)
         updateExpansion(QuoteRowExpansionState.isExpanded(stateKey))
         return ExpandableQuoteRowView(view = root, applyExpansion = { updateExpansion(it) })
     }

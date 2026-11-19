@@ -69,6 +69,76 @@ class ObservationEntryPolicyTest {
     }
 
     @Test
+    fun extendedShortTermTrendCannotTriggerLeaderBuyWithoutPullbackSetup() {
+        val trend = EntrySetup(
+            EntrySetupType.NONE, false, false, false, 12.0, 1.0, false,
+            MarketFilter.NEUTRAL, null, "短线过度延伸",
+        )
+        val assessment = TrendAssessment(
+            shortTerm = ShortTermTrend.EXTENDED,
+            major = MajorTrend.UP,
+            reason = "短线过度延伸",
+            allowsOrdinaryBuy = true,
+            allowsAddPosition = false,
+            allowsTBuy = true,
+            allowsTSell = true,
+            allowsBottomReversal = false,
+            riskOnly = false,
+        )
+
+        assertFalse(
+            ObservationEntryPolicy.leaderCanBuy(
+                recentLimitUpDays = 1,
+                relativeStrengthPct = 8.0,
+                volumeRatio = 1.2,
+                price = 22.28,
+                trend = trend,
+                trendAssessment = assessment,
+                stopPrice = 20.0,
+                priceLocation = PriceLocation.MID,
+                ma5 = 21.0,
+                ma20 = 20.0,
+                biasFromMa5Pct = 6.1,
+            ),
+        )
+    }
+
+    @Test
+    fun leaderBuyIsBlockedWhenPriceIsMoreThanEightPercentAboveMa5() {
+        val trend = EntrySetup(
+            EntrySetupType.NONE, false, false, false, 12.0, 1.0, false,
+            MarketFilter.NEUTRAL, null, "趋势向上",
+        )
+        val assessment = TrendAssessment(
+            shortTerm = ShortTermTrend.UP,
+            major = MajorTrend.UP,
+            reason = "趋势向上",
+            allowsOrdinaryBuy = true,
+            allowsAddPosition = true,
+            allowsTBuy = true,
+            allowsTSell = true,
+            allowsBottomReversal = false,
+            riskOnly = false,
+        )
+
+        assertFalse(
+            ObservationEntryPolicy.leaderCanBuy(
+                recentLimitUpDays = 1,
+                relativeStrengthPct = 8.0,
+                volumeRatio = 1.2,
+                price = 10.9,
+                trend = trend,
+                trendAssessment = assessment,
+                stopPrice = 10.0,
+                priceLocation = PriceLocation.MID,
+                ma5 = 10.0,
+                ma20 = 9.5,
+                biasFromMa5Pct = 9.0,
+            ),
+        )
+    }
+
+    @Test
     fun leaderEntryUsesPositionSensitiveBreakLine() {
         val trend = EntrySetup(
             EntrySetupType.NONE, false, false, false, 12.0, 1.0, false,
