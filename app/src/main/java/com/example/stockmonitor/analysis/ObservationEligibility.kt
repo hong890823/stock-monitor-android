@@ -112,8 +112,14 @@ object ObservationEligibility {
             val requiredConfirmationRounds = ObservationPool.requiredConfirmationRounds(normalized)
             val newQuoteDay = quote?.quoteDate != null &&
                 quote.quoteDate != normalized.lastEvaluatedDate
+            // 炸板高位承接是独立日线结构：确认时故意不要求轮次（entryConfirmationRounds=0），
+            // gate 不能再按普通 LEADER 的 2/3 轮把它打回 NEAR，否则买点永远推不出去、
+            // 状态每分钟 BUY↔NEAR 抖一次。新交易日仍照常降档复评。
+            val independentHighHold = normalized.structureQuality ==
+                com.example.stockmonitor.core.ObservationStructureQuality.POST_LIMIT_HIGH_HOLD
             val reconfirmationRequired = newQuoteDay ||
                 (normalized.strategy != ObservationStrategy.PRE_BREAKOUT &&
+                    !independentHighHold &&
                     !normalized.dailyBaseEntryConfirmed &&
                     normalized.entryConfirmationRounds < requiredConfirmationRounds)
             return if (normalized.stage == ObservationStage.BUY_CANDIDATE && reconfirmationRequired) {

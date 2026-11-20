@@ -353,11 +353,13 @@ object HoldingAnalyzer {
             refreshSectorContexts(store, portfolio.positions)
             val results = mutableListOf<PositionResult>()
             val liveQuotes = mutableMapOf<String, Quote>()
+            val failedNames = mutableListOf<String>()
             portfolio.positions.forEachIndexed { index, position ->
                 val live = quotes[position.code]
                 // 取不到行情的留给 DayPnl 标「未计入」，不拿 0 填成没亏没赚；
                 // 缺行情的也要计入进度，否则进度条永远到不了底。
                 if (live == null) {
+                    failedNames.add(position.name)
                     Repo.dailyReviewTask =
                         BackgroundTaskState.running(
                             "持仓复盘",
@@ -375,7 +377,10 @@ object HoldingAnalyzer {
                 startAnnouncementRefresh(position.code)?.await()
                 // 复盘不发盘中信号、不补拉基本面，所以只取分析结果。
                 runCatching { results.add(analyzePosition(position, portfolio, live, benchmark, market, marketRisk)) }
-                    .onFailure { Log.e(TAG, "复盘分析失败 ${position.name}", it) }
+                    .onFailure {
+                        failedNames.add(position.name)
+                        Log.e(TAG, "复盘分析失败 ${position.name}", it)
+                    }
                 // 与持仓分析同一写法：每完成一只推进 done，进度条才动（曾漏传 done，一直 0/N）。
                 Repo.dailyReviewTask =
                     BackgroundTaskState.running(
@@ -387,6 +392,17 @@ object HoldingAnalyzer {
                 Repo.notifyChanged()
             }
 
+            // 一只都没分析成功：不生成“没有风险”的假报告，也不覆盖上一份可用复盘。
+            if (results.isEmpty() && portfolio.positions.any { it.quantity.isFinite() && it.quantity > 0 }) {
+                Repo.dailyReviewTask =
+                    BackgroundTaskState.failure(
+                        "持仓复盘",
+                        "全部持仓分析失败，保留上一份复盘（${failedNames.distinct().joinToString("、")}）",
+                        TimeUtils.nowText(),
+                    )
+                Repo.notifyChanged()
+                return
+            }
             // 与盘中同一口径标注统一优先级的确认位（MonitorService 持仓分析循环同款）：
             // 否则复盘走默认 false，头部永远「暂无已确认的买卖动作」，而个股应对里
             // 却可能写着「退出优先」——同一份报告自相矛盾。盘后 15 分钟 K 线已完整，
@@ -434,6 +450,10 @@ object HoldingAnalyzer {
                         wallstreetcnNewsError = wallstreetcnNews.exceptionOrNull()?.message,
                         tradeBook = store.tradeBook,
                         todayAcquisitions = DayPnl.acquisitions(store.tradeBook, today),
+                        expectedPositionCount = portfolio.positions.count {
+                            it.quantity.isFinite() && it.quantity > 0
+                        },
+                        analysisFailures = failedNames,
                     ),
                 )
             Repo.dailyReviewText = text
@@ -442,7 +462,11 @@ object HoldingAnalyzer {
                 BackgroundTaskState.success(
                     "持仓复盘",
                     TimeUtils.nowText(),
-                    if (results.size == portfolio.positions.size) "复盘已生成" else "复盘已生成，但有股票分析失败",
+                    if (failedNames.isEmpty()) {
+                        "复盘已生成"
+                    } else {
+                        "复盘已生成；${failedNames.distinct().size} 只分析失败，报告已标注风险未核实"
+                    },
                 )
             Repo.notifyChanged()
         } catch (error: kotlinx.coroutines.CancellationException) {

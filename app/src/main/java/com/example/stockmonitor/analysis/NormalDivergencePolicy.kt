@@ -66,7 +66,7 @@ data class NormalDivergenceIntradayInput(
  * 不把单根盘中回落直接当成破位。
  */
 object NormalDivergencePolicy {
-    const val HIGH_BIAS_PCT = 8.0
+    const val HIGH_BIAS_PCT = StrategyThresholds.MAX_CHASE_MA5_BIAS_PCT
     const val EXPANDED_VOLUME_RATIO = 1.3
     const val CONTRACTED_VOLUME_RATIO = 0.8
     const val MIN_LINE_TOLERANCE_PCT = 0.5

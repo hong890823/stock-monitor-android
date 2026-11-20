@@ -47,6 +47,22 @@ class FirstBoardReclaimTrackerTest {
         assertNull(tracker.update(sample(timestamp = 701_000L, low = 9.60, price = 10.01)))
     }
 
+    @Test
+    fun rearmRetriesAfterPushBudgetRejection() {
+        tracker.update(sample(timestamp = 1_000L, low = 9.70, price = 9.80))
+        tracker.update(sample(timestamp = 2_000L, low = 9.70, price = 10.00))
+        assertEquals(
+            "首板分歧转强观察",
+            tracker.update(sample(timestamp = 302_000L, low = 9.70, price = 10.02))?.title,
+        )
+        // 预算不足被服务滚动回滚后，下一次满足条件应能重试，而不是当日永久静默。
+        tracker.rearm("sh600000")
+        assertEquals(
+            "首板分歧转强观察",
+            tracker.update(sample(timestamp = 401_000L, low = 9.70, price = 10.03))?.title,
+        )
+    }
+
     private fun sample(
         timestamp: Long,
         low: Double,

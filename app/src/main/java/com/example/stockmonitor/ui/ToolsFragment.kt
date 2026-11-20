@@ -379,6 +379,10 @@ class ToolsFragment : BaseFragment(R.layout.fragment_scroll) {
                     "买卖点 / 做T提醒",
                     if (store.alertsEnabled && store.intradaySignalEnabled) "已开启" else "已关闭",
                 )
+                addKeyValue(
+                    "自选股/观察池盘中提醒",
+                    if (store.alertsEnabled && store.watchlistIntradayAlerts) "已开启" else "已关闭",
+                )
                 addKeyValue("涨跌停扫描", if (store.limitScanEnabled) "已开启" else "已关闭")
                 addKeyValue("当前状态", Repo.statusText)
                 add(

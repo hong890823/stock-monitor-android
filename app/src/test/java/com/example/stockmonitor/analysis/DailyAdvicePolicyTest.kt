@@ -222,4 +222,118 @@ class DailyAdvicePolicyTest {
         assertTrue(!DailyAdvicePolicy.canReserveBuy(listOf(unknown), "2026-11-16", "sh600000"))
         assertEquals(AdvicePlanState.DELIVERY_UNKNOWN, unknown.state)
     }
+
+    @Test
+    fun blockedPlanIsRevivedWhenMutualExclusionClears() {
+        // 旧版本会把“同日买入互斥”持久化成 BLOCKED；互斥解除后必须能重新准备/通知。
+        val blocked = DailyAdvicePolicy.prepare(
+            date = "2026-11-16",
+            code = "sz000001",
+            direction = AdviceDirection.BUY,
+            kind = AdviceKind.HOLDING_ADD,
+            targetQuantity = 200.0,
+            currentQuantity = 500.0,
+            existing = null,
+        ).plan.copy(
+            state = AdvicePlanState.BLOCKED,
+            notificationState = AdviceNotificationState.NOT_SENT,
+        )
+
+        val revived = DailyAdvicePolicy.prepare(
+            date = "2026-11-16",
+            code = "sz000001",
+            direction = AdviceDirection.BUY,
+            kind = AdviceKind.HOLDING_ADD,
+            targetQuantity = 200.0,
+            currentQuantity = 500.0,
+            existing = blocked,
+        )
+
+        assertEquals(AdvicePlanState.PREPARED, revived.plan.state)
+        assertEquals(AdviceNotificationState.NOT_SENT, revived.plan.notificationState)
+        assertTrue(revived.reused)
+    }
+
+    @Test
+    fun riskStageEscalationReopensSentPlanWithoutLosingQuantityFeedback() {
+        val sent = DailyAdvicePolicy.prepare(
+            date = "2026-11-16",
+            code = "sz000001",
+            direction = AdviceDirection.SELL,
+            kind = AdviceKind.REDUCE,
+            targetQuantity = 400.0,
+            currentQuantity = 1_200.0,
+            existing = null,
+            riskPriority = 1,
+            riskStage = 2,
+        ).plan.copy(
+            executedQuantity = 100.0,
+            state = AdvicePlanState.SENT,
+            notificationState = AdviceNotificationState.SENT,
+        )
+
+        val escalated = DailyAdvicePolicy.prepare(
+            date = "2026-11-16",
+            code = "sz000001",
+            direction = AdviceDirection.SELL,
+            kind = AdviceKind.REDUCE,
+            targetQuantity = 400.0,
+            currentQuantity = 1_200.0,
+            existing = sent,
+            riskPriority = 1,
+            riskStage = 3,
+        )
+
+        assertEquals(AdvicePlanState.PREPARED, escalated.plan.state)
+        assertEquals(AdviceNotificationState.NOT_SENT, escalated.plan.notificationState)
+        assertEquals(3, escalated.plan.riskStage)
+        assertEquals(100.0, escalated.plan.executedQuantity, 0.0)
+        assertTrue(DailyAdvicePolicy.canNotify(escalated.plan))
+
+        // 同档位不重发；30 分钟链路传 riskStage=0 也不能把档位降回去。
+        val sameStage = DailyAdvicePolicy.prepare(
+            date = "2026-11-16",
+            code = "sz000001",
+            direction = AdviceDirection.SELL,
+            kind = AdviceKind.REDUCE,
+            targetQuantity = 400.0,
+            currentQuantity = 1_200.0,
+            existing = escalated.plan.copy(
+                state = AdvicePlanState.SENT,
+                notificationState = AdviceNotificationState.SENT,
+            ),
+            riskPriority = 1,
+            riskStage = 3,
+        )
+        assertEquals(AdvicePlanState.SENT, sameStage.plan.state)
+        val fromSlowPath = DailyAdvicePolicy.prepare(
+            date = "2026-11-16",
+            code = "sz000001",
+            direction = AdviceDirection.SELL,
+            kind = AdviceKind.REDUCE,
+            targetQuantity = 400.0,
+            currentQuantity = 1_200.0,
+            existing = sameStage.plan,
+            riskPriority = 1,
+            riskStage = 0,
+        )
+        assertEquals(3, fromSlowPath.plan.riskStage)
+    }
+
+    @Test
+    fun onlyTodaysPlansAreActive() {
+        val today = "2026-11-20"
+        val current = DailyAdvicePolicy.prepare(
+            date = today,
+            code = "sz000001",
+            direction = AdviceDirection.SELL,
+            kind = AdviceKind.REDUCE,
+            targetQuantity = 200.0,
+            currentQuantity = 1_000.0,
+            existing = null,
+        ).plan
+        val previousDay = current.copy(date = "2026-11-19")
+
+        assertEquals(listOf(current), DailyAdvicePolicy.activePlans(listOf(previousDay, current), today))
+    }
 }

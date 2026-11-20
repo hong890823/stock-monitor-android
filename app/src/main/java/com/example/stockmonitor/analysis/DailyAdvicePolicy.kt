@@ -48,6 +48,11 @@ data class DailyAdvicePlan(
     val updatedAtMs: Long = 0L,
     val riskPriority: Int = 0,
     val continuityReason: String? = null,
+    /**
+     * 风险处置已确认的 15 分钟证据根数（0–3）。风险从第 2 根升级到第 3 根时，
+     * 允许在保留同日计划与数量反馈的前提下再提醒一次。
+     */
+    val riskStage: Int = 0,
 )
 
 data class AdvicePreparation(
@@ -82,12 +87,15 @@ object DailyAdvicePolicy {
         currentQuantity: Double,
         existing: DailyAdvicePlan?,
         riskPriority: Int = 0,
+        /** 风险处置已确认的 15 分钟证据根数（0–3）；非风险建议传 0。 */
+        riskStage: Int = 0,
     ): AdvicePreparation {
         require(date.isNotBlank())
         require(code.isNotBlank())
         require(targetQuantity.isFinite() && targetQuantity > 0.0)
         require(currentQuantity.isFinite() && currentQuantity >= 0.0)
         require(riskPriority in 0..2)
+        require(riskStage in 0..3)
         require(riskPriority == 0 || direction == AdviceDirection.SELL && kind in setOf(AdviceKind.REDUCE, AdviceKind.EXIT))
 
         val sameDayStock = existing != null && existing.date == date && existing.code == code
@@ -96,7 +104,8 @@ object DailyAdvicePolicy {
         }
         if (riskPriority == 2) {
             val candidate = if (sameDayStock) existing!! else DailyAdvicePlan(
-                date, code, direction, kind, targetQuantity, 0.0, currentQuantity, riskPriority = riskPriority,
+                date, code, direction, kind, targetQuantity, 0.0, currentQuantity,
+                riskPriority = riskPriority, riskStage = riskStage,
             )
             return AdvicePreparation(com.example.stockmonitor.core.RiskExitReview.pause(candidate, candidate.updatedAtMs), reused = sameDayStock)
         }
@@ -108,6 +117,7 @@ object DailyAdvicePolicy {
                 plan = DailyAdvicePlan(
                     date, code, direction, kind, targetQuantity, 0.0, currentQuantity,
                     riskPriority = riskPriority,
+                    riskStage = riskStage,
                     continuityReason = "风险升级：替代原${existing.kind.label()}计划${existing.targetQuantity.prettyQuantity()}股" +
                         "（数量反馈${existing.executedQuantity.prettyQuantity()}股，未执行部分停止沿用）；" +
                         "本次按当前可卖仓位重新限量，不与旧计划叠加；风控处置不受底仓或做T盈利门槛阻挡。",
@@ -128,8 +138,48 @@ object DailyAdvicePolicy {
         }
         val canReuse = sameDayStock && existing!!.direction == direction && existing.kind == kind
         if (canReuse) {
+            // 风险证据从第 2 根升级到第 3 根：保留同日计划与数量反馈，但允许再提醒一次。
+            // 复核/送达未知/已完成状态不在这里复位，避免覆盖人工核对或重复催办。
+            val escalated = riskPriority >= 1 && riskStage > existing.riskStage &&
+                existing.state in setOf(
+                    AdvicePlanState.PREPARED,
+                    AdvicePlanState.RESERVED,
+                    AdvicePlanState.SENT,
+                    AdvicePlanState.PARTIALLY_EXECUTED,
+                    AdvicePlanState.BLOCKED,
+                )
+            if (escalated) {
+                return AdvicePreparation(
+                    plan = existing.copy(
+                        riskStage = riskStage,
+                        state = AdvicePlanState.PREPARED,
+                        notificationState = AdviceNotificationState.NOT_SENT,
+                        reviewReason = null,
+                        continuityReason = "风险升级：第 $riskStage 根已完成15分钟K线确认，" +
+                            "按当前可卖仓位重新提示，不与旧计划叠加；数量反馈" +
+                            "${existing.executedQuantity.prettyQuantity()}股",
+                        lastKnownQuantity = currentQuantity,
+                    ),
+                    reused = true,
+                )
+            }
+            // 旧版本曾把“同日买入互斥”持久化成 BLOCKED；互斥解除后（另一只已完成/回滚）
+            // 必须能让计划重新回到可通知状态，否则该股当天永久静默。
+            val wasBlocked = existing.state == AdvicePlanState.BLOCKED
             return AdvicePreparation(
-                plan = existing!!.copy(lastKnownQuantity = currentQuantity),
+                plan = existing.copy(
+                    lastKnownQuantity = currentQuantity,
+                    // 30 分钟组合链路没有 riskStage 参数，不能用 0 把已升级的档位降回去；
+                    // 档位只升不降，避免同一风险反复重报。
+                    riskStage = maxOf(existing.riskStage, riskStage),
+                    state = if (wasBlocked) AdvicePlanState.PREPARED else existing.state,
+                    notificationState = if (wasBlocked) {
+                        AdviceNotificationState.NOT_SENT
+                    } else {
+                        existing.notificationState
+                    },
+                    reviewReason = if (wasBlocked) null else existing.reviewReason,
+                ),
                 reused = true,
             )
         }
@@ -154,6 +204,7 @@ object DailyAdvicePolicy {
                 executedQuantity = 0.0,
                 lastKnownQuantity = currentQuantity,
                 riskPriority = riskPriority,
+                riskStage = riskStage,
             ),
             reused = false,
         )
@@ -225,6 +276,15 @@ object DailyAdvicePolicy {
             plan.direction == AdviceDirection.BUY &&
             plan.state in pendingBuyStates
     }
+
+    /**
+     * 跨日只保留当天的建议计划。
+     *
+     * 旧计划不会被今日复用（prepare/reserve 都要求 date 匹配），但会让 SharedPreferences
+     * 字符串无限增长，并且持仓页每次渲染都要全量解码。
+     */
+    fun activePlans(plans: List<DailyAdvicePlan>, today: String): List<DailyAdvicePlan> =
+        plans.filter { it.date == today }
 
     fun reserve(
         plan: DailyAdvicePlan,

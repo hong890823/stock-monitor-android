@@ -53,19 +53,15 @@ object PositionAllocationJson {
         val keys = root.keys()
         while (keys.hasNext()) {
             val code = keys.next().trim()
-            require(code.isNotBlank()) { "分仓配置缺少股票代码" }
-            val item = root.optJSONObject(code)
-                ?: throw IllegalArgumentException("分仓配置 $code 不是对象")
+            if (code.isBlank()) continue
+            // 单条损坏只跳过该条：整表抛异常会让下一次保存用单条记录覆盖全部配置。
+            val item = root.optJSONObject(code) ?: continue
             val mode = runCatching {
                 PositionAllocationMode.valueOf(item.getString("mode"))
-            }.getOrElse { error ->
-                throw IllegalArgumentException("分仓配置 $code 的模式无效", error)
-            }
-            val target = try {
-                item.getDouble("base_quantity_target")
-            } catch (error: Exception) {
-                throw IllegalArgumentException("分仓配置 $code 的底仓目标无效", error)
-            }
+            }.getOrNull()
+            if (mode == null) continue
+            val target = runCatching { item.getDouble("base_quantity_target") }.getOrNull()
+            if (target == null || !target.isFinite() || target < 0.0) continue
             result[code] = PositionAllocationConfig(mode, target)
         }
         return result

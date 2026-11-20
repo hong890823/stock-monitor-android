@@ -89,6 +89,25 @@ class FinancialQualityPolicyTest {
     }
 
     @Test
+    fun revenueDeclineWithInventoryBuildIsFlaggedWithoutTheMeaninglessDoubleRule() {
+        val assessment = FinancialQualityPolicy.assess(
+            periods = listOf(
+                period("2025-06-30", revenue = 100.0),
+                period("2026-06-30", revenue = 90.0),
+            ),
+            balances = listOf(
+                balance("2025-06-30", inventory = 100.0),
+                balance("2026-06-30", inventory = 105.0),
+            ),
+            deductRatio = 0.95,
+            ttmOperatingCashFlow = 20.0,
+        )
+
+        assertTrue(assessment.warnings.any { it.contains("营收下滑而存货上升") })
+        assertFalse(assessment.warnings.any { it.contains("达到营业收入增速的 2 倍") })
+    }
+
+    @Test
     fun highLeverageWithPositiveOperatingCashDoesNotTriggerCombinedWarning() {
         val assessment = FinancialQualityPolicy.assess(
             periods = listOf(period("2025-12-31", operatingCashFlow = 10.0)),

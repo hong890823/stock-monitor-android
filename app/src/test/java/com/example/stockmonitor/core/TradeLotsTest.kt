@@ -21,6 +21,40 @@ class TradeLotsTest {
         )
 
     @Test
+    fun buyingIntoUnknownCostPositionUsesTradePriceInsteadOfDilutingToZero() {
+        // 旧实现按 (1000*0 + 100*12)/1100 = 1.09 摊出一个不存在的成本。
+        val unknown = Position("sz000001", "测试股", 1_000.0, 0.0)
+        val result = TradeLotLedger.buyToPortfolio(
+            book = TradeLotLedger.migrate(listOf(unknown)),
+            portfolio = Portfolio(positions = mutableListOf(unknown)),
+            record = buy("2026-10-20", 100.0, 12.0),
+        )
+
+        assertEquals(12.0, result.portfolio.positions.single().cost, 0.001)
+        assertEquals(1_100.0, result.portfolio.positions.single().quantity, 0.001)
+    }
+
+    @Test
+    fun clearingLotsAfterReAddKeepsLedgerConsistent() {
+        // 删除监控后重新加入：旧批次残留会让 lots.sum > 新数量，账本永久不一致。
+        val stale = TradeBook(
+            lots = listOf(TradeLot("sz000001", "测试股", 1_000.0, 10.0, "2026-10-01")),
+        )
+        val cleared = TradeLotLedger.clearLots(stale, "sz000001")
+        val rebuilt = TradeLotLedger.syncPositionEdit(
+            cleared, "sz000001", "测试股", oldQuantity = 0.0, newQuantity = 500.0,
+            unitCost = 10.0, buyDate = "2026-10-20",
+        )
+        val availability = TradeLotLedger.availability(
+            rebuilt, listOf(position(500.0)), "2026-10-20",
+        ).single()
+
+        assertEquals(true, availability.ledgerConsistent)
+        assertEquals(0.0, availability.actionableSellableToday, 0.001) // 当日买入受 T+1 锁定
+        assertEquals(500.0, availability.actionableNextTradingDaySellable, 0.001)
+    }
+
+    @Test
     fun migratedLegacyPositionIsSellableToday() {
         val book = TradeLotLedger.migrate(listOf(position(500.0)))
 

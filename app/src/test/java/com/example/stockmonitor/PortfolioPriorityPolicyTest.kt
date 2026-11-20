@@ -27,6 +27,28 @@ class PortfolioPriorityPolicyTest {
         assertFalse(lines.first().contains("sz000625"))
     }
 
+    @Test fun fundamentalAlertNeverApprovesAddition() {
+        // 价格健康、但基本面亮红灯：order 会到 3，旧实现因此放行追加。
+        val healthy = input().copy(price = 26.0, ma20 = 25.0, fundamentalAlert = true)
+        assertFalse(PortfolioPriorityPolicy.canApproveAddition(healthy, today))
+        assertTrue(PortfolioPriorityPolicy.canApproveAddition(healthy.copy(fundamentalAlert = false), today))
+    }
+
+    @Test fun mitigatedLightLowPositionDoesNotEscalateToReduceOrExit() {
+        val risk = input().copy(
+            price = 24.0,
+            riskConfirmed = true,
+            exitTriggered = true,
+            mitigated = true,
+        )
+        val decision = PortfolioPriorityPolicy.evaluate(risk, today)
+        assertEquals(PriorityState.WATCH, decision.state)
+        assertFalse(decision.actionConfirmed)
+        assertTrue(decision.reason.contains("去留自定"))
+        // 未缓释的同一确认风险仍然按 EXIT 处理，缓释不能被滥用。
+        assertEquals(PriorityState.EXIT, PortfolioPriorityPolicy.evaluate(risk.copy(mitigated = false), today).state)
+    }
+
     @Test fun confirmedRiskWinsRegardlessOfCostOrFundamentalScore() {
         val risk = input().copy(price = 24.0, riskConfirmed = true, exitTriggered = true)
         val unconfirmed = input("sz000625", 100000.0).copy(price = 20.0, fundamentalAlert = true)

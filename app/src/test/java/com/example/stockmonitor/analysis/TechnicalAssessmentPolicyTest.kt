@@ -26,6 +26,27 @@ class TechnicalAssessmentPolicyTest {
     }
 
     @Test
+    fun collapseEnvironmentSuppressesParticipationAdvice() {
+        val normal = TechnicalAssessmentPolicy.evaluate(
+            technical = technical(),
+            weeklyTrend = SwingTrend.UP,
+            monthlyTrend = SwingTrend.UP,
+        )
+        val collapse = TechnicalAssessmentPolicy.evaluate(
+            technical = technical(),
+            weeklyTrend = SwingTrend.UP,
+            monthlyTrend = SwingTrend.UP,
+            marketRegime = MarketRegime.COLLAPSE,
+        )
+
+        assertFalse("正常环境不应给出塌陷措辞", normal.primaryAdvice.contains("暂缓补仓"))
+        assertTrue(
+            "同一只票在塌陷期不能与持仓页/AI 给出相反结论",
+            collapse.primaryAdvice.contains("暂缓补仓"),
+        )
+    }
+
+    @Test
     fun brokenSupportForcesRiskAdviceAndCapsScore() {
         val result = TechnicalAssessmentPolicy.evaluate(
             technical = technical().copy(

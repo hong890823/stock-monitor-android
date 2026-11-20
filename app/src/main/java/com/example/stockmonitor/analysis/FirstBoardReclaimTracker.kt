@@ -14,6 +14,8 @@ class FirstBoardReclaimTracker {
         val timestamp: Long,
         val recentFirstBoard: Boolean,
         val limitUp: Boolean,
+        /** 收盘价相对动态 MA5 的乖离百分比；调用方负责按 [FirstBoardReclaimPolicy] 过滤。 */
+        val biasFromMa5Pct: Double? = null,
     )
 
     data class Alert(
@@ -60,21 +62,31 @@ class FirstBoardReclaimTracker {
         }
 
         state.emitted = true
+        val biasText = sample.biasFromMa5Pct
+            ?.takeIf { it.isFinite() }
+            ?.let { String.format(Locale.CHINA, "，MA5乖离%.1f%%", it) }
+            .orEmpty()
         return Alert(
             code = sample.code,
             title = "首板分歧转强观察",
             body = String.format(
                 Locale.CHINA,
-                "%s｜回收开盘价 %.2f，日内低点 %.2f 已稳定5分钟；观察量价承接与失效位，不等同买入确认，勿追涨停。",
+                "%s｜回收开盘价 %.2f，日内低点 %.2f 已稳定5分钟%s；观察量价承接与失效位，不等同买入确认，勿追涨停。",
                 sample.name,
                 sample.open,
                 state.low,
+                biasText,
             ),
         )
     }
 
+    /** 推送预算不足时回滚“已提醒”，下一次满足条件可以重试。 */
+    fun rearm(code: String) {
+        states[code]?.emitted = false
+    }
+
     companion object {
-        const val MIN_OPEN_DIP_PCT = 0.5
+        const val MIN_OPEN_DIP_PCT = StrategyThresholds.FIRST_BOARD_OPEN_DIP_PCT
         const val STABLE_LOW_MS = 5 * 60 * 1000L
     }
 }

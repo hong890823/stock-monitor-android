@@ -752,8 +752,24 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                 val technical = item.technicalScore?.let { "技术$it/100" } ?: "技术快照暂缺"
                 val postConfirmationWatch = item.postConfirmationWatchDays
                     .takeIf { it > 0 }?.let { "｜失效后复评${it}天" }.orEmpty()
+                // 双时钟：淘汰用“观察第 N 日”，首板承接提醒用“首板后第 N 交易日”。两者都展示，
+                // 避免复盘时把不同口径当成同一把尺子。
+                val firstBoardClock = item.limitStreak
+                    ?.takeIf { it == 1 }
+                    ?.let {
+                        com.example.stockmonitor.analysis.FirstBoardReclaimPolicy
+                            .tradingDaysAfter(
+                                com.example.stockmonitor.analysis.FirstBoardClockPolicy
+                                    .effectiveBoardDate(item),
+                                com.example.stockmonitor.analysis.TimeUtils.todayText(),
+                                com.example.stockmonitor.monitor.Repo.marketTradingDates,
+                            )
+                    }
+                    ?.let { "｜首板后第${it}交易日" }
+                    .orEmpty()
                 val summaryLine =
-                    "$statusLabel｜$routeLabel｜$qualification｜$technical｜已观察${item.observedDays}天$postConfirmationWatch"
+                    "$statusLabel｜$routeLabel｜$qualification｜$technical｜已观察${item.observedDays}天" +
+                        "$postConfirmationWatch$firstBoardClock"
                 val flowWindow = com.example.stockmonitor.analysis.FundFlowWindowPolicy.assess(flowHistory)
                 val flowSummary = FundFlowDisplayPolicy.candidateSummary(currentFlow, flowWindow)
                 fun concise(text: String, maxLength: Int = 42): String {

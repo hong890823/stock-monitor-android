@@ -45,7 +45,19 @@ import com.example.stockmonitor.analysis.IntradayFundFlowTracker
 import com.example.stockmonitor.analysis.FundFlowPolicy
 import com.example.stockmonitor.analysis.FundFlowWindowPolicy
 import com.example.stockmonitor.analysis.FirstBoardReclaimTracker
+import com.example.stockmonitor.analysis.FirstBoardClockPolicy
+import com.example.stockmonitor.analysis.FirstBoardReclaimPolicy
+import com.example.stockmonitor.analysis.BuyPointFundFlowPolicy
+import com.example.stockmonitor.analysis.MainForceConfidence
+import com.example.stockmonitor.analysis.MainForceDirectionPolicy
+import com.example.stockmonitor.analysis.ObservationPoolRetentionPolicy
+import com.example.stockmonitor.analysis.AlertEventKeys
+import com.example.stockmonitor.analysis.AlertOrchestrator
+import com.example.stockmonitor.analysis.StrategyThresholds
+import com.example.stockmonitor.analysis.LaunchDiscoveryCoveragePolicy
+import com.example.stockmonitor.analysis.LaunchDiscoveryTracker
 import com.example.stockmonitor.analysis.LimitCandidatePolicy
+import com.example.stockmonitor.analysis.LimitCandidateSelection
 import com.example.stockmonitor.analysis.LimitSealTracker
 import com.example.stockmonitor.analysis.LimitStockRanking
 import com.example.stockmonitor.analysis.MarketAlertEngine
@@ -64,6 +76,7 @@ import com.example.stockmonitor.analysis.MarketTimingContext
 import com.example.stockmonitor.analysis.MajorTrend
 import com.example.stockmonitor.analysis.MultiTimeframeTrend
 import com.example.stockmonitor.analysis.ObservationBuyAlert
+import com.example.stockmonitor.analysis.ObservationBreakoutRiskAlert
 import com.example.stockmonitor.analysis.ObservationEligibility
 import com.example.stockmonitor.analysis.ObservationEntryPolicy
 import com.example.stockmonitor.analysis.ObservationEvidenceFactory
@@ -133,6 +146,8 @@ import com.example.stockmonitor.core.Http
 import com.example.stockmonitor.core.IntradayBarWindow
 import com.example.stockmonitor.core.IntradayVolumeContext
 import com.example.stockmonitor.core.PullbackPhaseVolumeEvidence
+import com.example.stockmonitor.core.NotificationIds
+import com.example.stockmonitor.core.LimitDataSource
 import com.example.stockmonitor.core.LeaderOverrides
 import com.example.stockmonitor.core.LeaderStrengthTracker
 import com.example.stockmonitor.core.LimitData
@@ -207,6 +222,11 @@ class MonitorService : Service() {
     private val summaryBusy = AtomicBoolean(false)
     private val newsBusy = AtomicBoolean(false)
     private val observationRefreshBusy = AtomicBoolean(false)
+    /**
+     * 观察池是「读 → 改 → 整表写回」的共享状态：复评协程、涨跌停扫描、手动选股、
+     * 启动发现会并发写。所有写入口都过这把锁，避免后写者用旧快照覆盖先写者的新增/降档。
+     */
+    private val observationPoolLock = Any()
     // 晋级环境门控（2026-10-23 promotion-hardening 设计目标）：指数风险区/跌停宽度/板块联弱时
     // 延迟候选晋级（只延迟不删除，数据缺失不拦截）。10-22 落地后一直灰度关闭，现启用。
     private val promotionEnvironmentGateEnabled = true
@@ -214,6 +234,12 @@ class MonitorService : Service() {
     private var lastRiskPolicyMigrationAttemptDate: String? = null
     private var lastWatchlistBuyRefreshAtMs = 0L
     private val observationHistory = java.util.concurrent.ConcurrentHashMap<String, Pair<String, List<DayBar>>>()
+    /**
+     * 启动发现专用的日线缓存。不能复用 [observationHistory]：观察池复评每分钟会把
+     * 非池内代码裁掉，而启动发现扫描的正是“尚未入池”的票，复用会导致同一批票反复拉
+     * 520 根日线，60 次/天配额在开盘一小时内耗尽。
+     */
+    private val launchHistory = java.util.concurrent.ConcurrentHashMap<String, Pair<String, List<DayBar>>>()
     private var observationBenchmarkDay: String? = null
     private var observationBenchmark: List<DayBar>? = null
     private val swingHistory = java.util.concurrent.ConcurrentHashMap<String, Pair<String, List<DayBar>>>()
@@ -241,6 +267,12 @@ class MonitorService : Service() {
     private var firstLoadDone = false
     private var sectorTick = SECTOR_INTERVAL_TICKS - 1
     private var limitTick = LIMIT_SCAN_INTERVAL_TICKS - 1
+    private var launchTick = LAUNCH_SCAN_INTERVAL_TICKS - 1
+    private val launchDiscoveryTracker = LaunchDiscoveryTracker()
+    private val launchDiscoveryBusy = java.util.concurrent.atomic.AtomicBoolean(false)
+    private var launchFetchDay: String? = null
+    private var launchFetchCount = 0
+    private var launchAlertCount = 0
     private var sectorFlowTick = SECTOR_FLOW_INTERVAL_TICKS - 1
     private var turnoverTracker: TurnoverTracker? = null
     private val sectorTurnoverTracker = SectorTurnoverTracker()
@@ -604,6 +636,10 @@ class MonitorService : Service() {
         if (++limitTick >= LIMIT_SCAN_INTERVAL_TICKS) {
             limitTick = 0
             refreshLimits()
+        }
+        if (++launchTick >= LAUNCH_SCAN_INTERVAL_TICKS) {
+            launchTick = 0
+            checkLaunchDiscovery(calendar)
         }
         if (++sectorTick >= SECTOR_INTERVAL_TICKS) {
             sectorTick = 0
@@ -1066,8 +1102,214 @@ class MonitorService : Service() {
             )
         val limitUps = Repo.limits?.up.orEmpty()
         val eligible = limitUps.filter(LimitCandidatePolicy::eligible)
+        ObsPoolTrace.limitScan(TimeUtils.todayText(), scanned.source, limitUps, eligible)
         addLimitContinuationCandidates(eligible)
-        addLeaderCandidates(limitUps.filterNot(LimitCandidatePolicy::eligible))
+        addLeaderCandidates(
+            limitUps.filterNot(LimitCandidatePolicy::eligible),
+            degraded = scanned.source != LimitDataSource.EASTMONEY_LIMIT_POOL,
+        )
+    }
+
+    /**
+     * 首板前启动突破观察：每 5 分钟扫一次活跃股，命中只写入观察池并发观察级提醒。
+     *
+     * 日线与观察池复评共用 [observationHistory] 按交易日缓存，重复扫描不再请求；
+     * 每次扫描最多补 6 只、每天最多 60 只，避免把低频发现变成全市场逐票拉日线。
+     */
+    private fun checkLaunchDiscovery(calendar: Calendar) {
+        if (!TradingCalendar.inMarketHoursForAlert(calendar)) return
+        val today = TimeUtils.todayText()
+        // 工作日节假日（国庆/春节等）inMarketHoursForAlert 仍为 true；指数行情日期不是今天
+        // 说明拿到的是上一交易日快照，不能采样，否则会误报“启动突破”并污染观察池。
+        if (Repo.quotes["sh000001"]?.quoteDate?.substringBefore(' ') != today) return
+        if (launchFetchDay != today) {
+            launchFetchDay = today
+            launchFetchCount = 0
+            launchAlertCount = 0
+            launchHistory.clear()
+        }
+        if (launchAlertCount >= LAUNCH_MAX_ALERTS_PER_DAY) return
+        if (!launchDiscoveryBusy.compareAndSet(false, true)) return
+        val elapsedTradingMinutes = TradingCalendar.tradingMinutesElapsed(calendar)
+        scope.launch {
+            try {
+                val universe = runCatching { sina.activeStocks(LAUNCH_UNIVERSE_LIMIT) }.getOrElse { error ->
+                    Log.w(TAG, "启动观察：活跃股列表不可用", error)
+                    return@launch
+                }
+                if (universe.isEmpty()) return@launch
+                // 淘汰条目不算“已覆盖”：清理策略保证它们只短期保留，之后可以像新票一样重新发现。
+                val knownCodes = LaunchDiscoveryCoveragePolicy.coveredCodes(
+                    observationPool = store.observationPool,
+                    watchlistCandidates = store.watchlistBuyCandidates,
+                )
+                var fetchedThisScan = 0
+                universe.asSequence()
+                    .filter { it.code !in knownCodes && !it.code.startsWith("sh000") && !it.code.startsWith("sz399") }
+                    .filter { stock ->
+                        stock.price.isFinite() && stock.prevClose > 0.0 &&
+                            (stock.price / stock.prevClose - 1.0) * 100.0 >= LAUNCH_PREFILTER_PCT
+                    }
+                    .filterNot { stock ->
+                        isSealedAtLimit(stock.code, stock.name, stock.price, stock.high, stock.prevClose)
+                    }
+                    .forEach { stock ->
+                        // 缓存命中不消耗配额；配额只限制“真正需要新拉日线”的票，
+                        // 且在成功拿到可用历史后才计数，失败不烧当天额度。
+                        val history = launchHistory[stock.code]?.takeIf { it.first == today }?.second
+                            ?: run {
+                                if (fetchedThisScan >= LAUNCH_MAX_FETCH_PER_SCAN ||
+                                    launchFetchCount >= LAUNCH_MAX_FETCH_PER_DAY
+                                ) {
+                                    return@forEach
+                                }
+                                val fetched = runCatching { sina.kline(stock.code, 520) }.getOrNull()
+                                    ?.filter { it.date < today }
+                                    ?.takeIf { it.size >= LAUNCH_MIN_HISTORY_BARS }
+                                    ?: return@forEach
+                                fetchedThisScan++
+                                launchFetchCount++
+                                launchHistory[stock.code] = today to fetched
+                                fetched
+                            }
+                        val closes = history.map { it.close }
+                        val platform = closes.takeLast(20).maxOrNull() ?: return@forEach
+                        val averageVolume = history.takeLast(5).map { it.volume }.average()
+                        val ma5 = (closes.takeLast(4).sum() + stock.price) / 5.0
+                        val sealed = isSealedAtLimit(
+                            stock.code, stock.name, stock.price, stock.high, stock.prevClose,
+                        )
+                        val alert = launchDiscoveryTracker.update(
+                            LaunchDiscoveryTracker.Sample(
+                                code = stock.code,
+                                name = stock.name,
+                                tradingDay = today,
+                                price = stock.price,
+                                previousClose = stock.prevClose,
+                                platform = platform,
+                                volumeRatio =
+                                    VolumeRatio.of(stock.volume, averageVolume, elapsedTradingMinutes),
+                                biasFromMa5Pct = if (ma5 > 0.0) (stock.price / ma5 - 1.0) * 100.0 else null,
+                                timestamp = System.currentTimeMillis(),
+                                limitUp = sealed,
+                            ),
+                        ) ?: return@forEach
+                        // 形态站稳只是“值得看”；主力借突破出货且无近端承接时，不打扰、先不入池。
+                        val quality = buyPointFundFlowDecision(
+                            code = stock.code,
+                            price = stock.price,
+                            changePct = (stock.price / stock.prevClose - 1.0) * 100.0,
+                            quoteDate = today,
+                            volume = stock.volume,
+                            turnover = 0.0,
+                        )
+                        if (!quality.allow) {
+                            launchDiscoveryTracker.rearm(stock.code)
+                            ObsPoolTrace.launchFundFlowBlocked(today, stock.code, quality.reason)
+                            return@forEach
+                        }
+                        ObsPoolTrace.launchAlert(today, alert.code, alert.price, alert.platform)
+                        addLaunchCandidate(alert.code, alert.name, alert.price, alert.platform)
+                        val posted =
+                            sendCheckedAlert(
+                                type = "launchDiscovery",
+                                code = alert.code,
+                                id = NotificationIds.of(ALERT_ID_LAUNCH_DISCOVERY, alert.code),
+                                title = alert.title,
+                                body = alert.body + "｜资金：${quality.evidence}；${quality.reason}",
+                                signal = false,
+                            )
+                        if (!posted) {
+                            launchDiscoveryTracker.rearm(alert.code)
+                            return@forEach
+                        }
+                        launchAlertCount++
+                    }
+            } finally {
+                launchDiscoveryBusy.set(false)
+            }
+        }
+    }
+
+    /** 与 ObservationEligibility.isAtLimitUp 同口径，作用于活跃股快照而不是 Quote。 */
+    private fun isSealedAtLimit(
+        code: String,
+        name: String,
+        price: Double,
+        high: Double,
+        previousClose: Double,
+    ): Boolean {
+        if (!price.isFinite() || !previousClose.isFinite() || previousClose <= 0.0) return false
+        val changePct = (price / previousClose - 1.0) * 100.0
+        val atSessionHigh = high <= 0.0 || price >= high * 0.9995
+        return changePct >= SinaClient.limitPctFor(code, name) - SinaClient.LIMIT_TOLERANCE_PCT &&
+            atSessionHigh
+    }
+
+    /**
+     * 观察池统一写入口：串行化「读-改-写」，并清理超过保留期的淘汰条目。
+     * [transform] 在锁内基于最新池计算，避免复评协程用旧快照覆盖并发新增的候选。
+     */
+    private fun commitObservationPool(
+        onCommitted: (before: List<ObservationCandidate>, after: List<ObservationCandidate>) -> Unit =
+            { _, _ -> },
+        transform: (List<ObservationCandidate>) -> List<ObservationCandidate>,
+    ) {
+        val committed = synchronized(observationPoolLock) {
+            val current = store.observationPool
+            val updated = ObservationPoolRetentionPolicy.prune(
+                transform(current.toList()),
+                TimeUtils.todayText(),
+            )
+            if (updated == current) return@synchronized null
+            store.observationPool = updated.toMutableList()
+            Repo.observationPool = updated
+            onCommitted(current, updated)
+            updated
+        } ?: return
+        // 通知放在锁外：监听方可能重建整页 UI，不该阻塞其它入池/复评写入。
+        Repo.notifyChanged()
+    }
+
+    private fun addLaunchCandidate(code: String, name: String, price: Double, platform: Double) {
+        val today = TimeUtils.todayText()
+        val candidate =
+            ObservationCandidate(
+                code = code,
+                name = name,
+                addedDate = today,
+                lastEvaluatedDate = null,
+                stage = ObservationStage.OBSERVING,
+                score = 0,
+                weakDays = 0,
+                lastPrice = price,
+                source = LAUNCH_DISCOVERY_SOURCE,
+                sources = setOf(LAUNCH_DISCOVERY_SOURCE),
+                reason = String.format(
+                    java.util.Locale.CHINA,
+                    "突破20日平台 %.2f 并站稳15分钟，等待回踩承接确认",
+                    platform,
+                ),
+                strategy = ObservationStrategy.PRE_BREAKOUT,
+            )
+        val key = observationKey(candidate)
+        commitObservationPool(
+            onCommitted = { before, after -> ObsPoolTrace.poolAdd("launch", today, before, after) },
+        ) { pool ->
+            val existing = pool.associateBy(::observationKey).toMutableMap()
+            val previous = existing[key]
+            when {
+                previous == null -> existing[key] = candidate
+                // 淘汰后重新被发现：复活并开启新一轮观察，而不是永久跳过。
+                previous.stage == ObservationStage.ELIMINATED ->
+                    existing[key] = ObservationReentryPolicy.revive(previous, candidate)
+                else -> return@commitObservationPool pool
+            }
+            existing.values.sortedWith(
+                compareBy<ObservationCandidate> { it.stage == ObservationStage.ELIMINATED }
+                    .thenByDescending { it.lastEvaluatedDate ?: it.addedDate },
+            )
+        }
     }
 
     private fun refreshFundFlowHistory(codes: List<String>) {
@@ -1363,7 +1605,7 @@ class MonitorService : Service() {
                         dailyEscalated -> "⚠️ ${quote.name} 日内跌幅预警"
                         else -> "⚡ ${quote.name} 急跌预警"
                     }
-                Notifier.alert(this, ALERT_ID_DROP + code.hashCode(), title, text)
+                Notifier.alert(this, NotificationIds.of(ALERT_ID_DROP, code), title, text)
                 stockDropAlertLastAt[code] = now
             }
             if (dailyLevel != StockDropLevel.NONE) {
@@ -1592,15 +1834,28 @@ class MonitorService : Service() {
                     )
             }
         }
+        val heldCodes = StockAlertScope.heldCodes(store.portfolio.positions)
         dipReboundEngine.update(samples, today).forEach { alert ->
-            if (alert.stock && alert.code !in StockAlertScope.heldCodes(store.portfolio.positions)) return@forEach
-            if (!consumePushBudget(alert.code)) return@forEach
-            val id = ALERT_ID_REBOUND + alert.code.hashCode()
-            when {
-                !alert.vibrate -> Notifier.alert(this, id, alert.title, alert.body)
-                alert.stock -> Notifier.signal(this, id, alert.title, alert.body)
-                else -> Notifier.marketRisk(this, id, alert.title, alert.body)
+            val id = NotificationIds.of(ALERT_ID_REBOUND, alert.code)
+            if (!alert.stock) {
+                if (alert.vibrate) {
+                    Notifier.marketRisk(this, id, alert.title, alert.body)
+                } else {
+                    Notifier.alert(this, id, alert.title, alert.body)
+                }
+                return@forEach
             }
+            if (alert.code !in heldCodes) return@forEach
+            sendCheckedAlert(
+                type = "dipRebound",
+                code = alert.code,
+                id = id,
+                title = alert.title,
+                body = alert.body,
+                signal = alert.vibrate,
+                // 同一坑只发一次；创更深的新低是新事件，引擎允许当日 3 次。
+                eventKey = AlertEventKeys.dipRebound(alert.lowPct),
+            )
         }
     }
 
@@ -1652,14 +1907,25 @@ class MonitorService : Service() {
             )
         }
         reboundTracker.update(samples, today).forEach { event ->
-            if (!StockAlertScope.shouldNotify(StockAlertType.REBOUND_TRACKING, event.held)) return@forEach
-            if (!consumePushBudget(event.code)) return@forEach
-            val id = ALERT_ID_REBOUND_TRACK + event.code.hashCode()
-            if (event.vibrate) {
-                Notifier.signal(this, id, event.title, event.body)
-            } else {
-                Notifier.alert(this, id, event.title, event.body)
+            if (!StockAlertScope.shouldNotify(
+                    StockAlertType.REBOUND_TRACKING,
+                    event.held,
+                    watchlistEnabled = store.watchlistIntradayAlerts,
+                )
+            ) {
+                return@forEach
             }
+            sendCheckedAlert(
+                type = "reboundTrack",
+                code = event.code,
+                id = NotificationIds.of(ALERT_ID_REBOUND_TRACK, event.code),
+                title = event.title,
+                body = event.body,
+                signal = event.vibrate && event.held,
+                // 企稳确认 / 缩量观察 / 抛压 / 诱多失效是不同事件，各自保留当日额度；
+                // 不能被上午的“企稳确认”把下午的“反弹失效”永久吞掉。
+                eventKey = AlertEventKeys.reboundTrack(event.kind),
+            )
         }
     }
 
@@ -1671,14 +1937,53 @@ class MonitorService : Service() {
             !TradingCalendar.inMarketHoursForAlert(calendar)
         ) return
         val today = TimeUtils.todayText()
+        // 用指数日线的真实交易日序列计算首板窗口：法定节假日不算交易日。
+        val tradingDates = observationBenchmark()?.map { it.date }.orEmpty().also {
+            if (it.isNotEmpty()) Repo.marketTradingDates = it
+        }
+        val qualityByCode = mutableMapOf<String, BuyPointFundFlowPolicy.Decision>()
         val candidates = store.observationPool.asSequence()
             .filter { candidate ->
-                candidate.strategy in setOf(ObservationStrategy.LEADER, ObservationStrategy.LIMIT_UP_CONTINUATION) &&
-                    candidate.limitStreak == 1 && candidate.observedDays in 1..3 &&
-                    candidate.stage != ObservationStage.ELIMINATED
+                val windowOk = candidate.limitStreak == 1 &&
+                    FirstBoardReclaimPolicy.windowEligible(
+                        FirstBoardClockPolicy.effectiveBoardDate(candidate),
+                        candidate.observedDays,
+                        today,
+                        tradingDates,
+                    )
+                val reason = when {
+                    candidate.strategy !in RECLAIM_STRATEGIES -> "strategy=${candidate.strategy}"
+                    candidate.limitStreak != 1 -> "streak=${candidate.limitStreak}"
+                    !windowOk -> FirstBoardReclaimPolicy.describeWindow(
+                        FirstBoardClockPolicy.effectiveBoardDate(candidate),
+                        candidate.observedDays,
+                        today,
+                        tradingDates,
+                    )
+                    candidate.stage == ObservationStage.ELIMINATED -> "eliminated"
+                    else -> null
+                }
+                ObsPoolTrace.reclaimGate(
+                    today, candidate.code, candidate.name, reason == null, reason ?: "ok",
+                )
+                reason == null
             }
             .mapNotNull { candidate ->
-                val quote = currentQuotes[candidate.code]?.takeIf { it.quoteDate == today } ?: return@mapNotNull null
+                val quote = currentQuotes[candidate.code]?.takeIf { it.quoteDate == today }
+                    ?: run {
+                        ObsPoolTrace.reclaimGate(today, candidate.code, candidate.name, false, "staleQuote")
+                        return@mapNotNull null
+                    }
+                val bias = ma5BiasPct(candidate.code, quote.price, today)
+                if (!FirstBoardReclaimPolicy.withinPriceBound(bias)) {
+                    ObsPoolTrace.reclaimGate(
+                        today, candidate.code, candidate.name, false,
+                        String.format(java.util.Locale.CHINA, "bias=%.2f%%", bias),
+                    )
+                    return@mapNotNull null
+                }
+                // 价格形态转强还不够：主力是否在借反弹出货、有没有资金承接，决定要不要打扰用户。
+                qualityByCode[candidate.code] = buyPointFundFlowDecision(candidate.code, quote)
                 FirstBoardReclaimTracker.Sample(
                     code = candidate.code,
                     name = candidate.name,
@@ -1690,13 +1995,47 @@ class MonitorService : Service() {
                     timestamp = System.currentTimeMillis(),
                     recentFirstBoard = true,
                     limitUp = ObservationEligibility.isAtLimitUp(candidate.code, candidate.name, quote),
+                    biasFromMa5Pct = bias,
                 )
             }
         candidates.forEach { sample ->
             val alert = firstBoardReclaimTracker.update(sample) ?: return@forEach
-            if (!consumePushBudget(alert.code)) return@forEach
-            Notifier.alert(this, ALERT_ID_FIRST_BOARD_RECLAIM + alert.code.hashCode(), alert.title, alert.body)
+            val quality = qualityByCode[sample.code]
+            if (quality != null && !quality.allow) {
+                // 形态满足但资金在出货且无承接：回滚 emitted，资金转好后同一形态仍可再报。
+                firstBoardReclaimTracker.rearm(sample.code)
+                ObsPoolTrace.reclaimGate(today, sample.code, sample.name, false, "fundFlow")
+                return@forEach
+            }
+            val posted =
+                sendCheckedAlert(
+                    type = "firstBoardReclaim",
+                    code = alert.code,
+                    id = NotificationIds.of(ALERT_ID_FIRST_BOARD_RECLAIM, alert.code),
+                    title = alert.title,
+                    body = alert.body + (quality?.let { "｜资金：${it.evidence}；${it.reason}" } ?: ""),
+                    signal = false,
+                )
+            if (!posted) {
+                firstBoardReclaimTracker.rearm(alert.code)
+                return@forEach
+            }
+            ObsPoolTrace.reclaimAlert(today, alert.code, sample.price)
         }
+    }
+
+    /**
+     * 首板观察的价格边界：用当日已缓存的日线计算动态 MA5 乖离。
+     * 缓存缺失时返回 null，由 [FirstBoardReclaimPolicy.withinPriceBound] 按“数据缺失”处理，
+     * 不把缺失当成 0%。
+     */
+    private fun ma5BiasPct(code: String, price: Double, today: String): Double? {
+        if (!price.isFinite() || price <= 0.0) return null
+        val history = observationHistory[code]?.takeIf { it.first == today }?.second ?: return null
+        if (history.size < 4) return null
+        val ma5 = (history.takeLast(4).sumOf { it.close } + price) / 5.0
+        if (!ma5.isFinite() || ma5 <= 0.0) return null
+        return (price / ma5 - 1.0) * 100.0
     }
 
     /**
@@ -1740,8 +2079,23 @@ class MonitorService : Service() {
             },
             today,
         ).forEach { event ->
-            if (!StockAlertScope.shouldNotify(StockAlertType.SEAL_SPRINT, event.held)) return@forEach
-            Notifier.signal(this, ALERT_ID_SEAL_SPRINT + event.code.hashCode(), event.title, event.body)
+            if (!StockAlertScope.shouldNotify(
+                    StockAlertType.SEAL_SPRINT,
+                    event.held,
+                    watchlistEnabled = store.watchlistIntradayAlerts,
+                )
+            ) {
+                return@forEach
+            }
+            sendCheckedAlert(
+                type = "sealSprint",
+                code = event.code,
+                id = NotificationIds.of(ALERT_ID_SEAL_SPRINT, event.code),
+                title = event.title,
+                body = event.body,
+                signal = event.held,
+                consumeBudget = false,
+            )
         }
 
         limitSealTracker.update(
@@ -1759,13 +2113,23 @@ class MonitorService : Service() {
             },
             today,
         ).forEach { event ->
-            if (!StockAlertScope.shouldNotify(StockAlertType.SEAL_STATUS, event.held)) return@forEach
-            val id = ALERT_ID_SEAL + event.code.hashCode()
-            if (event.vibrate) {
-                Notifier.signal(this, id, event.title, event.body)
-            } else {
-                Notifier.alert(this, id, event.title, event.body)
+            if (!StockAlertScope.shouldNotify(
+                    StockAlertType.SEAL_STATUS,
+                    event.held,
+                    watchlistEnabled = store.watchlistIntradayAlerts,
+                )
+            ) {
+                return@forEach
             }
+            sendCheckedAlert(
+                type = "sealStatus-${event.kind.name}",
+                code = event.code,
+                id = NotificationIds.of(ALERT_ID_SEAL, event.code),
+                title = event.title,
+                body = event.body,
+                signal = event.vibrate && event.held,
+                consumeBudget = false,
+            )
         }
     }
 
@@ -1791,6 +2155,70 @@ class MonitorService : Service() {
         if (code in MARKET_INDEX_CODES) return
         val used = dailyPushCount[code] ?: return
         if (used <= 1) dailyPushCount.remove(code) else dailyPushCount[code] = used - 1
+    }
+
+    /**
+     * 统一提醒投递：开关 → 行情新鲜度 → 当日事件去重 → 推送预算 → 投递。
+     *
+     * 去重键在投递前同步落盘（重启后仍生效）；投递失败或预算不足时回滚，
+     * 下一轮满足条件可以重试。`signal=false` 走普通通知，不占用震动通道。
+     */
+    private fun sendCheckedAlert(
+        type: String,
+        code: String,
+        id: Int,
+        title: String,
+        body: String,
+        signal: Boolean,
+        quoteFresh: Boolean = true,
+        consumeBudget: Boolean = true,
+        /**
+         * 当日事件身份。默认 `type`（每码每天一次）；下探回升按低点、反弹跟踪按事件类型
+         * 传入更细的键——它们的引擎本身允许同日多次，不能被“每日一次”压掉。
+         */
+        eventKey: String = type,
+    ): Boolean {
+        if (!store.alertsEnabled) return false
+        if (signal && !store.intradaySignalEnabled) return false
+        val today = TimeUtils.todayText()
+        val key = "$eventKey:$code"
+        val reserved = store.reserveAlertEventKey("$today:$key", today)
+        val budgetOk = if (reserved && consumeBudget) consumePushBudget(code) else true
+        val decision =
+            AlertOrchestrator.decide(
+                AlertOrchestrator.Input(
+                    alertsEnabled = store.alertsEnabled,
+                    intradayEnabled = if (signal) store.intradaySignalEnabled else true,
+                    quoteFresh = quoteFresh,
+                    duplicate = !reserved,
+                    budgetAvailable = budgetOk,
+                ),
+            )
+        if (decision != AlertOrchestrator.Decision.SEND) {
+            if (reserved) store.releaseAlertEventKey("$today:$key", today)
+            // 行情过期时预算已经扣过，必须回滚；SKIP_DUPLICATE 没扣、SKIP_BUDGET 没扣成功。
+            if (decision == AlertOrchestrator.Decision.SKIP_STALE && reserved && consumeBudget) {
+                refundPushBudget(code)
+            }
+            when (decision) {
+                AlertOrchestrator.Decision.SKIP_DUPLICATE -> ObsPoolTrace.deliveryDuplicate(type, today, code)
+                AlertOrchestrator.Decision.SKIP_BUDGET -> ObsPoolTrace.reclaimBudgetBlocked(today, code)
+                else -> Unit
+            }
+            return false
+        }
+        val posted =
+            if (signal) {
+                Notifier.signal(this, id, title, body)
+            } else {
+                Notifier.alert(this, id, title, body)
+            }
+        if (!posted) {
+            store.releaseAlertEventKey("$today:$key", today)
+            if (consumeBudget) refundPushBudget(code)
+            ObsPoolTrace.deliveryFailed(type, today, code)
+        }
+        return posted
     }
 
     /**
@@ -1892,36 +2320,45 @@ class MonitorService : Service() {
             .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
     }
 
-    /** 持仓盘中量价异动：独立于交易动作链路，只报告量价事实。 */
+    /**
+     * 盘中量价异动：持仓 + 自选 + 观察池同一套检测，只报告量价事实。
+     * 持仓沿用点火/异动分级；非持仓仅在开启“自选股盘中提醒”时，推“强”级别并占统一预算。
+     */
     private fun checkVolumePriceAnomalies(
         calendar: Calendar,
         currentQuotes: Map<String, Quote>,
     ) {
         if (!store.alertsEnabled) return
         val heldCodes = StockAlertScope.heldCodes(store.portfolio.positions)
-        if (heldCodes.isEmpty() || !TradingCalendar.inMarketHoursForAlert(calendar)) return
+        val watchCodes = store.watchlist
+            .map { it.code }
+            .filter { !it.startsWith("sh000") && !it.startsWith("sz399") }
+        val observationCodes = store.observationPool
+            .filter { it.stage != ObservationStage.ELIMINATED }
+            .map { it.code }
+        val scopeCodes = (heldCodes + watchCodes + observationCodes).distinct()
+        if (scopeCodes.isEmpty() || !TradingCalendar.inMarketHoursForAlert(calendar)) return
         val nowMs = System.currentTimeMillis()
         val needsFundFlowRefresh =
-            heldCodes.any { intradayFundFlowTracker.context(it) == null } ||
+            scopeCodes.any { intradayFundFlowTracker.context(it) == null } ||
                 nowMs - lastVolumePriceFundFlowRefreshAtMs.get() >= 60_000L
         if (needsFundFlowRefresh) {
             lastVolumePriceFundFlowRefreshAtMs.set(nowMs)
-            refreshFundFlowHistory(heldCodes.toList())
+            refreshFundFlowHistory(scopeCodes)
         }
         val timestamp = calendar.toInstant()
             .atZone(java.time.ZoneId.systemDefault())
             .toLocalDateTime()
         if (!VolumePriceAnomalyTracker.isDetectionTime(timestamp)) return
         val today = TimeUtils.todayText()
-        for (position in store.portfolio.positions) {
-            if (position.code !in heldCodes) continue
-            val quote = currentQuotes[position.code] ?: continue
+        for (code in scopeCodes) {
+            val quote = currentQuotes[code] ?: continue
             if (quote.quoteDate != today) continue
             val alert =
                 volumePriceAnomalyTracker.update(
                     VolumePriceAnomalyTracker.Sample(
-                        code = position.code,
-                        name = position.name,
+                        code = code,
+                        name = quote.name,
                         price = quote.price,
                         cumulativeVolume = quote.volume,
                         cumulativeTurnover = quote.turnover,
@@ -1929,15 +2366,22 @@ class MonitorService : Service() {
                         timestamp = timestamp,
                     ),
                     today,
-                    intradayFundFlowTracker.context(position.code),
+                    intradayFundFlowTracker.context(code),
                 ) ?: continue
-            volumePriceAnomalyAtMs[position.code] = nowMs
-            val id = ALERT_ID_VOLUME_PRICE_ANOMALY + position.code.hashCode()
-            if (alert.strong) {
-                Notifier.intradayIgnition(this, id, alert.title, alert.body)
-            } else {
-                Notifier.volumePriceAnomaly(this, id, alert.title, alert.body)
+            volumePriceAnomalyAtMs[code] = nowMs
+            val id = NotificationIds.of(ALERT_ID_VOLUME_PRICE_ANOMALY, code)
+            if (code in heldCodes) {
+                if (alert.strong) {
+                    Notifier.intradayIgnition(this, id, alert.title, alert.body)
+                } else {
+                    Notifier.volumePriceAnomaly(this, id, alert.title, alert.body)
+                }
+                continue
             }
+            if (!store.watchlistIntradayAlerts || !alert.strong) continue
+            if (!consumePushBudget(code)) continue
+            val posted = Notifier.alert(this, id, alert.title, alert.body)
+            if (!posted) refundPushBudget(code)
         }
     }
 
@@ -2002,6 +2446,13 @@ class MonitorService : Service() {
             }
             updateStrongContinuationEventCurrentPrice(position.code, quote.price)
             val level = levels[position.code]
+            // 跨日旧分析结果：支撑/MA20/入场结构都是昨天的，不能据此生成盘中点位。
+            if (level != null && !com.example.stockmonitor.analysis.IntradayLevelFreshness
+                    .usable(level.analysisDate, today)
+            ) {
+                intradaySignalState.clearPending(position.code)
+                continue
+            }
             val breakObservation =
                 HoldingAnalyzer.holdingBreakTracker.observe(
                     quote,
@@ -2298,6 +2749,22 @@ class MonitorService : Service() {
                 publishExitReview(today, position.code, position.name, guarded, timeframeEvidence)
                 continue
             }
+            // 「破位提示」是 NOTICE 缓释档：只报告风险事实，不生成卖量，也不占机会类预算。
+            // 此前 RISK_FACT 被 ACTIONABLE 过滤掉，导致这一档在 UI 可见但从不通知。
+            if (guarded.level == GuardedActionLevel.RISK_FACT &&
+                signal.type == IntradaySignalType.BREAK_NOTICE
+            ) {
+                sendCheckedAlert(
+                    type = "breakNotice",
+                    code = position.code,
+                    id = NotificationIds.of(ALERT_ID_SIGNAL, "breakNotice|${position.code}"),
+                    title = signal.title,
+                    body = guarded.text,
+                    signal = false,
+                    consumeBudget = false,
+                )
+                continue
+            }
             if (guarded.level != GuardedActionLevel.ACTIONABLE) continue
             // 同一「放量」事件去重：量价异动通道刚提醒过的，短窗内不再从 BREAKOUT 通道
             // 重复推送——两套量能基准（3×短窗均量 vs 量比1.3/20日均量）相互独立，
@@ -2351,7 +2818,16 @@ class MonitorService : Service() {
             // 风险提醒（破位）永远发、不占预算：预算只挡机会类提示，绝不能把风险提示吞掉。
             // 持仓复查放在扣预算之前：复评中途清仓时预算不能白扣一条。
             if (position.code !in StockAlertScope.heldCodes(store.portfolio.positions)) continue
-            if (riskSignal || (store.intradaySignalEnabled && consumePushBudget(position.code))) {
+            var budgetConsumed = false
+            val allowed = if (riskSignal) {
+                true
+            } else if (store.intradaySignalEnabled) {
+                budgetConsumed = consumePushBudget(position.code)
+                budgetConsumed
+            } else {
+                false
+            }
+            if (allowed) {
                 val advice = when {
                     guarded.action == GuardedAction.RISK_EXIT -> AdviceDirection.SELL to AdviceKind.EXIT
                     guarded.action == GuardedAction.RISK_REDUCE -> AdviceDirection.SELL to AdviceKind.REDUCE
@@ -2383,6 +2859,7 @@ class MonitorService : Service() {
                     currentQuantity = position.quantity,
                     title = signal.title,
                     riskPriority = TradeNotification.riskPriority(guarded),
+                    riskStage = riskStage,
                 ) { quantity, continuity ->
                     val finalAction = TradeNotification.intradayGuarded(tacticsInput, signal, timeframeReason, quantity)
                     if (finalAction.level != GuardedActionLevel.ACTIONABLE) return@publishDailyAdvice false
@@ -2393,15 +2870,30 @@ class MonitorService : Service() {
                         quantity = finalAction.maxSellQuantity,
                     ) else null
                     val notificationBody = finalAction.text +
-                        estimate?.let { "｜${TradeNotification.sellEstimateText(it)}" }.orEmpty() + "｜$continuity"
+                        estimate?.let { "｜${TradeNotification.sellEstimateText(it)}" }.orEmpty() + "｜$continuity" +
+                        levelFreshnessNote(level)
                     if (riskSignal) {
-                        Notifier.riskSell(this, ALERT_ID_SIGNAL + key.hashCode(), signal.title, notificationBody)
+                        Notifier.riskSell(
+                            this,
+                            NotificationIds.of(ALERT_ID_SIGNAL, key),
+                            signal.title,
+                            notificationBody,
+                        )
                     } else {
-                        Notifier.signal(this, ALERT_ID_SIGNAL + key.hashCode(), signal.title, notificationBody)
+                        Notifier.signal(
+                            this,
+                            NotificationIds.of(ALERT_ID_SIGNAL, key),
+                            signal.title,
+                            notificationBody,
+                        )
                     }
                 }
                 if (posted) {
                     intradaySignalState.commit(position.code, signal.type, now, riskSignal, riskStage)
+                } else if (budgetConsumed) {
+                    // 计划互斥/复核态/数量不足等失败会每 tick 重试；预算必须回滚，
+                    // 否则 8 条/日配额会在 2 分钟内被无效重试耗光。
+                    refundPushBudget(position.code)
                 }
             }
         }
@@ -2425,6 +2917,8 @@ class MonitorService : Service() {
     ) {
         val swing = plan?.rows?.firstOrNull { it.code == position.code && it.addQuantity > 0.0 }
         val support = level?.support?.takeIf { it.isFinite() && it > 0.0 } ?: return clearIntradayAdditionSamples(position.code)
+        // 支撑位来自 30 分钟槽位的持仓分析：超龄时不再据此生成“补仓”建议，避免拿半小时前的位置下单。
+        if (levelStale(level)) return clearIntradayAdditionSamples(position.code)
         val stop = swing?.riskPrice?.takeIf { it.isFinite() && it > 0.0 }
             ?: level?.entrySetup?.stopPrice?.takeIf { it.isFinite() && it > 0.0 }
         val pressure = swing?.target?.takeIf { it.isFinite() && it > 0.0 }
@@ -2460,6 +2954,7 @@ class MonitorService : Service() {
             baselineAddQuantity = swing.addQuantity,
             maxQuantityAtHighestPrice = swing.addQuantity,
             riskRewardApproved = swing.rewardRisk?.let { it >= PortfolioSwing.MIN_REWARD_RISK } == true,
+            availableCapital = store.portfolio.resolvedAvailableCapital(),
             portfolioFingerprint = portfolioFingerprint,
             evaluationFingerprint = evaluationFingerprint,
         )
@@ -2568,13 +3063,21 @@ class MonitorService : Service() {
             if (finalGuarded.level != GuardedActionLevel.ACTIONABLE || finalGuarded.maxBuyQuantity < finalQuantity) {
                 return@publishDailyAdvice false
             }
+            // 最终投递前再核一次可用现金：计划生成后到发布之间可能已用掉现金。
+            val estimatedCost = finalQuantity * quote.price
+            val feeReserve = maxOf(5.0, estimatedCost * 0.001)
+            if (!estimatedCost.isFinite() ||
+                estimatedCost + feeReserve > store.portfolio.resolvedAvailableCapital() + 0.01
+            ) {
+                return@publishDailyAdvice false
+            }
             val body = String.format(
                 Locale.CHINA,
                 "报价时间 %s｜现价 %.2f｜允许买入区间 %.2f～%.2f｜最高接受价 %.2f｜建议数量 %.0f 股｜投入约 %.2f 元｜跌破 %.2f 失效",
                 TimeUtils.clockText(), quote.price, lower, upper, decision.acceptedPrice ?: upper,
                 finalQuantity, finalQuantity * quote.price, stop,
             ) + "｜$continuity"
-            Notifier.signal(this, ALERT_ID_SIGNAL + position.code.hashCode(), title, body)
+            Notifier.signal(this, NotificationIds.of(ALERT_ID_SIGNAL, position.code), title, body)
         }
     }
 
@@ -2585,6 +3088,20 @@ class MonitorService : Service() {
     private fun parseAnalysisTimeMs(value: String): Long? {
         val normalized = value.trim().let { if (it.length == 16) "$it:00" else it }
         return TimeUtils.parseDateTime(normalized)?.time
+    }
+
+    /** 持仓分析给出的支撑/压力超过 [StrategyThresholds.LEVEL_MAX_AGE_MS] 即标注来源时间。 */
+    private fun levelFreshnessNote(level: com.example.stockmonitor.analysis.PositionResult?): String {
+        level ?: return ""
+        val at = parseAnalysisTimeMs(level.analyzedAt) ?: return ""
+        if (System.currentTimeMillis() - at <= StrategyThresholds.LEVEL_MAX_AGE_MS) return ""
+        return "｜支撑/压力来自 ${level.analyzedAt.substringAfter(' ')}，已超过 35 分钟，注意位置变化"
+    }
+
+    private fun levelStale(level: com.example.stockmonitor.analysis.PositionResult?): Boolean {
+        level ?: return false
+        val at = parseAnalysisTimeMs(level.analyzedAt) ?: return false
+        return System.currentTimeMillis() - at > StrategyThresholds.LEVEL_MAX_AGE_MS
     }
 
     private fun quoteAgeMs(quoteDate: String, nowMs: Long): Long {
@@ -2883,7 +3400,6 @@ class MonitorService : Service() {
         allowRevive: Boolean = true,
         includePatterns: Boolean = true,
     ) {
-        val existing = store.observationPool.associateBy(::observationKey).toMutableMap()
         val today = TimeUtils.todayText()
         val candidates =
             buildList {
@@ -2953,158 +3469,219 @@ class MonitorService : Service() {
                     )
                 }
             }
-        candidates.groupBy(::observationKey).forEach { (key, currentRoutes) ->
-            val previous = existing[key]
-            val mergedSources = ObservationEligibility.mergeScreenSources(
-                current = currentRoutes.flatMap { it.allSources },
-                previous = previous?.allSources.orEmpty(),
-                includePatterns = includePatterns,
-            )
-            val currentPattern = ObservationEligibility.PATTERN_SOURCE in mergedSources
-            val previousPattern = previous?.allSources?.contains(ObservationEligibility.PATTERN_SOURCE) == true
-            val patternObservedDays = if (currentPattern && previousPattern) {
-                previous?.sourceObservedDays ?: 0
-            } else {
-                0
-            }
-            val base = currentRoutes.firstOrNull {
-                ObservationEligibility.PATTERN_SOURCE !in it.allSources
-            } ?: currentRoutes.first()
-            val merged = base.copy(
-                source = base.source,
-                sources = mergedSources.toCollection(linkedSetOf()),
-                sourceExpiresAtMs = 0L,
-                sourceValidTradingDays = if (currentPattern) {
-                    FIVE_ONE_THREE_SOURCE_VALID_TRADING_DAYS
-                } else {
-                    0
-                },
-                sourceObservedDays = patternObservedDays,
-            )
-            existing[key] = when {
-                previous == null -> merged
-                previous.stage == ObservationStage.ELIMINATED && allowRevive ->
-                    ObservationReentryPolicy.revive(previous, merged).copy(
+        commitObservationPool { pool ->
+            val existing = pool.associateBy(::observationKey).toMutableMap()
+            candidates.groupBy(::observationKey).forEach { (key, currentRoutes) ->
+                val previous = existing[key]
+                val mergedSources = ObservationEligibility.mergeScreenSources(
+                    current = currentRoutes.flatMap { it.allSources },
+                    previous = previous?.allSources.orEmpty(),
+                    includePatterns = includePatterns,
+                )
+                val currentScanPattern = currentRoutes.any {
+                    ObservationEligibility.PATTERN_SOURCE in it.allSources
+                }
+                val previousPattern = previous?.allSources?.contains(ObservationEligibility.PATTERN_SOURCE) == true
+                // currentRoutes 才是本轮扫描真实命中的来源；mergedSources 会保留上一轮来源，
+                // 拿它判断“本轮命中”会让 513 连续命中时 sourceObservedDays 永不重置，
+                // 每 3 个观察日被淘汰一次、晚上又被扫描复活。
+                val patternObservedDays = when {
+                    currentScanPattern -> 0
+                    previousPattern -> previous?.sourceObservedDays ?: 0
+                    else -> 0
+                }
+                val base = currentRoutes.firstOrNull {
+                    ObservationEligibility.PATTERN_SOURCE !in it.allSources
+                } ?: currentRoutes.first()
+                val merged = base.copy(
+                    source = base.source,
+                    sources = mergedSources.toCollection(linkedSetOf()),
+                    sourceExpiresAtMs = 0L,
+                    sourceValidTradingDays = when {
+                        currentScanPattern -> FIVE_ONE_THREE_SOURCE_VALID_TRADING_DAYS
+                        previousPattern -> previous?.sourceValidTradingDays ?: 0
+                        else -> 0
+                    },
+                    sourceObservedDays = patternObservedDays,
+                )
+                existing[key] = when {
+                    previous == null -> merged
+                    previous.stage == ObservationStage.ELIMINATED && allowRevive ->
+                        ObservationReentryPolicy.revive(previous, merged).copy(
+                            sources = mergedSources.toCollection(linkedSetOf()),
+                            sourceExpiresAtMs = 0L,
+                            sourceValidTradingDays = merged.sourceValidTradingDays,
+                            sourceObservedDays = patternObservedDays,
+                        )
+                    else -> previous.copy(
+                        source = base.source,
                         sources = mergedSources.toCollection(linkedSetOf()),
                         sourceExpiresAtMs = 0L,
                         sourceValidTradingDays = merged.sourceValidTradingDays,
                         sourceObservedDays = patternObservedDays,
                     )
-                else -> previous.copy(
-                    source = base.source,
-                    sources = mergedSources.toCollection(linkedSetOf()),
-                    sourceExpiresAtMs = 0L,
-                    sourceValidTradingDays = merged.sourceValidTradingDays,
-                    sourceObservedDays = patternObservedDays,
-                )
+                }
             }
-        }
-        val updated =
             existing.values.sortedWith(
                 compareBy<ObservationCandidate> { it.stage == ObservationStage.ELIMINATED }
                     .thenByDescending { it.lastEvaluatedDate ?: it.addedDate },
             )
-        store.observationPool = updated.toMutableList()
-        Repo.observationPool = updated
+        }
     }
 
-    private fun addLeaderCandidates(limitStocks: List<LimitStock>) {
+    /**
+     * 涨停池降级（东财不可用、退回新浪近似）时，连板数 / 封单质量 / 开板次数都缺失：
+     * 这些票只能作为“近似涨停”观察，不能进入首板承接链，也不能写成“今日接近涨停”。
+     */
+    private fun addLeaderCandidates(
+        limitStocks: List<LimitStock>,
+        degraded: Boolean = false,
+    ) {
         if (limitStocks.isEmpty()) return
-        val existing = store.observationPool.associateBy(::observationKey).toMutableMap()
         val today = TimeUtils.todayText()
-        limitStocks.sortedByDescending { it.pct }.take(MAX_LEADER_CANDIDATES).forEach { stock ->
-            val candidate =
-                ObservationCandidate(
-                    code = stock.code,
-                    name = stock.name,
-                    addedDate = today,
-                    lastEvaluatedDate = null,
-                    stage = ObservationStage.OBSERVING,
-                    score = 0,
-                    weakDays = 0,
-                    lastPrice = stock.price,
-                    source = "涨停强势",
-                    sources = setOf("涨停强势"),
-                    reason = "今日接近涨停，等待持续性和承接确认",
-                    strategy = ObservationStrategy.LEADER,
-                    limitStreak = stock.limitStreak,
-                    sealQualityScore = stock.sealQualityScore,
-                    sealQualityCoveragePct = stock.sealQualityCoveragePct,
-                    boards = stock.boards,
-                )
-            val key = observationKey(candidate)
-            val previous = existing[key]
-            existing[key] = when {
-                previous == null -> candidate
-                previous.stage == ObservationStage.ELIMINATED ->
-                    ObservationReentryPolicy.revive(previous, candidate)
-                else -> previous.copy(
-                    limitStreak = stock.limitStreak,
-                    sealQualityScore = stock.sealQualityScore,
-                    sealQualityCoveragePct = stock.sealQualityCoveragePct,
-                    boards = stock.boards,
-                )
+        val ordered = LimitCandidateSelection.select(limitStocks)
+        commitObservationPool(
+            onCommitted = { before, after -> ObsPoolTrace.poolAdd("leader", today, before, after) },
+        ) { pool ->
+            val existing = pool.associateBy(::observationKey).toMutableMap()
+            ordered.forEach { stock ->
+                val candidate =
+                    ObservationCandidate(
+                        code = stock.code,
+                        name = stock.name,
+                        addedDate = today,
+                        lastEvaluatedDate = null,
+                        stage = ObservationStage.OBSERVING,
+                        score = 0,
+                        weakDays = 0,
+                        lastPrice = stock.price,
+                        source = if (degraded) "涨停近似" else "涨停强势",
+                        sources = setOf(if (degraded) "涨停近似" else "涨停强势"),
+                        reason = if (degraded) {
+                            "涨停池降级：仅按新浪近似数据观察，封单质量与连板数缺失，不参与首板承接判断"
+                        } else {
+                            "今日接近涨停，等待持续性和承接确认"
+                        },
+                        strategy = ObservationStrategy.LEADER,
+                        limitStreak = if (degraded) null else stock.limitStreak,
+                        firstBoardDate = if (!degraded && stock.limitStreak == 1) today else null,
+                        sealQualityScore = if (degraded) null else stock.sealQualityScore,
+                        sealQualityCoveragePct = if (degraded) null else stock.sealQualityCoveragePct,
+                        boards = stock.boards,
+                    )
+                val key = observationKey(candidate)
+                val previous = existing[key]
+                existing[key] = when {
+                    previous == null -> candidate
+                    previous.stage == ObservationStage.ELIMINATED ->
+                        ObservationReentryPolicy.revive(previous, candidate)
+                    else -> {
+                        // 同一策略行可能经历多轮首板：重新首板时开启新周期，而不是沿用旧 addedDate。
+                        val newCycle = FirstBoardClockPolicy.startsNewCycle(
+                            stock.limitStreak, previous, today, degraded,
+                        )
+                        val base = if (newCycle) {
+                            FirstBoardClockPolicy.startNewCycle(previous, today)
+                        } else {
+                            previous
+                        }
+                        val boardDate = when {
+                            degraded -> previous.firstBoardDate
+                            stock.limitStreak == 1 -> if (newCycle) {
+                                today
+                            } else {
+                                FirstBoardClockPolicy.effectiveBoardDate(previous)
+                            }
+                            else -> previous.firstBoardDate ?: previous.addedDate
+                        }
+                        base.copy(
+                            limitStreak = if (degraded) null else stock.limitStreak,
+                            firstBoardDate = boardDate,
+                            sealQualityScore = if (degraded) null else stock.sealQualityScore,
+                            sealQualityCoveragePct = if (degraded) null else stock.sealQualityCoveragePct,
+                            boards = stock.boards,
+                        )
+                    }
+                }
             }
-        }
-        val updated =
             existing.values.sortedWith(
                 compareBy<ObservationCandidate> { it.stage == ObservationStage.ELIMINATED }
                     .thenByDescending { it.lastEvaluatedDate ?: it.addedDate },
             )
-        store.observationPool = updated.toMutableList()
-        Repo.observationPool = updated
+        }
     }
 
     private fun addLimitContinuationCandidates(limitStocks: List<LimitStock>) {
         if (limitStocks.isEmpty()) return
-        val existing = store.observationPool.associateBy(::observationKey).toMutableMap()
         val today = TimeUtils.todayText()
-        limitStocks.forEach { stock ->
-            // 连板持续路线与强势龙头路线各自保留状态和确认轮次；展示层按策略分开呈现。
-            val candidate =
-                ObservationCandidate(
-                    code = stock.code,
-                    name = stock.name,
-                    addedDate = today,
-                    lastEvaluatedDate = null,
-                    stage = ObservationStage.OBSERVING,
-                    score = 0,
-                    weakDays = 0,
-                    lastPrice = stock.price,
-                    source = "涨停持续观察",
-                    sources = setOf("涨停持续观察"),
-                    reason = ObservationEligibility.CONTINUOUS_LIMIT_WAIT_REASON,
-                    strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
-                    continuousObservation = true,
-                    limitUpBlocked = true,
-                    limitStreak = stock.limitStreak,
-                    sealQualityScore = stock.sealQualityScore,
-                    sealQualityCoveragePct = stock.sealQualityCoveragePct,
-                    boards = stock.boards,
-                )
-            val key = observationKey(candidate)
-            val previous = existing[key]
-            existing[key] = when {
-                previous == null -> candidate
-                previous.stage == ObservationStage.ELIMINATED ->
-                    ObservationReentryPolicy.revive(previous, candidate)
-                else -> previous.copy(
-                    continuousObservation = true,
-                    limitUpBlocked = true,
-                    limitStreak = stock.limitStreak,
-                    sealQualityScore = stock.sealQualityScore,
-                    sealQualityCoveragePct = stock.sealQualityCoveragePct,
-                    boards = stock.boards,
-                )
+        commitObservationPool(
+            onCommitted = { before, after -> ObsPoolTrace.poolAdd("limitContinuation", today, before, after) },
+        ) { pool ->
+            val existing = pool.associateBy(::observationKey).toMutableMap()
+            limitStocks.forEach { stock ->
+                // 连板持续路线与强势龙头路线各自保留状态和确认轮次；展示层按策略分开呈现。
+                val candidate =
+                    ObservationCandidate(
+                        code = stock.code,
+                        name = stock.name,
+                        addedDate = today,
+                        lastEvaluatedDate = null,
+                        stage = ObservationStage.OBSERVING,
+                        score = 0,
+                        weakDays = 0,
+                        lastPrice = stock.price,
+                        source = "涨停持续观察",
+                        sources = setOf("涨停持续观察"),
+                        reason = ObservationEligibility.CONTINUOUS_LIMIT_WAIT_REASON,
+                        strategy = ObservationStrategy.LIMIT_UP_CONTINUATION,
+                        continuousObservation = true,
+                        limitUpBlocked = true,
+                        limitStreak = stock.limitStreak,
+                        firstBoardDate = if (stock.limitStreak == 1) today else null,
+                        sealQualityScore = stock.sealQualityScore,
+                        sealQualityCoveragePct = stock.sealQualityCoveragePct,
+                        boards = stock.boards,
+                    )
+                val key = observationKey(candidate)
+                val previous = existing[key]
+                existing[key] = when {
+                    previous == null -> candidate
+                    previous.stage == ObservationStage.ELIMINATED ->
+                        ObservationReentryPolicy.revive(previous, candidate)
+                    else -> {
+                        val newCycle = FirstBoardClockPolicy.startsNewCycle(
+                            stock.limitStreak, previous, today, degraded = false,
+                        )
+                        val base = if (newCycle) {
+                            FirstBoardClockPolicy.startNewCycle(previous, today)
+                        } else {
+                            previous
+                        }
+                        val boardDate = when {
+                            stock.limitStreak == 1 -> if (newCycle) {
+                                today
+                            } else {
+                                FirstBoardClockPolicy.effectiveBoardDate(previous)
+                            }
+                            else -> previous.firstBoardDate ?: previous.addedDate
+                        }
+                        base.copy(
+                            continuousObservation = true,
+                            limitUpBlocked = true,
+                            limitStreak = stock.limitStreak,
+                            firstBoardDate = boardDate,
+                            sealQualityScore = stock.sealQualityScore,
+                            sealQualityCoveragePct = stock.sealQualityCoveragePct,
+                            boards = stock.boards,
+                        )
+                    }
+                }
             }
-        }
-        val updated =
             existing.values.sortedWith(
                 compareBy<ObservationCandidate> { it.stage == ObservationStage.ELIMINATED }
                     .thenByDescending { it.lastEvaluatedDate ?: it.addedDate },
             )
-        store.observationPool = updated.toMutableList()
-        Repo.observationPool = updated
+        }
     }
 
     private fun observeCurrentScreen() {
@@ -3120,13 +3697,12 @@ class MonitorService : Service() {
         val migrationDue = current.any {
             it.riskPolicyVersion < ObservationPool.CURRENT_RISK_POLICY_VERSION
         } && lastRiskPolicyMigrationAttemptDate != today
-        val guarded = current
-            .map { ObservationEligibility.expireStaleSource(it, nowMs, today) }
-            .map { ObservationEligibility.applyQuoteGate(it, quotes[it.code]) }
-        if (guarded != current) {
-            store.observationPool = guarded.toMutableList()
-            Repo.observationPool = guarded
-            Repo.notifyChanged()
+        commitObservationPool(
+            onCommitted = { before, after -> ObsPoolTrace.poolRefresh("quoteGate", today, before, after) },
+        ) { pool ->
+            pool
+                .map { ObservationEligibility.expireStaleSource(it, nowMs, today) }
+                .map { ObservationEligibility.applyQuoteGate(it, quotes[it.code]) }
         }
         // 规则升级后即使已收盘也要补一次完整复评，否则旧风险信号会一直留在界面上；
         // 每个交易日最多补试一次，避免盘后逐轮重复打日K接口。
@@ -3273,8 +3849,36 @@ class MonitorService : Service() {
         }
         val buyAlerts = (transitionedBuyAlerts + pendingObservationBuyAlerts.values)
             .distinctBy { ObservationBuyAlert.alertKey(it) }
-        store.observationPool = updated.toMutableList()
-        Repo.observationPool = updated
+        commitObservationPool(
+            onCommitted = { before, after -> ObsPoolTrace.poolRefresh("evaluate", today, before, after) },
+        ) { pool ->
+            // 复评期间可能有新入池候选：只覆盖本轮真正评估过的 key，其余保留最新值；
+            // 并发删除的 key 也不会被本轮的旧快照重新加回来。
+            val evaluatedByKey = updated.associateBy { it.code to it.strategy }
+            pool.map { candidate ->
+                val key = candidate.code to candidate.strategy
+                if (key in accepted) evaluatedByKey[key] ?: candidate else candidate
+            }
+        }
+        // 突破延续下杀：从“没有风险”转为“有风险”时报告一次事实，停止追买。
+        // 走当日事件账本（同股同日一次），不占机会类预算；观察池是用户显式维护的列表，
+        // 不受“自选股盘中提醒”开关限制。
+        accepted.values
+            .filter { candidate ->
+                val previous = currentByKey[candidate.code to candidate.strategy]
+                previous != null && ObservationBreakoutRiskAlert.shouldNotify(previous, candidate)
+            }
+            .forEach { candidate ->
+                sendCheckedAlert(
+                    type = "observationBreakoutRisk",
+                    code = candidate.code,
+                    id = NotificationIds.of(ALERT_ID_OBSERVATION_BREAKOUT_RISK, candidate.code),
+                    title = ObservationBreakoutRiskAlert.title(candidate),
+                    body = ObservationBreakoutRiskAlert.body(candidate),
+                    signal = false,
+                    consumeBudget = false,
+                )
+            }
         val evaluatedSnapshots =
             accepted.values.map { candidate ->
                 val quote = evaluatedQuotes[candidate.code to candidate.strategy]
@@ -3414,6 +4018,23 @@ class MonitorService : Service() {
                 }.mapValues { (code, candidate) ->
                     ObservationEligibility.applyQuoteGate(candidate, Repo.quotes[code] ?: quotes[code])
                 }
+        // 自选股候选同样在“突破转下杀”时报告一次风险事实。
+        accepted.values
+            .filter { candidate ->
+                val previous = currentByCode[candidate.code]
+                previous != null && ObservationBreakoutRiskAlert.shouldNotify(previous, candidate)
+            }
+            .forEach { candidate ->
+                sendCheckedAlert(
+                    type = "observationBreakoutRisk",
+                    code = candidate.code,
+                    id = NotificationIds.of(ALERT_ID_OBSERVATION_BREAKOUT_RISK, candidate.code),
+                    title = ObservationBreakoutRiskAlert.title(candidate),
+                    body = ObservationBreakoutRiskAlert.body(candidate),
+                    signal = false,
+                    consumeBudget = false,
+                )
+            }
         val alertQueuedAtMs = System.currentTimeMillis()
         val transitionedKeys = accepted.values
             .filter { candidate ->
@@ -3513,6 +4134,9 @@ class MonitorService : Service() {
             if (sentKey in sentKeys) continue
             val quote = Repo.quotes[candidate.code] ?: continue
             if (quote.quoteDate != today) continue
+            // 尾盘复核同样先过资金过滤；主力净流出且无承接时不补发。
+            val fundFlow = buyPointFundFlowDecision(candidate.code, quote)
+            if (!fundFlow.allow) continue
             val guarded = guardedObservationBuy(candidate, quote)
             if (guarded.level != GuardedActionLevel.ACTIONABLE) continue
             if (!StockAlertScope.shouldNotify(
@@ -3522,14 +4146,22 @@ class MonitorService : Service() {
                 )
             ) continue
             if (!consumePushBudget(candidate.code)) continue
-            if (!store.reserveCandidateBuyAlertKey(sentKey, today)) continue
-            Notifier.tailObservation(
+            if (!store.reserveCandidateBuyAlertKey(sentKey, today)) {
+                refundPushBudget(candidate.code)
+                continue
+            }
+            val posted = Notifier.tailObservation(
                 context = this,
-                id = ALERT_ID_TAIL_OBSERVATION + candidate.code.hashCode(),
+                id = NotificationIds.of(ALERT_ID_TAIL_OBSERVATION, candidate.code),
                 title = "⏰ 尾盘候选复核｜${candidate.name}",
-                text = ObservationBuyAlert.body(candidate, guarded.text),
+                text = ObservationBuyAlert.body(candidate, guarded.text) +
+                    "｜资金：${fundFlow.evidence}；${fundFlow.reason}",
                 triggerType = "$TAIL_OBSERVATION_TRIGGER:$today:${candidate.code}",
             )
+            if (!posted) {
+                store.releaseCandidateBuyAlertKey(sentKey, today)
+                refundPushBudget(candidate.code)
+            }
         }
     }
 
@@ -3544,6 +4176,62 @@ class MonitorService : Service() {
      * 守卫通过时发送可执行提醒；暂未通过时仍发送一次买点结构确认，并在正文写清缺口。
      * 开关、时段、系统通知权限、预算与去重失败则记录为明确未发送原因，供候选详情展示。
      */
+    /**
+     * 买点类提醒共用的资金承接判断（首板承接观察 + 观察池/自选“买点已确认”）。
+     * 资金流缺失时不硬判出货，具体规则见 [BuyPointFundFlowPolicy]。
+     */
+    private fun buyPointFundFlowDecision(code: String, quote: Quote): BuyPointFundFlowPolicy.Decision =
+        buyPointFundFlowDecision(
+            code = code,
+            price = quote.price,
+            changePct = quote.changePct,
+            quoteDate = quote.quoteDate,
+            volume = quote.volume,
+            turnover = quote.turnover,
+        )
+
+    /**
+     * 买点类提醒共用的资金承接判断（首板承接、启动突破、观察池/自选“买点已确认”）。
+     * 资金流缺失时不硬判出货，具体规则见 [BuyPointFundFlowPolicy]。
+     */
+    private fun buyPointFundFlowDecision(
+        code: String,
+        price: Double,
+        changePct: Double?,
+        quoteDate: String?,
+        volume: Double,
+        turnover: Double,
+    ): BuyPointFundFlowPolicy.Decision {
+        val flow = intradayFundFlowTracker.context(code)
+        val mainForceDirection = runCatching {
+            MainForceDirectionPolicy.assess(
+                changePct = changePct,
+                quoteDate = quoteDate,
+                history = Repo.fundFlowHistory[code].orEmpty(),
+            )
+        }.getOrNull()
+            // 缓存方向不能用来否定今天的行情。
+            ?.takeIf { it.confidence != MainForceConfidence.CACHED }
+            ?.direction
+        val vwap = if (volume > 0.0 && turnover > 0.0) {
+            // 单位异常时（成交量/成交额口径不一致）宁可不用均价，也不能误判所有票都在均价下方。
+            (turnover / volume).takeIf { it.isFinite() && it in price * 0.5..price * 2.0 }
+        } else {
+            null
+        }
+        return BuyPointFundFlowPolicy.assess(
+            BuyPointFundFlowPolicy.Input(
+                price = price,
+                vwap = vwap,
+                volumeRatio = Repo.volumeRatios[code],
+                dayMainNetPct = flow?.dayMainNetPct,
+                recent5MainNetPct = flow?.recent5MainNetPct,
+                recent15MainNetPct = flow?.recent15MainNetPct,
+                mainForceDirection = mainForceDirection,
+            ),
+        )
+    }
+
     private fun deliverObservationBuyAlert(
         candidate: ObservationCandidate,
         quote: Quote,
@@ -3569,6 +4257,14 @@ class MonitorService : Service() {
         if (!TradingCalendar.inObservationBuySignalWindow()) {
             return ObservationAlertAttempt(ObservationAlertState.BLOCKED, "不在 09:45–14:45 买点提醒时段")
         }
+        // 买点确认后先过资金过滤：主力净流出且近端无承接时不打扰，保留待发状态等资金转好。
+        val fundFlow = buyPointFundFlowDecision(candidate.code, quote)
+        if (!fundFlow.allow) {
+            return ObservationAlertAttempt(
+                ObservationAlertState.BLOCKED,
+                "资金过滤：${fundFlow.reason}（${fundFlow.evidence}）",
+            )
+        }
 
         val guardedBuy = guardedObservationBuy(candidate, quote)
         val executionReady = guardedBuy.level == GuardedActionLevel.ACTIONABLE
@@ -3585,9 +4281,10 @@ class MonitorService : Service() {
         }
         val posted = Notifier.signal(
             this,
-            ALERT_ID_OBSERVATION_BUY + ObservationBuyAlert.alertKey(candidate).hashCode(),
+            NotificationIds.of(ALERT_ID_OBSERVATION_BUY, ObservationBuyAlert.alertKey(candidate)),
             ObservationBuyAlert.title(candidate, executionReady),
-            ObservationBuyAlert.body(candidate, guardedBuy.text, executionReady),
+            ObservationBuyAlert.body(candidate, guardedBuy.text, executionReady) +
+                "｜资金：${fundFlow.evidence}；${fundFlow.reason}",
         )
         if (!posted) {
             store.releaseCandidateBuyAlertKey(dedupKey, today)
@@ -3629,10 +4326,9 @@ class MonitorService : Service() {
             }
             return updated to changed
         }
-        val (observation, observationChanged) = applyTo(store.observationPool)
-        if (observationChanged) {
-            store.observationPool = observation.toMutableList()
-            Repo.observationPool = observation
+        commitObservationPool { pool ->
+            val (observation, observationChanged) = applyTo(pool)
+            if (observationChanged) observation else pool
         }
         val (watchlist, watchlistChanged) = applyTo(store.watchlistBuyCandidates)
         if (watchlistChanged) store.watchlistBuyCandidates = watchlist.toMutableList()
@@ -4260,6 +4956,7 @@ class MonitorService : Service() {
             // 本轮取到的实时行情，用来算报告里的「今日盈亏」；取不到的股票会由 DayPnl 标成缺行情。
             val liveQuotes = mutableMapOf<String, Quote>()
             var failedCount = 0
+            val failedNames = mutableListOf<String>()
             val benchmark = runCatching { sina.kline("sh000001", 240) }.getOrNull()
             // 大盘状态整批算一次（MA20/MA60 不用每只股重算），当日涨跌取沪指行情。
             val market = MarketRegime.evaluate(benchmark.orEmpty(), Repo.quotes["sh000001"]?.changePct)
@@ -4286,6 +4983,7 @@ class MonitorService : Service() {
                     )
                 }.onFailure { error ->
                     failedCount++
+                    failedNames.add(position.name)
                     Log.e(TAG, "持仓分析失败 ${position.name}", error)
                     Repo.lastError = "持仓分析 ${position.name}：${error.message}"
                 }
@@ -4386,6 +5084,10 @@ class MonitorService : Service() {
                     swingPlan = swingPlan,
                     strongContinuationEvents = Repo.strongContinuationEvents.filter { it.date == TimeUtils.todayText() },
                     positionAllocations = store.positionAllocations,
+                    expectedPositionCount = portfolio.positions.count {
+                        it.quantity.isFinite() && it.quantity > 0
+                    },
+                    analysisFailures = failedNames,
                     marketEnvironment =
                         run {
                             val recent = turnoverTracker?.recentFullDayTurnoversYi(TimeUtils.todayText()).orEmpty()
@@ -4640,7 +5342,7 @@ class MonitorService : Service() {
         val paused = store.pauseDailyAdviceForExitReview(date, code, System.currentTimeMillis())
         val key = RiskExitReview.evidenceKey(date, evidence)
         if (!exitReviewDedup.shouldEmit(date, code, key) && paused) return
-        val id = ("risk_exit_review|$code").hashCode()
+        val id = NotificationIds.of(ALERT_ID_PORTFOLIO, "riskExitReview|$code")
         val previous = store.alertRecords.lastOrNull { it.kind == "risk_exit_review" && it.notificationId == id }
         val summary = RiskExitReview.evidenceSummary(evidence)
         val comparison = previous?.evidenceSummary?.let {
@@ -4663,6 +5365,7 @@ class MonitorService : Service() {
         currentQuantity: Double,
         title: String,
         riskPriority: Int = 0,
+        riskStage: Int = 0,
         send: (Double, String) -> Boolean,
     ): Boolean {
         if (riskPriority >= 2) return false
@@ -4676,11 +5379,17 @@ class MonitorService : Service() {
             targetQuantity = targetQuantity,
             currentQuantity = currentQuantity,
             riskPriority = riskPriority,
+            riskStage = riskStage,
         )
         if (plan.state == com.example.stockmonitor.analysis.AdvicePlanState.REVIEW_REQUIRED &&
             previous?.state != com.example.stockmonitor.analysis.AdvicePlanState.REVIEW_REQUIRED
         ) {
-            Notifier.alert(this, ALERT_ID_SIGNAL + code.hashCode(), "$code·同日计划待复核", DailyAdvicePolicy.displayText(plan))
+            Notifier.alert(
+                this,
+                NotificationIds.of(ALERT_ID_SIGNAL, "review|$code"),
+                "$code·同日计划待复核",
+                DailyAdvicePolicy.displayText(plan),
+            )
         }
         if (!DailyAdvicePolicy.canNotify(plan)) return false
         if (plan.direction != direction || plan.kind != kind || plan.riskPriority != riskPriority) return false
@@ -4840,31 +5549,36 @@ class MonitorService : Service() {
                 quantity = finalAction.maxSellQuantity,
             ) else null
             val body = String.format(Locale.CHINA, "现价 %.2f｜%s", result.price, finalAction.text) +
-                sellEstimate?.let { "｜${TradeNotification.sellEstimateText(it)}" }.orEmpty() + "｜$continuity"
+                sellEstimate?.let { "｜${TradeNotification.sellEstimateText(it)}" }.orEmpty() + "｜$continuity" +
+                levelFreshnessNote(result)
             if (guarded.action == GuardedAction.RISK_EXIT || guarded.action == GuardedAction.RISK_REDUCE) {
-                Notifier.riskSell(this, ALERT_ID_PORTFOLIO + result.code.hashCode(), title, body)
+                Notifier.riskSell(this, NotificationIds.of(ALERT_ID_PORTFOLIO, result.code), title, body)
             } else {
-                Notifier.alert(this, ALERT_ID_PORTFOLIO + result.code.hashCode(), title, body)
+                Notifier.alert(this, NotificationIds.of(ALERT_ID_PORTFOLIO, result.code), title, body)
             }
         }
         if (!posted) portfolioSignals.remove(result.code)
     }
 
-    /** 每天 16:00 / 18:00 / 21:00 生成盘面总结，只缓存不弹窗。 */
+    /** 每天 16:00 / 18:00 / 21:00 生成盘面总结，只缓存不弹窗；错过整点用“已到槽位且当日未生成”补跑。 */
     private fun autoGenerateSummary(calendar: Calendar = TimeUtils.nowCalendar()) {
+        // 周末不生成；否则 16:00 后每 15 秒失败重试一次（指数行情日期不是今天）。
+        if (TimeUtils.isWeekend(calendar)) return
         val today = TimeUtils.todayText()
+        // 工作日节假日同理：没有今日指数行情时直接跳过，不进入每 15 秒的失败重试。
+        if (Repo.quotes["sh000001"]?.quoteDate?.substringBefore(' ') != today) return
         val hour = TimeUtils.hour(calendar)
         val shouldRun =
-            when (hour) {
-                16 -> store.lastSummaryAfternoon != today
-                18 -> store.lastSummaryDate != today
-                21 -> store.lastSummaryNight != today
-                else -> false
+            when {
+                hour >= 21 && store.lastSummaryNight != today -> 21
+                hour >= 18 && store.lastSummaryDate != today -> 18
+                hour >= 16 && store.lastSummaryAfternoon != today -> 16
+                else -> null
             }
-        if (!shouldRun) return
+        val slot = shouldRun ?: return
         scope.launch {
             if (generateSummary()) {
-                when (hour) {
+                when (slot) {
                     16 -> {
                         store.lastSummaryAfternoon = today
                     }
@@ -4874,7 +5588,9 @@ class MonitorService : Service() {
                     }
 
                     21 -> {
-                        store.lastSummaryDate = null
+                        // 不能置 null：下一 tick 的 hour>=18 条件会立即再次成立，
+                        // 21 点后重复生成一次 18 点总结。
+                        store.lastSummaryDate = today
                         store.lastSummaryNight = today
                     }
                 }
@@ -5022,6 +5738,8 @@ class MonitorService : Service() {
 
     companion object {
         private const val TAG = "StockMonitor"
+        private val RECLAIM_STRATEGIES =
+            setOf(ObservationStrategy.LEADER, ObservationStrategy.LIMIT_UP_CONTINUATION)
         const val ACTION_REFRESH = "com.example.stockmonitor.action.REFRESH"
         const val ACTION_SCREEN = "com.example.stockmonitor.action.SCREEN"
         const val ACTION_SCREEN_FULL = "com.example.stockmonitor.action.SCREEN_FULL"
@@ -5039,7 +5757,6 @@ class MonitorService : Service() {
 
         /** 通知栏顶栏最多同时显示的股票数，超出的用 … 省略。 */
         private const val BAR_QUOTE_LIMIT = 3
-        private const val MAX_LEADER_CANDIDATES = 100
         private const val LEADER_DISTRIBUTION_VOLUME_RATIO = 2.0
         private const val OBSERVATION_INTRADAY_REFRESH_MS = 60_000L
         private const val FIVE_ONE_THREE_SOURCE_VALID_TRADING_DAYS = 3
@@ -5098,6 +5815,18 @@ class MonitorService : Service() {
         private const val ALERT_ID_OBSERVATION_BUY = 8000
         private const val ALERT_ID_TAIL_OBSERVATION = 8200
         private const val ALERT_ID_FIRST_BOARD_RECLAIM = 8400
+        private const val ALERT_ID_LAUNCH_DISCOVERY = 8600
+        /** 观察池/自选候选“突破延续下杀风险”（风险事实，不占机会预算）。 */
+        private const val ALERT_ID_OBSERVATION_BREAKOUT_RISK = 8800
+
+        private const val LAUNCH_UNIVERSE_LIMIT = 200
+        private const val LAUNCH_SCAN_INTERVAL_TICKS = 20
+        private const val LAUNCH_PREFILTER_PCT = 2.5
+        private const val LAUNCH_MAX_FETCH_PER_SCAN = 6
+        private const val LAUNCH_MAX_FETCH_PER_DAY = 60
+        private const val LAUNCH_MAX_ALERTS_PER_DAY = 10
+        private const val LAUNCH_MIN_HISTORY_BARS = 25
+        private const val LAUNCH_DISCOVERY_SOURCE = "启动突破观察"
         private const val TAIL_OBSERVATION_MAX_NOTIFICATIONS = 3
         private const val TAIL_OBSERVATION_TRIGGER = "tail_observation"
         /** 14:55 后用接近收盘的价格结算弱势日；此前盘中走弱只影响即时降档。 */

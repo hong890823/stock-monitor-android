@@ -118,6 +118,43 @@ class IntradayAdditionPolicyTest {
     }
 
     @Test
+    fun quantityIsRecomputedAtUpperBoundFromAvailableCash() {
+        val base = base().copy(availableCapital = 4_000.0)
+
+        val decision = IntradayAdditionPolicy.evaluate(
+            base = base,
+            currentPrice = 10.00,
+            quoteDate = "2026-11-17",
+            marketQuoteDate = "2026-11-17",
+            nowMs = base.createdAtMs + 120_000L,
+            samples = readySamples(base.createdAtMs),
+            previousState = null,
+        )
+
+        assertEquals(IntradayAdditionStatus.READY, decision.status)
+        // 4000 元按最高接受价 10.15 + 费用重算 ≈393 股 → 整手 300 股。
+        assertEquals(300.0, decision.quantity, 0.0)
+    }
+
+    @Test
+    fun insufficientCashAtUpperBoundBlocksInsteadOfSuggestingUnaffordableShares() {
+        val base = base().copy(availableCapital = 500.0)
+
+        val decision = IntradayAdditionPolicy.evaluate(
+            base = base,
+            currentPrice = 10.00,
+            quoteDate = "2026-11-17",
+            marketQuoteDate = "2026-11-17",
+            nowMs = base.createdAtMs + 120_000L,
+            samples = readySamples(base.createdAtMs),
+            previousState = null,
+        )
+
+        assertEquals(IntradayAdditionStatus.BLOCKED, decision.status)
+        assertEquals(0.0, decision.quantity, 0.0)
+    }
+
+    @Test
     fun changedEvaluationFingerprintBlocksOldWindowState() {
         val base = base().copy(evaluationFingerprint = "new-evaluation")
         val previous = IntradayAdditionState(

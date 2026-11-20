@@ -124,7 +124,7 @@ object AiToolCatalog {
         ))
         .put(function(
             name = "get_realtime_quote",
-            description = "获取指定个股或指数的最新行情、现价、涨跌幅和成交量；不用于回答纯板块问题。",
+            description = "获取指定个股或指数的最新行情、现价、涨跌幅、成交量与成交额；返回 quote_date（行情日期）和 prev_close，周末/节假日可能是上一交易日快照，引用前必须核对日期；价格单位元、成交量单位股、成交额单位元。不用于回答纯板块问题。",
             properties = JSONObject()
                 .put("code", stringProperty("search_security 返回的代码")),
             required = listOf("code"),

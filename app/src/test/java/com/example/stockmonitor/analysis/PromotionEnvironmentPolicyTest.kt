@@ -36,7 +36,9 @@ class PromotionEnvironmentPolicyTest {
     }
 
     @Test
-    fun allKnownBoardsRetreatingDelaysPromotion() {
+    fun allKnownBoardsRetreatingNoLongerBlocksPromotion() {
+        // 板块标签有来源与粒度误差，只作排序/辅助证据，不再单独阻断候选晋级；
+        // 真正的掉档由个股趋势、关键位、量价和市场风险共振决定。
         val gate = PromotionEnvironmentPolicy.gate(
             PromotionEnvironmentInput(
                 shanghaiChangePct = 0.1,
@@ -47,7 +49,7 @@ class PromotionEnvironmentPolicyTest {
             ),
         )
 
-        assertEquals("所属板块同步转弱，暂缓候选晋级", gate)
+        assertNull(gate)
     }
 
     @Test

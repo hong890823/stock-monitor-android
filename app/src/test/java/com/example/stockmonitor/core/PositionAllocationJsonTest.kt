@@ -25,11 +25,14 @@ class PositionAllocationJsonTest {
     }
 
     @Test
-    fun invalidEntryIsRejectedInsteadOfSilentlyBecomingNormalMode() {
-        assertThrows(IllegalArgumentException::class.java) {
-            PositionAllocationJson.decode(
-                "{\"sh600000\":{\"mode\":\"NORMAL\",\"base_quantity_target\":-1}}",
-            )
-        }
+    fun invalidEntryIsSkippedInsteadOfWipingEveryOtherConfig() {
+        val decoded = PositionAllocationJson.decode(
+            "{\"sh600000\":{\"mode\":\"NORMAL\",\"base_quantity_target\":600}," +
+                "\"sz000001\":{\"mode\":\"NOT_A_MODE\",\"base_quantity_target\":100}," +
+                "\"sz000002\":{\"mode\":\"NORMAL\",\"base_quantity_target\":-1}}",
+        )
+
+        assertEquals(setOf("sh600000"), decoded.keys)
+        assertEquals(PositionAllocationConfig.normal(600.0), decoded["sh600000"])
     }
 }

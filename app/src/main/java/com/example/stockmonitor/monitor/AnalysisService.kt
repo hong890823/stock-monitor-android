@@ -292,7 +292,7 @@ class AnalysisService : Service() {
             )
         // 统一口径：卡片与报告的操作建议和持仓/自选同一套（带支撑、量比与距离上下文），
         // AI 工具拿到的报告也出自这里，一处收敛三处受益。
-        val unifiedAdvice = TechnicalAssessmentPolicy.unifiedAdviceFor(result, history)
+        val unifiedAdvice = TechnicalAssessmentPolicy.unifiedAdviceFor(result, history, env.market.regime)
         val card =
             TechnicalCard(
                 result = result,

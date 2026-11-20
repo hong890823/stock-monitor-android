@@ -75,6 +75,15 @@ object TradeLotLedger {
     const val LEGACY_ENTRY_DATE = "legacy"
     const val UNTRACKED_ENTRY_DATE = "untracked"
 
+    /**
+     * 清掉某代码的未平批次（保留成交流水 entries 与手工校正 adjustments）。
+     *
+     * 用于“删除监控股票后重新加入”：旧批次会残留成孤儿，lots.sum > 新持仓数量时
+     * `ledgerConsistent=false`，减仓/做T 通知会被静默降级为观察。
+     */
+    fun clearLots(book: TradeBook, code: String): TradeBook =
+        book.copy(lots = book.lots.filterNot { it.code == code })
+
     fun migrate(positions: List<Position>): TradeBook = TradeBook(
         lots = positions
             .filter { it.quantity.isFinite() && it.quantity > 0 }
@@ -187,7 +196,13 @@ object TradeLotLedger {
         val position = portfolio.positions.firstOrNull { it.code == record.code }
             ?: throw IllegalStateException("交易股票不在持仓列表中")
         val newQuantity = position.quantity + record.quantity
-        val newCost = (position.quantity * position.cost + record.quantity * record.price) / newQuantity
+        val newCost = if (!position.cost.isFinite() || position.cost <= 0.0) {
+            // 原持仓成本未知：用本次成交价作为唯一可核实的价格，而不是把 0 参与加权
+            // 摊出一个不存在的成本（1000@0 + 100@12 → 1.09）。
+            record.price
+        } else {
+            (position.quantity * position.cost + record.quantity * record.price) / newQuantity
+        }
         return TradeApplicationResult(
             book = updatedBook,
             portfolio = portfolio.updatePosition(record.code, newQuantity, newCost),

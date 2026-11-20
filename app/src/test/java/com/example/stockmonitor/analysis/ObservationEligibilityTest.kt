@@ -77,6 +77,18 @@ class ObservationEligibilityTest {
     }
 
     @Test
+    fun sameDayHighHoldBuyCandidateIsNotBouncedByRoundGate() {
+        val highHold = candidate.copy(
+            strategy = ObservationStrategy.LEADER,
+            structureQuality = ObservationStructureQuality.POST_LIMIT_HIGH_HOLD,
+            entryConfirmationRounds = 0,
+            lastEvaluatedDate = sealed.quoteDate,
+        )
+        val displayed = ObservationEligibility.applyQuoteGate(highHold, sealed.copy(price = 10.5))
+        assertEquals(ObservationStage.BUY_CANDIDATE, displayed.stage)
+    }
+
+    @Test
     fun postLimitHighHoldUsesLimitDistanceForTenTwentyAndThirtyPercentBoards() {
         val mainBoard = Quote("sh600000", "主板测试", 10.70, 10.0, 10.1, 11.0, 10.1, 1_000.0, 10_000.0, "2026-10-14")
         assertTrue(ObservationEligibility.isPostLimitHighHoldCandidate(mainBoard.code, mainBoard.name, mainBoard))

@@ -38,7 +38,12 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             val portfolio = store.portfolio
             val positionAllocations = store.positionAllocations
             val tradeBook = store.tradeBook
-            val tradeAvailability = TradeLotLedger.availability(tradeBook, portfolio.positions, java.time.LocalDate.now().toString())
+            val tradeAvailability = TradeLotLedger.availability(
+                tradeBook,
+                portfolio.positions,
+                // 业务日期固定按上海时区；设备在其他时区时不能把“今日可卖”算反。
+                com.example.stockmonitor.analysis.TimeUtils.todayText(),
+            )
             val sellableTotal = tradeAvailability.sumOf { it.actionableSellableToday }
             val lockedTotal = tradeAvailability.sumOf { it.lockedToday }
             val nextDayTotal = tradeAvailability.sumOf { it.actionableNextTradingDaySellable }
@@ -132,6 +137,17 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                         })
                     },
                 )
+                // 未配置分仓时普通做 T 只给观察、不给股数；不提示的话用户会以为提醒坏了。
+                val unallocated = portfolio.positions.count {
+                    it.quantity.isFinite() && it.quantity > 0 && positionAllocations[it.code] == null
+                }
+                if (unallocated > 0) {
+                    addText(
+                        "有 $unallocated 只持仓未配置分仓：盘中做 T 只提示观察、不计算股数。" +
+                            "点「设置分仓」可采用系统建议。",
+                        11.5f,
+                    )
+                }
                 container.addView(view)
             }
 

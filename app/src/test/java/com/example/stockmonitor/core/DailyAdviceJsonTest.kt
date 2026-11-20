@@ -26,6 +26,8 @@ class DailyAdviceJsonTest {
                 reviewReason = "等待剩余数量变化",
                 createdAtMs = 10L,
                 updatedAtMs = 20L,
+                riskPriority = 1,
+                riskStage = 3,
             ),
             DailyAdvicePlan(
                 date = "2026-11-16",

@@ -199,7 +199,10 @@ object PortfolioSwing {
         val candidates = holdings.map { position ->
             val input = evidence[position.code]
             val decision = assess(position, input, market, asOf, nowMs)
-            if (decision.status != SwingStatus.READY || input == null) decision
+            // 筑底轻仓试错同样是可以分配新资金的档位（只是额度压到初始仓位 25%）。
+            val allocatable = decision.status == SwingStatus.READY ||
+                decision.status == SwingStatus.BOTTOM_TRIAL
+            if (!allocatable || input == null) decision
             else if (capitalIssue != null) decision.copy(reason = capitalIssue)
             else decision
         }.sortedWith(compareByDescending<SwingDecision> { it.addQuantity > 0 }
@@ -207,8 +210,9 @@ object PortfolioSwing {
         var remainingCash = availableCapital
         var focusCount = 0
         val rows = candidates.map { row ->
-            if (row.status != SwingStatus.READY || capitalIssue != null || focusCount >= MAX_FOCUS_POSITIONS) {
-                if (row.status == SwingStatus.READY && capitalIssue == null && focusCount >= MAX_FOCUS_POSITIONS) {
+            val allocatable = row.status == SwingStatus.READY || row.status == SwingStatus.BOTTOM_TRIAL
+            if (!allocatable || capitalIssue != null || focusCount >= MAX_FOCUS_POSITIONS) {
+                if (allocatable && capitalIssue == null && focusCount >= MAX_FOCUS_POSITIONS) {
                     row.copy(
                         reason = "技术条件通过，本轮最多聚焦${MAX_FOCUS_POSITIONS}只，保留候补",
                     )
@@ -249,11 +253,13 @@ object PortfolioSwing {
         if (listOf(portfolio.initialEntryPct, portfolio.maxPositionPct).any { !it.isFinite() || it <= 0 || it > 100 }) {
             return "本次追加比例或单股仓位上限无效"
         }
-        if (holdings.any { position ->
-                val quote = evidence[position.code]?.quote
-                quote == null || quote.quoteDate != asOf || !quote.price.isFinite() || quote.price <= 0
-            }) return "缺少持仓现价，无法核实组合剩余资金"
-        val holdingValue = holdings.sumOf { it.quantity * evidence.getValue(it.code).quote.price }
+        // 只有“完全没有该股证据”才算组合敞口未知；停牌股行情日期过期时仍可用最后收盘价估算组合，
+        // 只阻断该股自身的追加（assess 会给出“行情过期、停牌或价格无效”），不拖累其它持仓。
+        if (holdings.any { evidence[it.code] == null }) return "缺少持仓现价，无法核实组合剩余资金"
+        val holdingValue = holdings.sumOf { position ->
+            val quote = evidence.getValue(position.code).quote
+            if (quote.price.isFinite() && quote.price > 0) position.quantity * quote.price else 0.0
+        }
         if (!holdingValue.isFinite() ||
             portfolio.availableCapitalIsManual() && holdingValue + availableCapital > portfolio.totalCapital + 0.01) {
             return "持仓市值与可用资金超过总资金，请更新资金配置"

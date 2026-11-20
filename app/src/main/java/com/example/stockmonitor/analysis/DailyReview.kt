@@ -75,6 +75,7 @@ object DailyReview {
         /**
          * 大盘状态。有了它组合体检才会写「市场环境」，塌陷时风险点第一条会换成系统性风险——
          * 否则复盘在熊市里还在逐只慢慢看，正好给反了。
+         *
          */
         val market: MarketState? = null,
         /** 各持仓的板块上下文；用来出「板块塌陷」风险点与个股的板块行。 */
@@ -104,6 +105,14 @@ object DailyReview {
         val tradeBook: TradeBook = TradeBook(),
         /** 保留兼容已有调用；当前持仓今日盈亏已统一按昨收，不再使用该字段。 */
         val todayAcquisitions: Map<String, DayPnl.Acquisition> = emptyMap(),
+        /**
+         * 期望参与分析的持仓数（数量 > 0）。[results] 少于它说明有股票分析失败；
+         * 报告必须披露缺口，不能把“没分析”写成“没有风险”。
+         */
+        val expectedPositionCount: Int =
+            positions.count { it.quantity.isFinite() && it.quantity > 0 },
+        /** 分析失败的持仓名称（可选）；有值时报告点名披露。 */
+        val analysisFailures: List<String> = emptyList(),
     )
 
     /**
@@ -200,7 +209,12 @@ object DailyReview {
             )
             appendLine()
             appendLine("持仓整体操作建议")
-            reviewOverallAdvice(inputs.results).forEach { appendLine("· $it") }
+            reviewOverallAdvice(
+                inputs.results,
+                inputs.expectedPositionCount,
+                inputs.analysisFailures,
+                inputs.market,
+            ).forEach { appendLine("· $it") }
             append(separator())
             append(attributionSection(dayPnl, accountPnl, inputs))
             append(separator())
@@ -230,16 +244,47 @@ object DailyReview {
      * 复盘顶部只保留需要处理的真实风险，避免把“风险核实”、正常持有和深套通用提示逐股重复。
      * 基本面红灯仍会按实际 [PriorityState.WATCH] 出现，但必须带具体原因，不能只罗列股票名。
      */
-    private fun reviewOverallAdvice(results: List<PositionResult>): List<String> {
-        val risks = PortfolioAnalysis.priorityOrdered(results)
+    private fun reviewOverallAdvice(
+        results: List<PositionResult>,
+        expectedCount: Int,
+        failures: List<String>,
+        market: MarketState?,
+    ): List<String> {
+        // 观察股（数量 0）不是持仓：没有可减、可退的仓位，不能进入「持仓整体操作建议」。
+        // 与 PortfolioPriorityPolicy.rank / todayPriorityAdvice 的 quantity > 0 口径一致。
+        val held = results.filter { it.quantity.isFinite() && it.quantity > 0 }
+        val missing = (expectedCount - held.size).coerceAtLeast(0)
+        val gap = if (missing > 0 || failures.isNotEmpty()) {
+            val names = failures.distinct().joinToString("、")
+            "有 ${maxOf(missing, failures.size)} 只持仓未完成分析" +
+                (if (names.isNotBlank()) "（$names）" else "") +
+                "，无法判断风险，不能据此认为没有风险；请重跑复盘或核对行情。"
+        } else {
+            null
+        }
+        // 大盘塌陷时顶部不能再说“维持原有仓位”：与第二节“先降整体仓位”直接冲突。
+        val collapseNote = if (market?.isCollapse == true) {
+            "大盘塌陷，系统性风险优先：先降整体仓位，别指望个股独善其身；等大盘企稳再评估个股。"
+        } else {
+            null
+        }
+        val risks = PortfolioAnalysis.priorityOrdered(held)
             .map { result -> result to PortfolioAnalysis.priorityDecision(result) }
             .filter { (_, decision) -> decision.state in setOf(PriorityState.EXIT, PriorityState.REDUCE, PriorityState.WATCH) }
         if (risks.isEmpty()) {
-            return listOf("当前没有已确认的持仓风险；维持原有仓位，下一交易日继续核对行情和公告。")
+            return buildList {
+                gap?.let(::add)
+                collapseNote?.let(::add)
+                if (gap == null && collapseNote == null) {
+                    add("当前没有已确认的持仓风险；维持原有仓位，下一交易日继续核对行情和公告。")
+                }
+            }
         }
         val urgent = risks.filter { (_, decision) -> decision.state in setOf(PriorityState.EXIT, PriorityState.REDUCE) }
         val observing = risks.filter { (_, decision) -> decision.state == PriorityState.WATCH }
         return buildList {
+            gap?.let(::add)
+            collapseNote?.let(::add)
             if (urgent.isNotEmpty()) {
                 add("优先处理：" + urgent.joinToString("；") { (result, decision) ->
                     "『${result.name}』${decision.state.label}，${decision.reason}"
@@ -719,6 +764,17 @@ object DailyReview {
 
     private fun healthRisks(dayPnl: DayPnl.Summary, aggregates: Aggregates, inputs: Inputs): List<String> {
         val risks = mutableListOf<String>()
+        // 分析缺口必须进“风险点”：缺一只的分析结果，不等于那只没有风险。
+        val analyzed = inputs.results.count { it.quantity.isFinite() && it.quantity > 0 }
+        val missing = (inputs.expectedPositionCount - analyzed).coerceAtLeast(0)
+        if (missing > 0 || inputs.analysisFailures.isNotEmpty()) {
+            val names = inputs.analysisFailures.distinct().joinToString("、")
+            risks.add(
+                "有 ${maxOf(missing, inputs.analysisFailures.size)} 只持仓未完成分析" +
+                    (if (names.isNotBlank()) "（$names）" else "") +
+                    "，风险未核实，不能视为没有风险",
+            )
+        }
         // 系统性风险排第一：塌陷期该做的是降整体仓位，不是逐只慢慢看——顺序反了会误导。
         if (inputs.market?.isCollapse == true) {
             risks.add("大盘塌陷，系统性风险优先：先降整体仓位，别指望个股独善其身")

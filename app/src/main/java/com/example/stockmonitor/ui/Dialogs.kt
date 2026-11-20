@@ -296,11 +296,17 @@ object Dialogs {
         }
         addSwitch(
             "买卖点 / 做T提醒",
-            "持仓破位分为待确认、分批减仓和退出，高位转弱优先减仓；自选股和观察池只提醒买点确认，" +
-                "不推送反弹、封板、炸板或突破风险。" +
+            "持仓破位分为待确认、分批减仓和退出，高位转弱优先减仓；自选股和观察池默认只提醒买点确认，" +
+                "封板/炸板/异动可通过下面的自选股开关单独开启。" +
                 "同股同类信号冷却10分钟；机会提醒每天最多8条，风险升级不受此上限限制。",
             store.intradaySignalEnabled,
         ) { store.intradaySignalEnabled = it }
+        addSwitch(
+            "自选股 / 观察池盘中提醒",
+            "开启后，非持仓股的封板、炸板、强量价异动与反弹跟踪会用普通通知推送（不震动），" +
+                "与买卖点共用每日预算和同事件去重；默认关闭。",
+            store.watchlistIntradayAlerts,
+        ) { store.watchlistIntradayAlerts = it }
         addSwitch("全市场涨跌停扫描", "数据量较大，移动网络下可关闭", store.limitScanEnabled) {
             store.limitScanEnabled = it
         }
@@ -798,6 +804,15 @@ object Dialogs {
                     Toast.makeText(context, "数量和成本必须是大于等于 0 的数字", Toast.LENGTH_SHORT).show()
                     return@input
                 }
+                // 数量 > 0 但没有成本，账户盈亏/可用现金都算不出来；不能让这种记录进持仓。
+                if (quantity > 0 && cost <= 0) {
+                    Toast.makeText(
+                        context,
+                        "数量大于 0 时必须填写持仓成本；只想观察请把数量填 0",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    return@input
+                }
                 if (quantity > 0 && !isTradeDate(date)) {
                     Toast.makeText(context, "买入日期必须是不晚于今天的 yyyy-MM-dd", Toast.LENGTH_LONG).show()
                     return@input
@@ -805,11 +820,14 @@ object Dialogs {
                 store.portfolio = portfolio.copy(
                     positions = (portfolio.positions + Position(code, name, quantity, cost)).toMutableList()
                 )
-                // 有数量就记批次：漏记会留下「未记录日期」残股，T+1 会一直按锁定算。
-                if (quantity > 0) {
-                    store.tradeBook = TradeLotLedger.syncPositionEdit(
-                        store.tradeBook, code, name, 0.0, quantity, cost, date,
-                    )
+                // 重新加入一只曾经删除过监控的股票：先清掉该代码的旧批次。
+                // 否则 lots.sum > 新数量会让账本永久不一致，减仓/高位减仓/做T 通知被静默停掉。
+                // entries 保留作历史；adjustments 按日期参与当日盈亏，也不删。
+                val cleanBook = TradeLotLedger.clearLots(store.tradeBook, code)
+                store.tradeBook = if (quantity > 0) {
+                    TradeLotLedger.syncPositionEdit(cleanBook, code, name, 0.0, quantity, cost, date)
+                } else {
+                    cleanBook
                 }
                 store.applyDailyAdviceQuantityFeedback(
                     date = TimeUtils.todayText(),
@@ -906,6 +924,15 @@ object Dialogs {
                     val date = values.getOrElse(2) { "" }.trim()
                     if (quantity == null || cost == null || quantity < 0 || cost < 0) {
                         Toast.makeText(context, "数量和成本必须是大于等于 0 的数字", Toast.LENGTH_SHORT).show()
+                        return@input
+                    }
+                    // 数量 > 0 但没有成本，账户盈亏/可用现金都算不出来；要求补全成本。
+                    if (quantity > 0 && cost <= 0) {
+                        Toast.makeText(
+                            context,
+                            "数量大于 0 时必须填写持仓成本；只想观察请把数量填 0",
+                            Toast.LENGTH_LONG,
+                        ).show()
                         return@input
                     }
                     if (quantity > target.quantity && !isTradeDate(date)) {

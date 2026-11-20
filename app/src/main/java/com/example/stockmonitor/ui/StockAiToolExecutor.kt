@@ -12,6 +12,7 @@ import com.example.stockmonitor.analysis.MarketRiskContext
 import com.example.stockmonitor.analysis.MarketTimingContext
 import com.example.stockmonitor.analysis.NewsRelatedQueryPolicy
 import com.example.stockmonitor.analysis.PortfolioAnalysis
+import com.example.stockmonitor.analysis.ReportMarkup
 import com.example.stockmonitor.analysis.RecentMarketContext
 import com.example.stockmonitor.analysis.StockAnalysis
 import com.example.stockmonitor.analysis.TimeUtils
@@ -229,10 +230,14 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
                 .put("name", quote.name)
                 .put("code", quote.code)
                 .put("market", "A股")
+                // 行情日期必须给：周末/节假日接口返回上一交易日快照，模型不能当实时价。
+                .put("quote_date", quote.quoteDate ?: JSONObject.NULL)
                 .put("price", quote.price)
+                .put("prev_close", quote.prevClose)
                 .put("change_pct", quote.changePct)
-                .put("volume", quote.volume)
-                .put("turnover", quote.turnover)
+                .put("volume_shares", quote.volume)
+                .put("turnover_yuan", quote.turnover)
+                .put("units", "价格单位元；成交量单位股；成交额单位元")
         }
         val security = resolveGlobal(code, arguments.optString("name"))
         val data = GlobalFundamentalsClient().fetch(security)
@@ -260,7 +265,7 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
                 .put("source", "程序本地缓存")
                 // 带上这半份报告的实际生成时刻：缓存可能半新半旧，AI 需要知道新旧再决定信多少。
                 .put("report_updated_at", cached.fundamentalUpdatedAt)
-                .put("report", cached.fundamentalReport)
+                .put("report", aiReportText(cached.fundamentalReport))
         }
 
         return if (isA股(code)) {
@@ -272,7 +277,7 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
                 .put("code", code)
                 .put("market", "A股")
                 .put("source", "东方财富公开财报与公告接口")
-                .put("report", report)
+                .put("report", aiReportText(report))
         } else {
             val security = resolveGlobal(code, name)
             val data = GlobalFundamentalsClient().fetch(security)
@@ -286,7 +291,7 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
                 .put("code", security.symbol)
                 .put("market", security.exchange)
                 .put("source", JSONArray(data.dataSources))
-                .put("report", report)
+                .put("report", aiReportText(report))
         }
     }
 
@@ -338,7 +343,7 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
             result = result,
             env = env,
             // AI 读到的「结论（无持仓假设）」也用统一口径，不带价位的四档模板会误导模型。
-            unifiedAdvice = TechnicalAssessmentPolicy.unifiedAdviceFor(result, history),
+            unifiedAdvice = TechnicalAssessmentPolicy.unifiedAdviceFor(result, history, env.market.regime),
         )
         // 存下这次的状态快照，下次取同一份报告才有「较上次分析」的对照。
         store.analysisReports = AnalysisReportCache.merge(
@@ -363,7 +368,7 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
             .put("name", name)
             .put("code", code)
             .put("market", if (isA股(code)) "A股" else "港美股")
-            .put("report", report)
+            .put("report", aiReportText(report))
             .put("support", result.support)
             .put("resistance", result.resistance)
             .put("score", result.score)
@@ -401,15 +406,22 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
         val inMemory = Repo.portfolioReport?.takeIf { it.isNotBlank() }
         val persisted = store.lastPortfolioReport?.takeIf { it.isNotBlank() }
         val report = inMemory ?: persisted
+        // 报告头是「最近分析：yyyy-MM-dd HH:mm」；旧解析找「分析时间：」永远拿不到时间。
+        val generatedAt = report?.lineSequence()
+            ?.firstOrNull { it.trimStart().startsWith("最近分析：") || it.contains("分析时间：") }
+            ?.substringAfter('：')
+            ?.trim()
+            .orEmpty()
+        val analysisDate = generatedAt
+            .substringBefore(' ')
+            .takeIf { it.matches(Regex("\\d{4}-\\d{2}-\\d{2}")) }
         return reportPayload(
             report = report,
             source = if (inMemory != null) "Repo内存缓存" else if (persisted != null) "本地持久化缓存" else "未生成",
-            generatedAt = report?.lineSequence()
-                ?.firstOrNull { it.contains("分析时间：") }
-                ?.substringAfter("分析时间：")
-                ?.trim()
-                .orEmpty(),
+            generatedAt = generatedAt,
         )
+            .put("analysis_date", analysisDate ?: JSONObject.NULL)
+            .put("stale", analysisDate != null && analysisDate != TimeUtils.todayText())
     }
 
     private fun getPortfolioTodayBrief(): JSONObject {
@@ -420,10 +432,22 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
             asOf = asOf,
             currentPositions = store.portfolio.positions,
         )
+        val analysisAsOf = Repo.portfolioResults.mapNotNull { it.analysisDate.takeIf { date -> date.isNotBlank() } }
+            .maxOrNull()
         return JSONObject()
             .put("as_of", asOf)
             .put("analysis_count", Repo.portfolioResults.size)
-            .put("status", if (advice == null) "no_priority_action" else "available")
+            // 从未分析不能报成“没有需要优先处理的持仓”。
+            .put(
+                "status",
+                when {
+                    Repo.portfolioResults.isEmpty() -> "not_analyzed"
+                    advice == null -> "no_priority_action"
+                    else -> "available"
+                },
+            )
+            .put("analysis_as_of", analysisAsOf ?: JSONObject.NULL)
+            .put("stale", analysisAsOf != null && analysisAsOf != asOf)
             .put(
                 "priority",
                 advice?.let {
@@ -486,11 +510,22 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
         return context.toJson()
     }
 
+    /** AI 只应看到纯文本报告：去掉 «» 标记并限制长度，避免模型抄标记或撑爆上下文。 */
+    private fun aiReportText(text: String?, limit: Int = 8_000): String {
+        if (text.isNullOrBlank()) return "数据暂缺：尚未生成该报告"
+        val plain = ReportMarkup.plain(text)
+        return if (plain.length <= limit) {
+            plain
+        } else {
+            plain.take(limit) + "\n…（报告较长，已截断，完整内容见报告页）"
+        }
+    }
+
     private fun reportPayload(report: String?, source: String, generatedAt: String): JSONObject = JSONObject()
         .put("report_status", if (report.isNullOrBlank()) "missing" else "available")
         .put("source", source)
         .put("generated_at", generatedAt.ifBlank { JSONObject.NULL })
-        .put("report", report ?: "数据暂缺：尚未生成该报告")
+        .put("report", aiReportText(report))
 
     private fun getRecentMarketContext(arguments: JSONObject): JSONObject {
         val code = arguments.optString("code").trim()

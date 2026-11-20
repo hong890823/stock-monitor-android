@@ -31,7 +31,8 @@ class TechnicalTrendSnapshotPolicyTest {
         assertTrue(result.summary.contains("技术 ${result.technicalScore}/100"))
         assertTrue(result.summary.contains("周K向上"))
         assertTrue(result.summary.contains("月K向上"))
-        assertTrue(result.primaryAdvice.contains("分批"))
+        // canBuy=false 的结构只能给观察建议，不能写成「可分批参与」。
+        assertTrue(result.primaryAdvice.contains("入场结构仅作观察"))
         assertTrue(result.adviceReason.isNotBlank())
     }
 

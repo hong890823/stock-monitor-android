@@ -90,6 +90,25 @@ class PortfolioAnalysisTest {
         assertTrue(text.contains("费用 1.00元"))
     }
 
+    @Test fun missingCostDoesNotFabricateAccountLoss() {
+        // 数量 > 0、成本 = 0：可用现金“算不出来”，不能当 0 去凑账户盈亏。
+        val position = com.example.stockmonitor.core.Position("sh600522", "中天", 1000.0, 0.0)
+        val portfolio = com.example.stockmonitor.core.Portfolio(
+            totalCapital = 100_000.0,
+            positions = mutableListOf(position),
+        )
+        val lines = PortfolioAnalysis.todayBrief(
+            emptyList(),
+            portfolio,
+            quotes = mapOf("sh600522" to todayQuote("sh600522", 10.0, 10.0)),
+        ).joinToString("\n")
+
+        val accountLine = lines.lineSequence().first { it.startsWith("账户总盈亏") }
+        assertTrue(accountLine.contains("暂无法计算"))
+        assertTrue(accountLine.contains("未填成本"))
+        assertFalse(accountLine.contains("-90"))
+    }
+
     @Test fun todayBriefWaitingStateKeepsComputableLinesWithoutPlaceholderNoise() {
         val quotes = mapOf(
             "sh600522" to todayQuote("sh600522", 30.6, 30.0),
@@ -196,6 +215,28 @@ class PortfolioAnalysisTest {
         assertFalse(brief.contains("优先观察中天科技"))
         assertTrue(brief.contains("先别继续买入，看能否站回关键价位"))
         assertFalse(brief.contains("稳健持仓："))
+    }
+
+    @Test
+    fun fullReportDisclosesMissingFundamentalEvidence() {
+        val report = PortfolioAnalysis.formatReport(listOf(evaluate()), "2026-10-15 10:00")
+
+        assertTrue(report.contains("基本面：未分析或健康度已过期"))
+    }
+
+    @Test
+    fun missingAnalysisIsDisclosedInFullReport() {
+        val report = PortfolioAnalysis.formatReport(
+            results = emptyList(),
+            analyzedAt = "2026-10-16 10:00",
+            expectedPositionCount = 1,
+            analysisFailures = listOf("甲"),
+        )
+        val top = report.substringBefore("📌 今日要点")
+        assertTrue(top.contains("1 只持仓未完成分析"))
+        assertTrue(top.contains("甲"))
+        assertTrue(top.contains("不能据此认为没有风险"))
+        assertFalse(top.contains("暂无已确认的买卖动作"))
     }
 
     @Test
@@ -453,6 +494,37 @@ class PortfolioAnalysisTest {
         val brief = PortfolioAnalysis.todayBrief(listOf(result), portfolio(), swingPlan = plan)
 
         assertTrue(brief.any { it.contains("追加买入机会") && it.contains("追加100股") })
+    }
+
+    @Test
+    fun todayBriefHonoursPortfolioWideRiskGateForSwingAdditions() {
+        // A 行自身通过买入检查，但同组合 B 处于风险观察：卡片不能比完整报告更激进。
+        val buy = evaluate(price = 31.0, support = 30.0, trendWeak = false)
+            .copy(priorityBuyApproved = true)
+        val risk = evaluate(price = 28.0, support = 30.0, trendWeak = false)
+            .copy(code = "sh600001", name = "风险股")
+        val portfolio = portfolio().copy(
+            positions = mutableListOf(
+                Position("sh600522", "中天科技", 500.0, 45.0),
+                Position("sh600001", "风险股", 500.0, 45.0),
+            ),
+        )
+        val plan = com.example.stockmonitor.analysis.SwingPlan(
+            listOf(
+                com.example.stockmonitor.analysis.SwingDecision(
+                    buy.code, buy.name, com.example.stockmonitor.analysis.SwingStatus.READY,
+                    90, "周月向好且日线企稳", price = 31.0, addQuantity = 100.0,
+                    estimatedCash = 3105.0, afterPositionPct = 6.0,
+                ),
+            ),
+            com.example.stockmonitor.analysis.TimeUtils.todayText(),
+            null,
+        )
+
+        val brief = PortfolioAnalysis.todayBrief(listOf(buy, risk), portfolio, swingPlan = plan)
+            .joinToString("\n")
+
+        assertFalse("组合有风险时不能显示追加机会", brief.contains("追加买入机会"))
     }
 
     @Test

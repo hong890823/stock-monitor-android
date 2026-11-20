@@ -27,8 +27,8 @@ object BreakoutRiskPolicy {
     const val DROP_FROM_HIGH_PCT = 2.0
     const val EXPANDED_VOLUME_RATIO = 1.3
     const val RAPID_DROP_ATR_FACTOR = 1.2
-    const val HIGH_BIAS_PCT = 8.0
-    const val LINE_BREAK_TOLERANCE_PCT = 0.5
+    const val HIGH_BIAS_PCT = StrategyThresholds.MAX_CHASE_MA5_BIAS_PCT
+    const val LINE_BREAK_TOLERANCE_PCT = StrategyThresholds.LINE_BREAK_TOLERANCE_PCT
 
     fun evaluate(evidence: BreakoutRiskEvidence): BreakoutRiskDecision {
         if (!evidence.continuation || !evidence.price.isFinite() || evidence.price <= 0.0) {

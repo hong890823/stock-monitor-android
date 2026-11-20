@@ -5,7 +5,7 @@ import com.example.stockmonitor.core.Quote
 
 object ObservationEntryPolicy {
     const val RELATIVE_STRENGTH_PCT = 3.0
-    const val MAX_LEADER_MA5_BIAS_PCT = 8.0
+    const val MAX_LEADER_MA5_BIAS_PCT = StrategyThresholds.MAX_CHASE_MA5_BIAS_PCT
 
     fun leaderCanBuy(
         recentLimitUpDays: Int,

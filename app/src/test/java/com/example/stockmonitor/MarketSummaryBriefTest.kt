@@ -81,6 +81,27 @@ class MarketSummaryBriefTest {
     )
 
     @Test
+    fun missingLimitDataIsReportedAsUnknownInsteadOfZero() {
+        val text = MarketSummary.brief(inputs().copy(limits = null)).joinToString("\n")
+
+        assertTrue(text.contains("涨跌停数据暂缺"))
+        assertFalse("没拉到涨停池不能被写成 0 家", text.contains("涨停 0 家"))
+    }
+
+    @Test
+    fun intradayManualSummaryIsLabeledAsSnapshot() {
+        val calendar = java.util.Calendar.getInstance(
+            java.util.TimeZone.getTimeZone("Asia/Shanghai"),
+        ).apply {
+            set(2026, java.util.Calendar.NOVEMBER, 20, 10, 30, 0)
+        }
+
+        val text = MarketSummary.generate(inputs(), calendar)
+
+        assertTrue(text.contains("盘中快照"))
+    }
+
+    @Test
     fun briefHasTheFiveLines() {
         val brief = MarketSummary.brief(inputs())
 

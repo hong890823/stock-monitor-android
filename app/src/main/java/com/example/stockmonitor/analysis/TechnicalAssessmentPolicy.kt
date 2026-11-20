@@ -40,9 +40,14 @@ object TechnicalAssessmentPolicy {
      * 与持仓/自选的 [primaryAdvice] 同一口径——替换 [TechnicalResult.action] 那套
      * score 四档的一句话模板（「技术面偏强：不建议追高…」不带任何价位数据）。
      */
-    fun unifiedAdviceFor(result: TechnicalResult, history: List<DayBar>): String {
+    fun unifiedAdviceFor(
+        result: TechnicalResult,
+        history: List<DayBar>,
+        marketRegime: MarketRegime? = null,
+    ): String {
         val cycles = MultiTimeframeTrend.evaluate(history, result.dataDate)
-        return evaluate(result, cycles.weekTrend, cycles.monthTrend).primaryAdvice
+        // 与持仓页/趋势快照同一口径：大盘塌陷时不能因为个股强就给“可分批参与”。
+        return evaluate(result, cycles.weekTrend, cycles.monthTrend, marketRegime).primaryAdvice
     }
 
     fun evaluate(

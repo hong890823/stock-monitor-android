@@ -35,6 +35,21 @@ import org.junit.Test
  * 阈值随板块涨跌停幅度缩放，3% 对创业板不该触发做 T。
  */
 class IntradayTacticsTest {
+    /** 站回支撑/接回观察现在必须带两阶段量价证据；缺证据只能 WATCH，测试要显式给出已完成证据。 */
+    private val confirmedPullback = com.example.stockmonitor.core.PullbackPhaseVolumeEvidence(
+        peakTimestamp = "2026-10-15 09:45:00",
+        troughTimestamp = "2026-10-15 10:00:00",
+        confirmationTimestamp = "2026-10-15 10:15:00",
+        pullbackToBaselineRatio = 0.6,
+        confirmationToBaselineRatio = 1.5,
+        troughWithinSupportBand = true,
+        confirmationReclaimedKeyLines = true,
+    )
+
+    private val risingObservation = HoldingTObservation(
+        low = 19.0, high = 20.2, reboundPct = 1.0, retreatPct = 0.0,
+        rising = true, falling = false,
+    )
     private val majorDown = TrendAssessment(
         shortTerm = ShortTermTrend.DOWN,
         major = MajorTrend.DOWN,
@@ -838,14 +853,19 @@ class IntradayTacticsTest {
         )!!
         assertEquals(IntradaySignalType.T_SELL, signal.type)
         assertTrue(signal.body.contains("可先减约 600 股"))
-        assertTrue(signal.body.contains("回踩企稳后再评估接回"))
+        assertTrue(signal.body.contains("预计接回价"))
+        assertTrue(signal.body.contains("净收益"))
     }
 
     @Test
     fun tSellQuantityUsesConservativeRatioWhenVolatilityIsHigh() {
         val signal = IntradayTactics.evaluate(
-            input(price = 20.70, changePct = 3.5, volumeRatio = 1.5, resistance = 22.0, quantity = 2_000.0)
-                .copy(holdingTContext = input().holdingTContext!!.copy(atrPct = 6.0))
+            input(price = 20.70, changePct = 4.0, volumeRatio = 1.5, resistance = 22.0, quantity = 2_000.0)
+                .copy(
+                    holdingTContext = input().holdingTContext!!.copy(atrPct = 6.0),
+                    // ATR 6% 时基础回落阈值 2.1%，节奏因子 1.5 → 深回落需 ≥3.15% 才给做T股数。
+                    holdingTObservation = HoldingTObservation(19.5, 21.4, 0.0, 3.3, false, true),
+                )
         )!!
 
         assertEquals(IntradaySignalType.T_SELL, signal.type)
@@ -1199,7 +1219,10 @@ class IntradayTacticsTest {
         // 跌破后站回：深套的企稳确认窗口，有股数。
         val signal = IntradayTactics.evaluate(
             input(price = 30.20, support = 30.0, cost = 45.0, quantity = 500.0,
-                totalCapital = 200_000.0, brokenSupport = true)
+                totalCapital = 200_000.0, brokenSupport = true).copy(
+                pullbackPhaseVolumeEvidence = confirmedPullback,
+                holdingTObservation = HoldingTObservation(30.0, 30.8, 1.0, 0.0, true, false),
+            )
         )!!
         assertEquals(IntradaySignalType.RECLAIM_SUPPORT, signal.type)
         assertTrue(signal.body.contains("站回支撑"))
@@ -1226,7 +1249,10 @@ class IntradayTacticsTest {
     @Test
     fun reclaimSupportShallowStillWarnsOfRebreak() {
         val signal = IntradayTactics.evaluate(
-            input(price = 30.20, support = 30.0, cost = 32.0, quantity = 2_000.0, brokenSupport = true)
+            input(price = 30.20, support = 30.0, cost = 32.0, quantity = 2_000.0, brokenSupport = true).copy(
+                pullbackPhaseVolumeEvidence = confirmedPullback,
+                holdingTObservation = HoldingTObservation(30.0, 30.8, 1.0, 0.0, true, false),
+            )
         )!!
         assertEquals(IntradaySignalType.RECLAIM_SUPPORT, signal.type)
         assertTrue(signal.body.contains("仍需防止再次跌破"))
@@ -1368,12 +1394,18 @@ class IntradayTacticsTest {
     fun deepReclaimAddOnIsSuppressedInCollapse() {
         // 成本 30、现价 19.2 = 深套；站回支撑本该给补仓窗口，塌陷期整条压掉。
         val neutral = IntradayTactics.evaluate(
-            input(price = 19.2, changePct = 0.0, quantity = 2_000.0, cost = 30.0, brokenSupport = true),
+            input(price = 19.2, changePct = 0.0, quantity = 2_000.0, cost = 30.0, brokenSupport = true).copy(
+                pullbackPhaseVolumeEvidence = confirmedPullback,
+                holdingTObservation = HoldingTObservation(19.0, 19.6, 1.0, 0.0, true, false),
+            ),
         )
         val collapse = IntradayTactics.evaluate(
             input(
                 price = 19.2, changePct = 0.0, quantity = 2_000.0, cost = 30.0, brokenSupport = true,
                 marketRegime = MarketRegime.COLLAPSE,
+            ).copy(
+                pullbackPhaseVolumeEvidence = confirmedPullback,
+                holdingTObservation = HoldingTObservation(19.0, 19.6, 1.0, 0.0, true, false),
             ),
         )
 

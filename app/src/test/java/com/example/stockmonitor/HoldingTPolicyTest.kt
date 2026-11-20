@@ -42,6 +42,17 @@ class HoldingTPolicyTest {
     private val rebound = HoldingTObservation(19.0, 19.2, 1.0, 0.0, true, false)
     private val retreat = HoldingTObservation(20.7, 21.0, 0.0, 1.4, false, true)
 
+    /** 站回支撑/接回观察现在必须带两阶段量价证据。 */
+    private val confirmedPullback = com.example.stockmonitor.core.PullbackPhaseVolumeEvidence(
+        peakTimestamp = "2026-10-15 09:45:00",
+        troughTimestamp = "2026-10-15 10:00:00",
+        confirmationTimestamp = "2026-10-15 10:15:00",
+        pullbackToBaselineRatio = 0.6,
+        confirmationToBaselineRatio = 1.5,
+        troughWithinSupportBand = true,
+        confirmationReclaimedKeyLines = true,
+    )
+
     @Test
     fun strongUptrendNearHighDefersSellingWithoutClaimingMarketWideStrength() {
         val signal = IntradayTactics.evaluate(input(20.7, 3.5).copy(
@@ -95,7 +106,8 @@ class HoldingTPolicyTest {
         assertTrue(signal.body.contains("尚未"))
         assertFalse(signal.body.contains("风险暂解除"))
         val confirmed = IntradayTactics.evaluate(base.copy(volumeRatio = 0.8,
-            holdingTContext = context(), holdingTObservation = rebound))!!
+            holdingTContext = context(), holdingTObservation = rebound,
+            pullbackPhaseVolumeEvidence = confirmedPullback))!!
         assertEquals(IntradaySignalType.RECLAIM_SUPPORT, confirmed.type)
         assertTrue(signal.type != confirmed.type)
     }
@@ -138,5 +150,7 @@ class HoldingTPolicyTest {
         volumeRatio = 1.6, limitPct = 10.0, support = 19.0, resistance = 22.0,
         score = 3, quantity = 2000.0, cost = 30.0, totalCapital = 100000.0,
         availableCapital = 10000.0, initialEntryPct = 5.0, maxPositionPct = 20.0,
+        sellableQuantity = 2000.0,
+        positionAllocation = com.example.stockmonitor.core.PositionAllocationConfig.normal(0.0),
     )
 }

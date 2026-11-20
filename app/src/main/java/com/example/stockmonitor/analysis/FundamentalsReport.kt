@@ -1,6 +1,7 @@
 package com.example.stockmonitor.analysis
 
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /** 技术分析产出的支撑/压力区间，只作为价格位置参考，不等同于基本面估值或目标价。 */
 data class TechnicalReference(
@@ -66,7 +67,16 @@ object FundamentalsReport {
 
             // 顶部只给概览，真正的综合结论放在报告最后（第十三节），关键数据在那里标红。
             appendLine("一、快速概览")
-            appendLine("财务质量评分：${result.score}/100（${result.verdict}）")
+            if (!result.financialQuality.applicable) {
+                val normalized = (result.score * 100.0 / FundamentalHealthPolicy.FINANCIAL_MAX_SCORE)
+                    .roundToInt().coerceIn(0, 100)
+                appendLine(
+                    "财务质量评分：${result.score}/${FundamentalHealthPolicy.FINANCIAL_MAX_SCORE}" +
+                        "（金融口径，跳过现金流/资产负债表维度；折合 100 分制约 $normalized）",
+                )
+            } else {
+                appendLine("财务质量评分：${result.score}/100（${result.verdict}）")
+            }
             appendLine("结论：${headline(result)}")
             appendLine("股东结构：${shareholderSummary(result)}")
             appendLine(valuationText(result, price))
@@ -892,13 +902,24 @@ object FundamentalsReport {
         }
     }
 
-    fun nextQuarterDirection(result: FundamentalResult): String =
-        when {
-            result.quarters.mapNotNull { it.netProfitYoy }.takeLast(4).isEmpty() -> "下一财报期趋势数据不足"
-            nextQuarterOutlook(result).startsWith("利润趋势偏支持") -> "下一财报期利润趋势偏支持"
-            nextQuarterOutlook(result).startsWith("利润趋势偏承压") -> "下一财报期利润趋势偏承压"
-            else -> "下一财报期利润趋势基本稳定"
+    fun nextQuarterDirection(result: FundamentalResult): String {
+        if (result.quarters.mapNotNull { it.netProfitYoy }.takeLast(4).isEmpty()) {
+            return "下一财报期趋势数据不足"
         }
+        return directionFromOutlook(nextQuarterOutlook(result))
+    }
+
+    /**
+     * 从 [nextQuarterOutlook] 的完整句子里取方向。
+     *
+     * 句子格式是「下一财报期趋势预判（…）：$direction｜…」，不能对整句用 startsWith，
+     * 否则永远匹配不到，卡片会把偏承压/偏支持一律说成“基本稳定”。
+     */
+    internal fun directionFromOutlook(outlook: String): String = when {
+        outlook.contains("：利润趋势偏支持") -> "下一财报期利润趋势偏支持"
+        outlook.contains("：利润趋势偏承压") -> "下一财报期利润趋势偏承压"
+        else -> "下一财报期利润趋势基本稳定"
+    }
 
     private fun valuationComparisonShort(result: FundamentalResult): String {
         return "${selfValuationPosition(result)}；${peerValuationPosition(result)}；综合以自身历史估值为主。"

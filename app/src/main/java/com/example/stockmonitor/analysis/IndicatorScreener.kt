@@ -67,6 +67,14 @@ class IndicatorScreener(private val sina: SinaClient) {
         if (universe.isEmpty()) throw Http.HttpError("新浪API未返回数据")
         val benchmark = runCatching { sina.kline("sh000001", 120) }.getOrNull()
         val elapsedTradingMinutes = TradingCalendar.tradingMinutesElapsed()
+        val today = TimeUtils.todayText()
+        // 活跃股榜单没有行情日期；用指数行情日期判断“今天是否有真实行情”，
+        // 避免周末/盘前把上一交易日快照补成今天、并按摩钟放大/缩小量比。
+        val indexQuoteDate = runCatching {
+            sina.quotes(listOf("sh000001"))["sh000001"]?.quoteDate
+        }.getOrNull()
+        val appendLiveBar = ScreeningClock.shouldAppendLiveBar(indexQuoteDate, today, elapsedTradingMinutes)
+        val ratioElapsedMinutes = ScreeningClock.ratioElapsedMinutes(elapsedTradingMinutes, appendLiveBar)
         val semaphore = Semaphore(4)
         var completed = 0
         val total = universe.size
@@ -74,7 +82,14 @@ class IndicatorScreener(private val sina: SinaClient) {
             universe.map { stock ->
                 async {
                     val hit = semaphore.withPermit {
-                        evaluate(stock, stock.code in indicatorCodes, runPatterns, benchmark, elapsedTradingMinutes)
+                        evaluate(
+                            stock,
+                            stock.code in indicatorCodes,
+                            runPatterns,
+                            benchmark,
+                            ratioElapsedMinutes,
+                            appendLiveBar,
+                        )
                     }
                     synchronized(this@IndicatorScreener) {
                         completed++
@@ -91,7 +106,7 @@ class IndicatorScreener(private val sina: SinaClient) {
             throw Http.HttpError("历史数据成功率过低: $successful/$total")
         }
 
-        val filled = fillLiveData(evaluated)
+        val filled = fillLiveData(evaluated, ratioElapsedMinutes)
         val strict = orderStrictHits(
             evaluated.mapNotNull { item -> item?.takeIf { it.strict }?.hit?.let { filled[it.code] } }
         ).distinctBy { it.code }
@@ -127,11 +142,10 @@ class IndicatorScreener(private val sina: SinaClient) {
      * 新浪日线接口盘中不含当日（最后一根是昨天），所以这两个值只能另取一次实时行情；
      * 取不到就保持 null，界面不显示量价标签，不影响选股结果本身。
      */
-    private fun fillLiveData(evaluated: List<Evaluated?>): Map<String, ScreenHit> {
+    private fun fillLiveData(evaluated: List<Evaluated?>, ratioElapsedMinutes: Int): Map<String, ScreenHit> {
         val items = evaluated.filterNotNull().filter { it.hit != null }
         if (items.isEmpty()) return emptyMap()
         val live = runCatching { sina.quotes(items.mapNotNull { it.hit?.code }) }.getOrDefault(emptyMap())
-        val elapsed = TradingCalendar.tradingMinutesElapsed()
         return items.associate { item ->
             val hit = item.hit ?: error("带入实时行情的选股项缺少指标命中数据")
             val quote = live[hit.code]
@@ -140,7 +154,7 @@ class IndicatorScreener(private val sina: SinaClient) {
             } else {
                 hit.copy(
                     changePct = quote.changePct,
-                    volumeRatio = VolumeRatio.of(quote.volume, item.avgVolume20, elapsed),
+                    volumeRatio = VolumeRatio.of(quote.volume, item.avgVolume20, ratioElapsedMinutes),
                     priceContext = item.window?.contextOf(quote.price),
                 )
             }
@@ -150,13 +164,19 @@ class IndicatorScreener(private val sina: SinaClient) {
     /**
      * 把当日实时快照拼成一根 K 线接到日线末尾。
      *
-     * 新浪日线接口盘中不含当日（最后一根是昨天），不补的话选股的指标和「当前价」都会滞后一天，
-     * 而 macOS 版用的 akshare 日线是含当日的。收盘后日线已含当日，此时直接用日线数据，不再覆盖。
+     * 只有 [appendLiveBar] 为真（指数行情确认今天且已有交易分钟）才补：周末/盘前/午夜
+     * 拿到的是上一交易日快照，补成“今天”会把昨天的量价重复算一遍。
+     * 收盘后日线已含当日，此时直接用日线数据，不再覆盖。
      */
-    private fun withTodayBar(history: List<DayBar>, stock: ActiveStock): List<DayBar> {
+    private fun withTodayBar(
+        history: List<DayBar>,
+        stock: ActiveStock,
+        appendLiveBar: Boolean,
+    ): List<DayBar> {
         val today = TimeUtils.todayText()
         if (history.lastOrNull()?.date == today) return history
-        if (stock.price <= 0) return history
+        if (!appendLiveBar) return history
+        if (stock.price <= 0 || stock.volume <= 0) return history
         return history + DayBar(
             date = today,
             open = stock.open.takeIf { it > 0 } ?: stock.price,
@@ -189,7 +209,8 @@ class IndicatorScreener(private val sina: SinaClient) {
         includeIndicators: Boolean,
         runPatterns: Boolean,
         benchmark: List<DayBar>?,
-        elapsedTradingMinutes: Int,
+        ratioElapsedMinutes: Int,
+        appendLiveBar: Boolean,
     ): Evaluated? {
         return try {
             // 限速用 delay 而不是 Thread.sleep：不占死 IO 线程，四个并发槽位也更稳。
@@ -210,14 +231,14 @@ class IndicatorScreener(private val sina: SinaClient) {
                 FiveOneThreeInspection(false, false, false, null)
             }
             val fiveOneThree = fiveOneThreeInspection.hit
-            // 日线序列是否已经带上当日随数据源而变，缺了就补一根，否则指标和价格会滞后一天。
-            val bars = withTodayBar(history, stock)
+            // 日线序列是否已经带上当日随数据源而变；只有指数确认“今天是交易日且已有行情”才补。
+            val bars = withTodayBar(history, stock, appendLiveBar)
             val avgVolume20 = averageVolumeExcludingToday(bars)
             val trendHit = if (runPatterns) {
                 val trendSetup = TrendEntryStrategy.evaluateDaily(
                     bars,
                     benchmark,
-                    elapsedTradingMinutes = elapsedTradingMinutes,
+                    elapsedTradingMinutes = ratioElapsedMinutes,
                 )
                 trendSetup.takeIf { it.type != EntrySetupType.NONE }?.let {
                     // 为什么：趋势命中项的「技术 X/100」并入统一四维综合评分（快照链路），
@@ -242,7 +263,7 @@ class IndicatorScreener(private val sina: SinaClient) {
                         } else {
                             Double.NaN
                         },
-                        volumeRatio = VolumeRatio.of(stock.volume, avgVolume20, elapsedTradingMinutes),
+                        volumeRatio = VolumeRatio.of(stock.volume, avgVolume20, ratioElapsedMinutes),
                         entrySetup = it,
                         technicalScore = technical?.technicalScore ?: 40,
                         weeklyTrendLabel = technical?.weeklyTrend?.label ?: "数据不足",

@@ -717,7 +717,10 @@ object IntradayTactics {
      */
     private fun reclaimSupport(input: Input, deep: Boolean, red: Boolean): IntradaySignal {
         val cost = pnlText(input)
-        val confirmed = confirmedTRebound(input)
+        // 大盘/板块塌陷时，站回支撑不构成可执行的企稳确认：降为「站回待确认」，
+        // 但仍保留塌陷期的专门说明，不能只靠通用「尚未确认」文案。
+        val collapseBlocked = deep && input.collapse
+        val confirmed = confirmedTRebound(input) && !collapseBlocked
         val action = when {
             deep && input.collapse ->
                 "大盘/板块塌陷：站回也不补仓（不追加仓位）——支撑在系统性下跌里还会再破；保留底仓，机动仓滚动做T降低成本，" +

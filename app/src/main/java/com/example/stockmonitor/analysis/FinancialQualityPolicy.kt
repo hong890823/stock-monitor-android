@@ -111,9 +111,17 @@ object FinancialQualityPolicy {
         val inventoryGrowth = growth(latestBalance?.inventory, previousBalance?.inventory)
         if (inventoryGrowth == null || revenueGrowth == null) {
             dataGaps.add("存货增速与营业收入增速需要最新期和去年同期的利润表、资产负债表")
-        } else if (inventoryGrowth > 0 && inventoryGrowth >= revenueGrowth * INVENTORY_GROWTH_MULTIPLE) {
+        } else if (inventoryGrowth > 0 && revenueGrowth > 0 &&
+            inventoryGrowth >= revenueGrowth * INVENTORY_GROWTH_MULTIPLE
+        ) {
             warnings.add(
                 "存货增速 ${percent(inventoryGrowth)}，营业收入增速 ${percent(revenueGrowth)}，达到营业收入增速的 2 倍以上，需警惕备货未兑现",
+            )
+        } else if (inventoryGrowth > 0 && revenueGrowth <= 0) {
+            // 营收负增长时“2 倍”比较没有意义（负数乘 2 更小，旧实现会误触发）。
+            // 营收下滑而存货上升本身就是独立的风险组合。
+            warnings.add(
+                "营业收入同比 ${percent(revenueGrowth)}，存货同比 ${percent(inventoryGrowth)}：营收下滑而存货上升，需核查备货变现与减值风险",
             )
         }
 

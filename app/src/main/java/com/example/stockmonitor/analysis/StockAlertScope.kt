@@ -16,7 +16,7 @@ enum class StockAlertType {
 }
 
 object StockAlertScope {
-    private val portfolioSignalLabels = setOf("买入确认", "买入观察", "减仓风险")
+    private val portfolioSignalLabels = setOf("买入确认", "买入观察", "破位提示", "减仓风险")
 
     fun heldCodes(positions: List<Position>): Set<String> = positions
         .filter { it.quantity.isFinite() && it.quantity > 0 }
@@ -27,10 +27,11 @@ object StockAlertScope {
         type: StockAlertType,
         held: Boolean,
         buyPointConfirmed: Boolean = false,
+        watchlistEnabled: Boolean = false,
     ): Boolean = if (type == StockAlertType.CONFIRMED_BUY) {
         buyPointConfirmed
     } else {
-        held
+        held || watchlistEnabled
     }
 
     fun shouldNotifyPortfolioSignal(signal: String, exitStage: HoldingExitStage?): Boolean =

@@ -49,7 +49,8 @@ class PortfolioSwingTest {
         ).rows.single()
 
         assertEquals(SwingStatus.BOTTOM_TRIAL, result.status)
-        assertTrue(result.addQuantity <= 500.0 * 0.25)
+        // 初始仓位 5% × 25% = 125 股上限，主板按 100 股整手 → 100 股（不能是 0）。
+        assertEquals(100.0, result.addQuantity, 0.0)
         assertTrue(result.reason.contains("25%"))
     }
 
@@ -219,6 +220,29 @@ class PortfolioSwingTest {
         val incomplete = PortfolioSwing.evaluate(config, evidence - second.code, market, date, now)
         assertNull(incomplete.preferredCode)
         assertTrue(incomplete.reportLines().joinToString().contains("缺少持仓现价"))
+    }
+
+    @Test
+    fun suspendedHoldingDoesNotBlockAdditionsToOtherHoldings() {
+        val suspended = stock.copy(code = "sz000001", name = "停牌股")
+        val config = portfolio.copy(
+            availableCapital = 90_000.0,
+            positions = mutableListOf(stock, suspended),
+        )
+        val staleQuote = evidence(suspended.code).quote.copy(quoteDate = "2026-10-14")
+        val evidence = mapOf(
+            stock.code to evidence(),
+            suspended.code to evidence(suspended.code).copy(quote = staleQuote),
+        )
+
+        val result = PortfolioSwing.evaluate(config, evidence, market, date, now)
+
+        assertEquals(stock.code, result.preferredCode)
+        assertTrue(result.rows.first { it.code == stock.code }.addQuantity > 0)
+        val suspendedRow = result.rows.first { it.code == suspended.code }
+        assertEquals(0.0, suspendedRow.addQuantity, 0.0)
+        assertTrue(suspendedRow.reason.contains("停牌"))
+        assertNull(result.capitalIssue)
     }
 
     @Test

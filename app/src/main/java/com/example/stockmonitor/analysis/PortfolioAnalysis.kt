@@ -6,6 +6,7 @@ import com.example.stockmonitor.core.PositionAllocationConfig
 import com.example.stockmonitor.core.Quote
 import com.example.stockmonitor.core.RowSnapshot
 import com.example.stockmonitor.core.TradeBook
+import com.example.stockmonitor.core.cashPosition
 import com.example.stockmonitor.core.resolvedAvailableCapital
 import java.util.Locale
 import kotlin.math.abs
@@ -137,6 +138,11 @@ object PortfolioAnalysis {
         val breakout = technical.entrySetup.type == EntrySetupType.BREAKOUT && technical.entrySetup.confirmed
         val pullback = technical.entrySetup.type == EntrySetupType.M20_PULLBACK && technical.entrySetup.confirmed
         val trendWeak = technical.entrySetup.trendWeak
+        // 追高边界与新买共用：加仓、报告里的“买入观察”都受同一 MA5 乖离上限约束，
+        // 避免同一只票“加仓可以、新买不行”。差异只体现在仓位，不体现在价格条件。
+        val biasFromMa5Pct = technical.ma5.takeIf { it.isFinite() && it > 0.0 }
+            ?.let { (price / it - 1.0) * 100.0 }
+        val chasingHigh = biasFromMa5Pct != null && biasFromMa5Pct > StrategyThresholds.MAX_CHASE_MA5_BIAS_PCT
         val structureEvidence = BreakoutRiskEvidence(
             price = price,
             dailyHighPrice = null,
@@ -148,8 +154,7 @@ object PortfolioAnalysis {
             priceLocation = technical.priceContext?.location,
             ma5 = technical.ma5.takeIf { it.isFinite() && it > 0.0 },
             ma20 = technical.ma20.takeIf { it.isFinite() && it > 0.0 },
-            biasFromMa5Pct = technical.ma5.takeIf { it.isFinite() && it > 0.0 }
-                ?.let { (price / it - 1.0) * 100.0 },
+            biasFromMa5Pct = biasFromMa5Pct,
         )
         val structureRetained = technical.entrySetup.ma20SlopePct?.let { it.isFinite() && it > 0.0 } == true &&
             !trendWeak &&
@@ -183,8 +188,7 @@ object PortfolioAnalysis {
                 atrPct = technical.volatility.atrPct,
                 volumeRatio = technical.volumeRatio,
                 changePct = changePct,
-                biasFromMa5Pct = technical.ma5.takeIf { it.isFinite() && it > 0.0 }
-                    ?.let { (price / it - 1.0) * 100.0 },
+                biasFromMa5Pct = biasFromMa5Pct,
                 lowerHighs = lowerHighs,
                 volumeWithoutProgress = volumeWithoutProgress,
             ),
@@ -294,7 +298,7 @@ object PortfolioAnalysis {
                         triggers.joinToString("；") + "。" + envNote(envContext, changePct)
                 }
             }
-        } else if (pullback && technical.entrySetup.canBuy && score >= 2) {
+        } else if (pullback && technical.entrySetup.canBuy && score >= 2 && !chasingHigh) {
             signal = "买入观察"
             action = entryAction(
                 setup = technical.entrySetup,
@@ -310,6 +314,9 @@ object PortfolioAnalysis {
             signal = "等待"
             // 同为「等待」，成因不同就该给不同的下一步，不能每只股票印同一句话。
             action = when {
+                chasingHigh ->
+                    "现价较 MA5 乖离 ${pct(biasFromMa5Pct!!)}，超过 " +
+                        "${pct(StrategyThresholds.MAX_CHASE_MA5_BIAS_PCT)} 追高上限：等回踩 MA5 附近缩量止跌再评估，不在拉升末端追入。"
                 score >= 2 && volumeSignal == VolumePriceSignal.EXPAND_UP && toResistancePct <= 2 ->
                     "已放量走强、评分尚可，且逼近压力 $resistanceLabel（还差 ${pct(toResistancePct)}）；" +
                         "等有效突破站稳再考虑初始仓位。"
@@ -616,6 +623,7 @@ object PortfolioAnalysis {
         fundamentalAlert = result.fundamentalHealth?.level == HealthLevel.ALERT,
         fundamentalReason = result.fundamentalHealth?.reasons?.joinToString("；").orEmpty(),
         buyApproved = result.priorityBuyApproved,
+        mitigated = result.exitDecision?.stage == HoldingExitStage.NOTICE,
     )
 
     fun prioritySummary(results: List<PositionResult>, asOf: String = TimeUtils.todayText()): List<String> =
@@ -707,7 +715,6 @@ object PortfolioAnalysis {
         todayAcquisitions: Map<String, DayPnl.Acquisition> = emptyMap(),
         technicalTrends: Map<String, TechnicalTrendSnapshot> = emptyMap(),
     ): List<String> = buildList {
-        val availableCapital = portfolio.resolvedAvailableCapital()
         val holdings = portfolio.positions.filter { it.quantity.isFinite() && it.quantity > 0 }
         val byCode = results.filter { it.quantity.isFinite() && it.quantity > 0 }
             .associateBy { it.code }
@@ -723,18 +730,22 @@ object PortfolioAnalysis {
             }
             (quoteValue ?: result?.marketValue)?.let { it.isFinite() && it >= 0 } == true
         }
-        val accountLine = if (portfolio.totalCapital.isFinite() && portfolio.totalCapital > 0 &&
-            availableCapital.isFinite() && availableCapital >= 0 && complete) {
-            val marketValue = holdings.sumOf { position ->
-                quotes[position.code]?.price?.takeIf { it.isFinite() && it > 0 }?.times(position.quantity)
-                    ?: byCode.getValue(position.code).marketValue
+        val cash = portfolio.cashPosition()
+        val accountLine = when {
+            // 成本没填/总资金没填时可用现金“算不出来”，不能当 0 去凑账户盈亏——
+            // 否则 100 万本金 + 成本 0 的持仓会显示 -90% 的假亏损。
+            cash.blockedReason != null -> "账户总盈亏：暂无法计算（${cash.blockedReason}）"
+            !complete -> "账户总盈亏：暂无法计算（持仓行情不完整）"
+            else -> {
+                val marketValue = holdings.sumOf { position ->
+                    quotes[position.code]?.price?.takeIf { it.isFinite() && it > 0 }?.times(position.quantity)
+                        ?: byCode.getValue(position.code).marketValue
+                }
+                val totalAssets = marketValue + cash.value
+                val pnl = totalAssets - portfolio.totalCapital
+                val ratio = pnl / portfolio.totalCapital * 100
+                "账户总盈亏：${DayPnl.money(pnl)}元（${DayPnl.pct(ratio)}）"
             }
-            val totalAssets = marketValue + availableCapital
-            val pnl = totalAssets - portfolio.totalCapital
-            val ratio = pnl / portfolio.totalCapital * 100
-            "账户总盈亏：${DayPnl.money(pnl)}元（${DayPnl.pct(ratio)}）"
-        } else {
-            "账户总盈亏：暂无法计算（总资金、剩余资金或持仓行情不完整）"
         }
         val todayQuotes = quotes.filter { (code, quote) ->
             quote.code == code && quote.quoteDate == TimeUtils.todayText()
@@ -769,9 +780,12 @@ object PortfolioAnalysis {
         add(todayPerformance(daily, accountDaily, todayQuotes["sh000001"]))
         add(marketLine)
         add("整体建议：" + accountSuggestion(currentResults, portfolio) + priorityDetail.orEmpty())
+        // 与完整报告同一口径：任一持仓处于 EXIT/REDUCE/WATCH/基本面复核时，本轮不新增资金。
+        // 只在卡片里按本行 BUY 判断会出现“卡片说追加、报告说暂不新增”的矛盾。
+        val allowBuy = activeResults.none { it.quantity > 0 && priorityDecision(it).order <= 3 }
         swingPlan?.rows
             ?.filter { row ->
-                row.addQuantity > 0 && activeResults.firstOrNull { it.code == row.code }
+                allowBuy && row.addQuantity > 0 && activeResults.firstOrNull { it.code == row.code }
                     ?.let { priorityDecision(it).state == PriorityState.BUY } == true
             }
             ?.take(PortfolioSwing.MAX_FOCUS_POSITIONS)
@@ -924,6 +938,21 @@ object PortfolioAnalysis {
      * 不传（或一只都算不出）时整段不出现，不印 0 假装没亏没赚。
      * [market] 用来生成开头的「今日要点」，也参与逐股的环境改写。
      */
+    /** 分析缺口披露：缺一只的分析结果，不等于那只没有风险。 */
+    private fun analysisGapNote(
+        results: List<PositionResult>,
+        expectedCount: Int,
+        failures: List<String>,
+    ): String? {
+        val analyzed = results.count { it.quantity.isFinite() && it.quantity > 0 }
+        val missing = (expectedCount - analyzed).coerceAtLeast(0)
+        if (missing <= 0 && failures.isEmpty()) return null
+        val names = failures.distinct().joinToString("、")
+        return "有 ${maxOf(missing, failures.size)} 只持仓未完成分析" +
+            (if (names.isNotBlank()) "（$names）" else "") +
+            "，风险未核实，不能据此认为没有风险；请重跑分析或核对行情。"
+    }
+
     fun formatReport(
         results: List<PositionResult>,
         analyzedAt: String,
@@ -933,6 +962,10 @@ object PortfolioAnalysis {
         marketEnvironment: MarketEnvironmentQuality? = null,
         swingPlan: SwingPlan? = null,
         positionAllocations: Map<String, PositionAllocationConfig> = emptyMap(),
+        /** 期望参与分析的持仓数（数量 > 0）；results 少于它说明有股票分析失败。 */
+        expectedPositionCount: Int = results.count { it.quantity.isFinite() && it.quantity > 0 },
+        /** 分析失败的持仓名称（可选），用于报告点名披露缺口。 */
+        analysisFailures: List<String> = emptyList(),
     ): String {
         val allowBuy = results.none { it.quantity > 0 && priorityDecision(it).order <= 3 }
         val effectiveSwing = swingPlan?.copy(rows = swingPlan.rows.map { row ->
@@ -946,7 +979,12 @@ object PortfolioAnalysis {
         // 开头给「今日要点」：十来段的长报告，想看「今天要干什么」不该翻到底。
         lines.add("")
         lines.add("持仓整体操作建议")
-        overallAdvice(results, effectiveSwing).forEach { lines.add("· $it") }
+        val gap = analysisGapNote(results, expectedPositionCount, analysisFailures)
+        gap?.let { lines.add("· $it") }
+        overallAdvice(results, effectiveSwing)
+            // 有分析缺口时不能再说“暂无已确认的买卖动作”：没分析不等于没动作。
+            .filterNot { gap != null && it.startsWith("当前优先事项：暂无已确认的买卖动作") }
+            .forEach { lines.add("· $it") }
         lines.add("")
         lines.add("📌 今日要点")
         brief(results, dayPnl, market, effectiveSwing)
@@ -1074,7 +1112,7 @@ object PortfolioAnalysis {
                     "基本面：${health.level.label}｜${health.reasons.joinToString("；")}｜判断于 ${health.analyzedAt}" +
                         "（财务与公告可见面，不含行业景气与订单）"
                 )
-            }
+            } ?: lines.add("基本面：未分析或健康度已过期，不作为“无风险”的证据；需要时在「工具」页补拉")
             lines.add("应对：${decision.reason}")
             lines.add("数据口径：行情${result.analysisDate.ifBlank { "未知" }}｜技术${result.priorityEvidenceDate.ifBlank { "未知" }}｜前复权技术位｜${PortfolioPriorityPolicy.VERSION}")
             lines.add("")

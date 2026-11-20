@@ -29,6 +29,8 @@ data class IntradayAdditionBase(
     val riskRewardApproved: Boolean,
     val estimatedFeeRate: Double = 0.0003,
     val estimatedFeeFlat: Double = 5.0,
+    /** 生成建议时的自由现金；按最高接受价重算数量时使用。null 表示不参与（兼容旧调用）。 */
+    val availableCapital: Double? = null,
     val portfolioFingerprint: String = "",
     val evaluationFingerprint: String = "",
 ) {
@@ -174,11 +176,22 @@ object IntradayAdditionPolicy {
                 state = nextState,
             )
         }
-        val quantity = lotFloor(min(base.baselineAddQuantity, base.maxQuantityAtHighestPrice))
+        // 数量必须按“最高接受价 + 当前可用现金”重算：窗口内价格上移时，同样的股数会
+// 占用更多现金；旧实现把 maxQuantityAtHighestPrice 直接等于 baseline，等于没重算。
+        val cashLimited = base.availableCapital?.let { cash ->
+            if (!cash.isFinite() || cash <= 0.0) {
+                0.0
+            } else {
+                ((cash - base.estimatedFeeFlat) / (upper * (1.0 + base.estimatedFeeRate)))
+                    .coerceAtLeast(0.0)
+            }
+        } ?: Double.POSITIVE_INFINITY
+        val maxAtUpper = if (base.availableCapital != null) cashLimited else base.maxQuantityAtHighestPrice
+        val quantity = lotFloor(min(base.baselineAddQuantity, min(maxAtUpper, cashLimited)))
         if (quantity < LOT) {
             return IntradayAdditionDecision(
                 IntradayAdditionStatus.BLOCKED,
-                "按最高接受价重算后不足100股，不生成可执行补仓",
+                "按最高接受价和可用现金重算后不足100股，不生成可执行补仓",
                 lower,
                 upper,
                 sampleCount = freshSamples.size,

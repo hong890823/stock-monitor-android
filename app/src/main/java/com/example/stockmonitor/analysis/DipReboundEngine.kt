@@ -99,6 +99,8 @@ class DipReboundEngine {
         /** 回升段量能不缩才给强提醒（震动）。 */
         val vibrate: Boolean,
         val stock: Boolean,
+        /** 触发本次提醒的日内低点（%）；更深的新低是新事件，用于同日多次提醒的去重。 */
+        val lowPct: Double = 0.0,
     )
 
     private data class State(
@@ -217,6 +219,7 @@ class DipReboundEngine {
             body = "$head；$volumeText。$takeaway",
             vibrate = strong,
             stock = sample.stock,
+            lowPct = dayLowPct,
         )
     }
 

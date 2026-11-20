@@ -194,8 +194,13 @@ class DailyReviewTest {
         val risk = result(
             code = "sh600001",
             name = "乙",
+            price = 8.0,
             signal = "减仓风险",
             action = "跌破支撑，分批减仓或退出",
+        ).copy(
+            priorityRiskConfirmed = true,
+            analysisDate = com.example.stockmonitor.analysis.TimeUtils.todayText(),
+            priorityEvidenceDate = com.example.stockmonitor.analysis.TimeUtils.todayText(),
         )
         val text = report(
             positions = listOf(Position("sh600001", "乙", 1_000.0, 8.5)),
@@ -203,10 +208,11 @@ class DailyReviewTest {
             results = listOf(risk),
         )
 
-        assertTrue(text.contains("当前优先事项"))
-        assertTrue(text.contains("乙"))
-        assertTrue(text.contains("暂无已确认的买卖动作"))
-        assertTrue(text.indexOf("当前优先事项") < text.indexOf("持仓整体操作建议"))
+        assertTrue(text.contains("持仓整体操作建议"))
+        val top = text.substringBefore("一、")
+        assertTrue(top.contains("优先处理"))
+        assertTrue(top.contains("乙"))
+        assertTrue(top.contains("减仓评估"))
     }
 
     // ── 三、近两日个股重大利好 ────────────────────────────────────────────────
@@ -250,9 +256,11 @@ class DailyReviewTest {
         )
         val body = sectionBody(text, "三、")
 
-        // 空态收敛为单行结论：不再「正文 + 同义结论」复读。
-        assertTrue(body.contains("结论：近两日无利好/利空消息面变化"))
-        assertFalse(body.contains("近两日没有命中"))
+        // 利空词一票否决：混着减持的「利好」不列进重大利好，按既定口径也不单列重大利空。
+        assertFalse(body.contains("重大利好："))
+        assertFalse(body.contains("业绩预增及股东减持"))
+        assertTrue(body.contains("近两日未出现按既定口径识别的重大利好或重大利空"))
+        assertTrue(body.contains("结论：交易所公告与媒体快讯已分开列示"))
     }
 
     @Test
@@ -265,7 +273,7 @@ class DailyReviewTest {
         val body = sectionBody(text, "三、")
 
         // 没拉到公告 ≠ 没有消息：空清单不落库（Repo.publishAnnouncements），没数据就写暂缺。
-        assertTrue(body.contains("公告数据暂缺"))
+        assertTrue(body.contains("数据暂缺"))
         assertTrue(body.contains("不等于没有消息"))
         assertFalse(body.contains("近两日没有命中"))
     }
@@ -393,19 +401,21 @@ class DailyReviewTest {
 
     @Test
     fun reportHasEvidenceSectionsAndOneSharedAdviceAtTop() {
+        val today = com.example.stockmonitor.analysis.TimeUtils.todayText()
         val text = report(
             positions = listOf(Position("sh600000", "甲", 1_000.0, 8.5)),
             quotes = mapOf("sh600000" to quote("sh600000", 8.8, 8.6, "甲")),
-            results = listOf(result()),
+            results = listOf(result().copy(analysisDate = today, priorityEvidenceDate = today)),
         )
 
         ReportSectionAssertions.assertEverySectionHasConclusion(text, leastSections = 3)
         assertFalse(text.contains("个股技术面"))
         assertFalse(text.contains("操作优先级"))
         assertTrue(text.indexOf("持仓整体操作建议") in 0 until text.indexOf("一、"))
-        com.example.stockmonitor.analysis.PortfolioAnalysis.overallAdvice(listOf(result())).forEach {
-            assertTrue(text.substringBefore("一、").contains(it))
-        }
+        // 普通持有观察且无风险：顶部只给「没有已确认风险 + 维持原有仓位」，不复制整段 overallAdvice。
+        val top = text.substringBefore("一、")
+        assertTrue(top.contains("当前没有已确认的持仓风险"))
+        assertTrue(top.contains("维持原有仓位"))
     }
 
     @Test
@@ -751,6 +761,7 @@ class DailyReviewTest {
 
     @Test
     fun overallAdviceOrdersRiskBeforeHoldAndExcludesWatchOnly() {
+        val today = com.example.stockmonitor.analysis.TimeUtils.todayText()
         val text = report(
             positions = listOf(
                 Position("sh600000", "破位股", 1_000.0, 8.5),
@@ -765,23 +776,34 @@ class DailyReviewTest {
                 "sh600003" to quote("sh600003", 9.0, 8.6, "等待股"),
             ),
             results = listOf(
-                result(code = "sh600000", name = "破位股", signal = "减仓风险"),
-                result(code = "sh600001", name = "转弱股", signal = "趋势转弱观察", trendWeak = true),
-                result(code = "sh600002", name = "持有股", signal = "持有观察"),
-                result(code = "sh600003", name = "等待股", quantity = 0.0, signal = "等待"),
+                result(code = "sh600000", name = "破位股", price = 8.0, signal = "减仓风险").copy(
+                    priorityRiskConfirmed = true,
+                    analysisDate = today,
+                    priorityEvidenceDate = today,
+                ),
+                result(code = "sh600001", name = "转弱股", price = 8.2, signal = "趋势转弱观察", trendWeak = true).copy(
+                    analysisDate = today,
+                    priorityEvidenceDate = today,
+                ),
+                result(code = "sh600002", name = "持有股", price = 8.8, signal = "持有观察").copy(
+                    analysisDate = today,
+                    priorityEvidenceDate = today,
+                ),
+                result(code = "sh600003", name = "等待股", quantity = 0.0, signal = "等待").copy(
+                    analysisDate = today,
+                    priorityEvidenceDate = today,
+                ),
             ),
         )
         val body = text.substringBefore("一、")
 
         val iAct = body.indexOf("破位股")
         val iWeak = body.indexOf("转弱股")
-        val iHold = body.indexOf("持有股")
-        val iWait = body.indexOf("等待股")
-        assertTrue("P1 应排在最前", iAct in 0 until iWeak)
-        assertTrue("P2 应在 P1 之后", iWeak in 0 until iHold)
-        assertTrue(iHold >= 0)
-        assertEquals(-1, iWait)
-        assertTrue(body.contains("按证据核实，不自动卖出"))
+        assertTrue("破位应先于转弱", iAct in 0 until iWeak)
+        assertTrue(body.contains("风险观察"))
+        // 持有观察不在风险建议里；0 仓观察股没有可减仓位，也不能进入整体建议。
+        assertEquals(-1, body.indexOf("持有股"))
+        assertEquals(-1, body.indexOf("等待股"))
     }
 
     @Test
@@ -798,12 +820,19 @@ class DailyReviewTest {
                     atrPct = 1.0,
                     signal = "减仓风险",
                     action = deepAction,
+                    support = 75.0,
+                ).copy(
+                    priorityRiskConfirmed = true,
+                    analysisDate = com.example.stockmonitor.analysis.TimeUtils.todayText(),
+                    priorityEvidenceDate = com.example.stockmonitor.analysis.TimeUtils.todayText(),
                 ),
             ),
         )
         val body = text.substringBefore("一、")
 
-        assertTrue(body.contains("不自动补仓或做T"))
+        // 深套 + 确认破位：走当前组合优先级的「减仓评估」，不再输出旧的「两种剧本」。
+        assertTrue(body.contains("减仓评估"))
+        assertTrue(text.contains("深套"))
         assertFalse(body.contains("两种剧本"))
         assertFalse(body.contains("①逻辑/基本面已破坏"))
         assertFalse(body.contains("②逻辑还在"))
@@ -813,14 +842,18 @@ class DailyReviewTest {
 
     @Test
     fun priorityHoldNamesAreExplicitlyDoNothing() {
+        val today = com.example.stockmonitor.analysis.TimeUtils.todayText()
         val text = report(
             positions = listOf(Position("sh600000", "甲", 1_000.0, 8.5)),
             quotes = mapOf("sh600000" to quote("sh600000", 8.8, 8.6, "甲")),
-            results = listOf(result(signal = "持有观察")),
+            results = listOf(
+                result(signal = "持有观察").copy(analysisDate = today, priorityEvidenceDate = today),
+            ),
         )
         val body = text.substringBefore("一、")
 
-        assertTrue(body.contains("暂无已确认的买卖动作"))
+        assertTrue(body.contains("当前没有已确认的持仓风险"))
+        assertTrue(body.contains("维持原有仓位"))
     }
 
     @Test
@@ -845,6 +878,67 @@ class DailyReviewTest {
         // 但技术面要覆盖它——你毕竟把它放进持仓页了。
         assertFalse(text.contains("个股技术面"))
         assertFalse(text.substringBefore("一、").contains("观察股"))
+    }
+
+    @Test
+    fun collapseEnvironmentDoesNotSayMaintainPositions() {
+        val today = com.example.stockmonitor.analysis.TimeUtils.todayText()
+        val text = report(
+            positions = listOf(Position("sh600000", "甲", 1_000.0, 8.5)),
+            quotes = mapOf("sh600000" to quote("sh600000", 8.8, 8.6, "甲")),
+            results = listOf(
+                result().copy(analysisDate = today, priorityEvidenceDate = today),
+            ),
+            market = MarketState(
+                regime = MarketRegime.COLLAPSE,
+                reason = "测试塌陷",
+                changePct = -2.0,
+                ma20Pct = -3.0,
+                ma60Pct = -5.0,
+                change5d = -4.0,
+                change20d = -8.0,
+            ),
+        )
+        val top = text.substringBefore("一、")
+
+        assertTrue(top.contains("先降整体仓位"))
+        assertFalse("塌陷期不能再说维持原有仓位", top.contains("维持原有仓位"))
+    }
+
+    @Test
+    fun missingAnalysisIsDisclosedAndNeverReadsAsNoRisk() {
+        val today = com.example.stockmonitor.analysis.TimeUtils.todayText()
+        val text = com.example.stockmonitor.analysis.DailyReview.generate(
+            com.example.stockmonitor.analysis.DailyReview.Inputs(
+                positions = listOf(
+                    Position("sh600000", "甲", 1_000.0, 8.5),
+                    Position("sh600001", "乙", 1_000.0, 8.5),
+                ),
+                quotes = mapOf(
+                    "sh600000" to quote("sh600000", 8.8, 8.6, "甲"),
+                    "sh600001" to quote("sh600001", 8.2, 8.6, "乙"),
+                ),
+                // 乙 的分析失败：results 少于持仓，报告必须披露缺口，不能写“没有已确认风险”。
+                results = listOf(
+                    result(code = "sh600000", name = "甲").copy(
+                        analysisDate = today,
+                        priorityEvidenceDate = today,
+                    ),
+                ),
+                portfolio = Portfolio(totalCapital = 1_000_000.0, maxPositionPct = 20.0),
+                indexQuote = quote("sh000001", 3_200.0, 3_200.0, "上证指数"),
+                analyzedAt = "2026-10-12 16:05",
+                expectedPositionCount = 2,
+                analysisFailures = listOf("乙"),
+            ),
+        )
+
+        val top = text.substringBefore("一、")
+        assertTrue(top.contains("未完成分析"))
+        assertTrue(top.contains("乙"))
+        assertTrue(top.contains("不能据此认为没有风险"))
+        assertFalse(top.contains("当前没有已确认的持仓风险"))
+        assertTrue(sectionBody(text, "二、").contains("风险未核实"))
     }
 
     // ── 环境：塌陷期复盘要先看系统性风险，不是逐只慢慢看 ─────────────────────

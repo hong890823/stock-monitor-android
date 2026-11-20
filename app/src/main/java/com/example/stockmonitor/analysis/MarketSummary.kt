@@ -64,6 +64,11 @@ object MarketSummary {
         )
         out.appendLine("📊 $monthDay 复盘")
         out.appendLine()
+        if (TradingCalendar.isMarketOpen(calendar)) {
+            // 手动“立即生成”可能在盘中触发：当日成交额/量比还没走完，不能按全天口径解读。
+            out.appendLine("⚠️ 盘中快照：当日成交量/成交额尚未完成，量价对比与全天口径不可直接比较。")
+            out.appendLine()
+        }
         // 开头给「今日要点」：八节的长报告，想看「今天什么情况、要不要动」不该翻到底。
         out.appendLine("📌 今日要点")
         brief(inputs).forEach { out.appendLine("· $it") }
@@ -415,14 +420,16 @@ object MarketSummary {
             "赚钱效应：" + if (conTotal <= 0) {
                 "暂缺"
             } else {
+                val limitText = inputs.limits?.let {
+                    "｜涨停 ${it.up.size} 家、跌停 ${it.down.size} 家"
+                } ?: "｜涨跌停数据暂缺"
                 String.format(
                     Locale.CHINA,
-                    "概念板块上涨 %d : 下跌 %d（占比 %.0f%%）｜涨停 %d 家、跌停 %d 家",
+                    "概念板块上涨 %d : 下跌 %d（占比 %.0f%%）%s",
                     conRising,
                     conFalling,
                     conRising.toDouble() / conTotal * 100,
-                    inputs.limits?.up?.size ?: 0,
-                    inputs.limits?.down?.size ?: 0,
+                    limitText,
                 )
             }
         )

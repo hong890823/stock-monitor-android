@@ -15,6 +15,11 @@ data class PriorityInput(
     val fundamentalAlert: Boolean = false,
     val fundamentalReason: String = "",
     val buyApproved: Boolean = false,
+    /**
+     * 单股退出策略已按「低位 + 轻仓 + 基本面未亮红灯」缓释为 NOTICE（去留自定）。
+     * 组合层必须复用同一结论：不能单股说“不强制卖出”，顶部又给“减仓评估”。
+     */
+    val mitigated: Boolean = false,
 )
 
 enum class PriorityState(val order: Int, val label: String) {
@@ -38,6 +43,8 @@ object PortfolioPriorityPolicy {
     const val VERSION = "portfolio-priority-v1"
 
     fun canApproveAddition(input: PriorityInput, asOf: String): Boolean {
+        // 基本面红灯只进核实层，不能因为 order 的 3 > 2 就拿到追加资格。
+        if (input.fundamentalAlert) return false
         val decision = evaluate(input.copy(buyApproved = false), asOf)
         return decision.order > PriorityState.WATCH.order
     }
@@ -49,6 +56,8 @@ object PortfolioPriorityPolicy {
         val weak = pricesValid && input.price < input.ma20 * 0.995
         val state = when {
             !fresh -> PriorityState.WATCH
+            // 缓释档：破位事实仍提示，但不升级成命令式减仓/退出。
+            input.mitigated && (broken || input.highRisk) -> PriorityState.WATCH
             input.riskConfirmed && input.exitTriggered && (broken || input.highRisk) -> PriorityState.EXIT
             input.riskConfirmed && (broken || input.highRisk) -> PriorityState.REDUCE
             broken || weak || input.highRisk -> PriorityState.WATCH
@@ -67,6 +76,8 @@ object PortfolioPriorityPolicy {
             PriorityState.REDUCE -> "风险已确认，评估减少风险敞口；实际卖出仍需核验可卖数量与交易限制"
             PriorityState.WATCH -> when {
                 !fresh -> "行情或技术数据缺失/日期不一致，先刷新核实，不据此生成买卖动作"
+                input.mitigated && broken ->
+                    "跌破支撑，但基本面未亮红灯、价格处低位且仓位轻：破位事实已提示，去留自定，不强制卖出"
                 broken -> "跌破支撑待确认，暂不加仓，观察能否收回；不等于立即卖出"
                 input.highRisk -> "高位结构风险待确认，暂不加仓，不等于立即卖出"
                 else -> "趋势转弱，暂不加仓，观察能否重新站稳；跌破均线不等于触发卖出"

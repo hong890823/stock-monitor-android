@@ -693,6 +693,11 @@ data class ObservationCandidate(
     val sourceExpiresAtMs: Long = 0L,
     val continuousObservation: Boolean = false,
     val limitStreak: Int? = null,
+    /**
+     * 产生当前 [limitStreak] 的首板日（yyyy-MM-dd）。
+     * 同一只票第二次首板时会重置；旧数据为空时调用方回退到 [addedDate]。
+     */
+    val firstBoardDate: String? = null,
     val sealQualityScore: Int? = null,
     val sealQualityCoveragePct: Int? = null,
     val boards: List<String> = emptyList(),

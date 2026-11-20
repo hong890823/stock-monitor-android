@@ -13,7 +13,10 @@ class ExpandableQuoteRowUiTest {
             .readText()
 
         assertTrue(source.contains("fun expandableQuoteRow("))
-        assertTrue(source.contains("data class DetailRow(val label: String, val value: String)"))
+        assertTrue(source.contains("data class DetailRow("))
+        assertTrue(source.contains("val label: String"))
+        assertTrue(source.contains("val value: String"))
+        assertTrue(source.contains("dividerBefore: Boolean = false"))
         assertTrue(source.contains("details: List<DetailRow>"))
         assertTrue(source.contains("onExpansionChanged: (Boolean) -> Unit = {}"))
         assertTrue(source.contains("fun setExpanded(expanded: Boolean)"))

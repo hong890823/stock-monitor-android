@@ -10,6 +10,7 @@ import com.example.stockmonitor.analysis.DailyAdvicePolicy
 import com.example.stockmonitor.analysis.IntradayAdditionState
 import com.example.stockmonitor.analysis.PaperTradeRecord
 import com.example.stockmonitor.analysis.SectorStrengthDay
+import com.example.stockmonitor.analysis.TimeUtils
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -23,13 +24,40 @@ class Store(
     private val prefs: SharedPreferences =
         context.applicationContext.getSharedPreferences("stock_monitor", Context.MODE_PRIVATE)
 
+    /** 解码结果缓存：15 秒 tick 里 watchlist / portfolio / 观察池会被反复读取，避免每次重新解析 JSON。 */
+    private val decodedCache = HashMap<String, Any?>()
+
+    private val cacheInvalidator =
+        SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key != null) synchronized(decodedCache) { decodedCache.remove(key) }
+        }
+
+    init {
+        prefs.registerOnSharedPreferenceChangeListener(cacheInvalidator)
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> cachedJson(key: String, decode: (String?) -> T): T = synchronized(decodedCache) {
+        if (decodedCache.containsKey(key)) return decodedCache[key] as T
+        val value = decode(prefs.getString(key, null))
+        decodedCache[key] = value
+        value
+    }
+
+    private fun cacheJson(key: String, value: Any?) = synchronized(decodedCache) { decodedCache[key] = value }
+
     var watchlist: MutableList<WatchItem>
-        get() = parseWatchlist(prefs.getString(KEY_WATCHLIST, null))
-        set(value) = prefs.edit().putString(KEY_WATCHLIST, toWatchlistJson(value).toString()).apply()
+        get() = cachedJson(KEY_WATCHLIST, ::parseWatchlist).toMutableList()
+        set(value) {
+            cacheJson(KEY_WATCHLIST, value.toList())
+            prefs.edit().putString(KEY_WATCHLIST, toWatchlistJson(value).toString()).apply()
+        }
 
     var portfolio: Portfolio
         // 读档时就折算旧版钉死值，这样后续 copy 改持仓会带着固定修正值浮动。
-        get() = parsePortfolio(prefs.getString(KEY_PORTFOLIO, null)).materializeCapitalCorrection()
+        get() = cachedJson(KEY_PORTFOLIO) {
+            parsePortfolio(it).materializeCapitalCorrection()
+        }
         set(value) {
             val sanitized =
                 value.copy(
@@ -43,6 +71,7 @@ class Store(
                         value.availableCapitalDelta
                             .takeIf { it.isFinite() } ?: 0.0,
                 )
+            cacheJson(KEY_PORTFOLIO, sanitized)
             prefs.edit().putString(KEY_PORTFOLIO, toPortfolioJson(sanitized).toString()).apply()
         }
 
@@ -169,16 +198,21 @@ class Store(
 
     /** 选股后的连续观察池，保存观察阶段、交易日计数和最近一次淘汰原因。 */
     var observationPool: MutableList<ObservationCandidate>
-        get() = ObservationPoolJson.decode(prefs.getString(KEY_OBSERVATION_POOL, null))
-        set(value) = prefs.edit().putString(KEY_OBSERVATION_POOL, ObservationPoolJson.encode(value)).apply()
+        get() = cachedJson(KEY_OBSERVATION_POOL, ObservationPoolJson::decode).toMutableList()
+        set(value) {
+            cacheJson(KEY_OBSERVATION_POOL, value.toList())
+            prefs.edit().putString(KEY_OBSERVATION_POOL, ObservationPoolJson.encode(value)).apply()
+        }
 
     /** 自选股的买点确认状态，独立于观察池保存，避免混入观察池列表和纸上交易。 */
     var watchlistBuyCandidates: MutableList<ObservationCandidate>
-        get() = ObservationPoolJson.decode(prefs.getString(KEY_WATCHLIST_BUY_CANDIDATES, null))
-        set(value) =
+        get() = cachedJson(KEY_WATCHLIST_BUY_CANDIDATES, ObservationPoolJson::decode).toMutableList()
+        set(value) {
+            cacheJson(KEY_WATCHLIST_BUY_CANDIDATES, value.toList())
             prefs.edit()
                 .putString(KEY_WATCHLIST_BUY_CANDIDATES, ObservationPoolJson.encode(value))
                 .apply()
+        }
 
     var fundFlowHistory: Map<String, List<FundFlow>>
         get() = FundFlowHistoryJson.decode(prefs.getString(KEY_FUND_FLOW_HISTORY, null))
@@ -294,13 +328,19 @@ class Store(
 
     /** 交易流水与未平批次的完整账本；旧版本为空时由当前持仓生成 legacy 批次。 */
     var tradeBook: TradeBook
-        get() = TradeLotJson.decode(prefs.getString(KEY_TRADE_BOOK, null))
-        set(value) = prefs.edit().putString(KEY_TRADE_BOOK, TradeLotJson.encode(value)).apply()
+        get() = cachedJson(KEY_TRADE_BOOK, TradeLotJson::decode)
+        set(value) {
+            cacheJson(KEY_TRADE_BOOK, value)
+            prefs.edit().putString(KEY_TRADE_BOOK, TradeLotJson.encode(value)).apply()
+        }
 
     /** 当天按股票保存的建议计划；数量反馈和通知状态与真实成交分开记录。 */
     var dailyAdvicePlans: List<DailyAdvicePlan>
         get() = synchronized(dailyAdviceLock) {
-            val saved = DailyAdviceJson.decode(prefs.getString(KEY_DAILY_ADVICE_PLANS, null))
+            val saved = DailyAdvicePolicy.activePlans(
+                DailyAdviceJson.decode(prefs.getString(KEY_DAILY_ADVICE_PLANS, null)),
+                TimeUtils.todayText(),
+            )
             val reviewed = saved.map { plan ->
                 if (plan.riskPriority >= 2) RiskExitReview.pause(plan, System.currentTimeMillis()) else plan
             }
@@ -327,6 +367,7 @@ class Store(
         currentQuantity: Double,
         atMs: Long = System.currentTimeMillis(),
         riskPriority: Int = 0,
+        riskStage: Int = 0,
     ): DailyAdvicePlan = synchronized(dailyAdviceLock) {
         val existing = dailyAdvicePlans.firstOrNull { it.date == date && it.code == code }
         val preparation = DailyAdvicePolicy.prepare(
@@ -338,6 +379,7 @@ class Store(
             currentQuantity = currentQuantity,
             existing = existing,
             riskPriority = riskPriority,
+            riskStage = riskStage,
         )
         if (preparation.plan == existing) return@synchronized preparation.plan
         val plan = preparation.plan.copy(
@@ -357,6 +399,9 @@ class Store(
         val current = plans.firstOrNull { it.date == date && it.code == code } ?: plan
         if (current != plan) return@synchronized AdviceReservation(false, current, "计划已更新，请使用最新计划重新评估。")
         val result = DailyAdvicePolicy.reserve(current, plans, date, code)
+        // 预约被拒（典型：同日已有其它股票的买入计划）不要写盘：BLOCKED 是临时结果，
+        // 写进去后 canNotify 会永久拒绝，等另一只完成后该股当天也无法再提醒。
+        if (!result.accepted) return@synchronized result
         if (!writeDailyAdvicePlans(upsertDailyAdvicePlan(plans, result.plan))) {
             return@synchronized AdviceReservation(false, current, "计划未能持久化，不发送操作指令。")
         }
@@ -509,6 +554,30 @@ class Store(
         prefs.edit().putStringSet(KEY_TAIL_OBSERVATION_ALERT_KEYS, existing).commit()
     }
 
+    /**
+     * 通用“当日已推送事件”账本：类型:代码 粒度的持久化去重，进程重启后仍生效。
+     * 只保留当天键，避免无限增长；投递失败由调用方 release 后重试。
+     */
+    fun reserveAlertEventKey(key: String, today: String): Boolean = synchronized(prefs) {
+        val existing = prefs.getStringSet(KEY_ALERT_EVENT_KEYS, emptySet()).orEmpty()
+            .filter { it.startsWith("$today:") }
+            .toMutableSet()
+        if (key in existing) return@synchronized false
+        existing += key
+        prefs.edit().putStringSet(KEY_ALERT_EVENT_KEYS, existing).commit()
+    }
+
+    fun releaseAlertEventKey(key: String, today: String): Boolean = synchronized(prefs) {
+        val existing = prefs.getStringSet(KEY_ALERT_EVENT_KEYS, emptySet()).orEmpty()
+        if (key !in existing) return@synchronized false
+        prefs.edit()
+            .putStringSet(
+                KEY_ALERT_EVENT_KEYS,
+                existing.filterTo(linkedSetOf()) { !it.startsWith("$today:") || it != key },
+            )
+            .commit()
+    }
+
     // ── 监控开关 ──
     var monitorEnabled: Boolean
         get() = prefs.getBoolean(KEY_MONITOR_ENABLED, true)
@@ -539,6 +608,14 @@ class Store(
     var intradaySignalEnabled: Boolean
         get() = prefs.getBoolean(KEY_INTRADAY_SIGNAL, true)
         set(value) = prefs.edit().putBoolean(KEY_INTRADAY_SIGNAL, value).apply()
+
+    /**
+     * 自选股 / 观察池的盘中提醒（封板、炸板、量价异动、反弹跟踪）。
+     * 默认关闭：非持仓票此前完全静默，开启后按同一预算与去重规则推送，但只走普通通知不震动。
+     */
+    var watchlistIntradayAlerts: Boolean
+        get() = prefs.getBoolean(KEY_WATCHLIST_INTRADAY_ALERTS, false)
+        set(value) = prefs.edit().putBoolean(KEY_WATCHLIST_INTRADAY_ALERTS, value).apply()
 
     /** 涨跌停全市场扫描（数据量较大，可在移动网络下关闭）。 */
     var limitScanEnabled: Boolean
@@ -577,7 +654,7 @@ class Store(
                     ),
                 )
             }
-        }
+        }.onFailure { android.util.Log.w("Store", "自选股解析失败，保留默认列表", it) }
         return if (list.isEmpty()) defaultWatchlist() else list
     }
 
@@ -692,7 +769,10 @@ class Store(
                     },
                 availableCapitalDelta = if (hasDelta) json.optDouble("available_capital_delta", 0.0) else 0.0,
             )
-        }.getOrDefault(fallback)
+        }.getOrElse {
+            android.util.Log.w("Store", "持仓解析失败，返回空组合（原数据未覆盖）", it)
+            fallback
+        }
     }
 
     private fun toPortfolioJson(portfolio: Portfolio): JSONObject {
@@ -779,5 +859,7 @@ class Store(
         private const val KEY_ALERT_RECORDS = "alert_records"
         private const val KEY_CANDIDATE_BUY_ALERT_KEYS = "candidate_buy_alert_keys"
         private const val KEY_TAIL_OBSERVATION_ALERT_KEYS = "tail_observation_alert_keys"
+        private const val KEY_ALERT_EVENT_KEYS = "alert_event_keys"
+        private const val KEY_WATCHLIST_INTRADAY_ALERTS = "watchlist_intraday_alerts"
     }
 }

@@ -163,6 +163,13 @@ object Repo {
     @Volatile
     var marketState: MarketState? = null
 
+    /**
+     * 指数日线给出的真实交易日序列（升序）。首板窗口等「按交易日计算」的口径用它，
+     * 避免法定节假日被当成交易日；为空时调用方退回周末估算。
+     */
+    @Volatile
+    var marketTradingDates: List<String> = emptyList()
+
     /** 北向、成交额和时点因素的共享风险上下文，持仓分析与 AI 工具读取同一份。 */
     @Volatile
     var marketRiskContext: MarketRiskContext? = null

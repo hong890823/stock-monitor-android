@@ -25,6 +25,7 @@ object DailyAdviceJson {
                     .put("review_reason", plan.reviewReason)
                     .put("risk_priority", plan.riskPriority)
                     .put("continuity_reason", plan.continuityReason)
+                    .put("risk_stage", plan.riskStage)
                     .put("created_at_ms", plan.createdAtMs)
                     .put("updated_at_ms", plan.updatedAtMs),
             )
@@ -69,6 +70,7 @@ object DailyAdviceJson {
             updatedAtMs = item.optLong("updated_at_ms", 0L),
             riskPriority = item.optInt("risk_priority", 0).coerceIn(0, 2),
             continuityReason = item.optString("continuity_reason").takeIf { it.isNotBlank() },
+            riskStage = item.optInt("risk_stage", 0).coerceIn(0, 3),
         )
     }.getOrNull()
 }

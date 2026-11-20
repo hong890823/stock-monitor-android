@@ -2,6 +2,7 @@ package com.example.stockmonitor.analysis
 
 import java.time.LocalDate
 import java.time.temporal.ChronoUnit
+import kotlin.math.roundToInt
 
 data class FundamentalEvidence(val date: String, val reason: String, val financial: Boolean = false)
 
@@ -45,6 +46,9 @@ object FundamentalHealthPolicy {
     /** 评分到这个分且无 ALERT 风险，才敢说「未见恶化」。 */
     const val SOUND_MIN_SCORE = 70
 
+    /** 金融口径可得最高分：跳过现金流（20）与资产负债表（10）维度后的上限。 */
+    const val FINANCIAL_MAX_SCORE = 68
+
     /** 评分低于这个分本身就构成恶化信号。 */
     const val WEAK_SCORE = 55
 
@@ -76,6 +80,8 @@ object FundamentalHealthPolicy {
             notes = result.notes,
             analyzedAt = analyzedAt,
             dataComplete = (result.ocfToProfit != null || result.cashToRevenue != null) && result.balance != null,
+            // 金融口径跳过现金流/资产负债表维度，原始满分只有 68；不折算的话永远到不了 SOUND。
+            financialScale = !result.financialQuality.applicable,
         ).copy(intradayEvidence = buildList {
             result.risks.filter { it.level == RiskLevel.ALERT && it.evidenceDate != null }.forEach {
                 add(FundamentalEvidence(it.evidenceDate!!, it.text, financial = !it.announcement))
@@ -121,10 +127,20 @@ object FundamentalHealthPolicy {
         analyzedAt: String = "",
         /** 现金流/资产负债表维度是否参与了评分；缺表或金融口径时为 false，低分不作恶化判定。 */
         dataComplete: Boolean = true,
+        /**
+         * 金融口径：原始评分满分只有 [FINANCIAL_MAX_SCORE]（跳过现金流/资产负债表维度），
+         * 按 100 分折算后再套 SOUND/WEAK 阈值，否则金融股永远到不了“未见恶化”。
+         */
+        financialScale: Boolean = false,
     ): FundamentalHealth {
         val reasons = mutableListOf<String>()
         var red = false
-        if (score < WEAK_SCORE) {
+        val effectiveScore = if (financialScale) {
+            (score * 100.0 / FINANCIAL_MAX_SCORE).roundToInt().coerceIn(0, 100)
+        } else {
+            score
+        }
+        if (effectiveScore < WEAK_SCORE) {
             if (dataComplete) {
                 red = true
                 reasons.add("评分 $score（$verdict）")
@@ -133,6 +149,12 @@ object FundamentalHealthPolicy {
                 // 「没数据」不能判成「报表差」——恶化判定留给业绩变脸与公告这类实锤。
                 reasons.add("报表口径不全（现金流或资产负债表缺失/不适用），评分 $score 仅含可得维度，不按低分判恶化")
             }
+        } else if (!dataComplete && financialScale) {
+            // 金融口径即使折算后分数正常，也要说明原始满分只有 68，避免与工业股直接比较。
+            reasons.add(
+                "报表口径不全（金融口径跳过现金流/资产负债表维度），" +
+                    "评分 $score/$FINANCIAL_MAX_SCORE 已按 100 分折算后参与健康判定",
+            )
         }
         val alerts = risks.filter { it.level == RiskLevel.ALERT }
         if (alerts.isNotEmpty()) {
@@ -157,7 +179,7 @@ object FundamentalHealthPolicy {
         val level = when {
             red -> HealthLevel.ALERT
             singleDownturn || cyclical -> HealthLevel.NEUTRAL
-            score >= SOUND_MIN_SCORE && alerts.isEmpty() -> HealthLevel.SOUND
+            effectiveScore >= SOUND_MIN_SCORE && alerts.isEmpty() -> HealthLevel.SOUND
             else -> HealthLevel.NEUTRAL
         }
         if (cyclical && reasons.none { it.contains("周期") }) reasons.add("存在周期口径提示")

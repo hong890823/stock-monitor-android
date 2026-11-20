@@ -37,6 +37,26 @@ class FundamentalHealthPolicyTest {
     }
 
     @Test
+    fun financialScaleLetsHealthyFinancialsReachSound() {
+        // 金融口径满分 68（跳过现金流/资产负债表），不折算的话永远到不了 70。
+        val health = FundamentalHealthPolicy.grade(
+            score = 68, verdict = "良好", risks = emptyList(), quarters = emptyList(),
+            dataComplete = false, financialScale = true,
+        )
+        assertEquals(HealthLevel.SOUND, health.level)
+    }
+
+    @Test
+    fun financialScaleDoesNotHideRealWeakness() {
+        val health = FundamentalHealthPolicy.grade(
+            score = 40, verdict = "较差", risks = emptyList(), quarters = emptyList(),
+            dataComplete = false, financialScale = true,
+        )
+        assertEquals(HealthLevel.NEUTRAL, health.level)
+        assertTrue(health.reasons.any { it.contains("口径") })
+    }
+
+    @Test
     fun weakScoreIsNotRedWhenDataIncomplete() {
         // 现金流/资产负债表缺失（券商股在 F10 上就是空表）时评分系统性偏低，
         // 「没数据」不能判成「报表差」——否则招商证券这类票一破位就直接「退出优先」。
