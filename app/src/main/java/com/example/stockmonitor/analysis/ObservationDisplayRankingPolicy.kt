@@ -6,8 +6,11 @@ import com.example.stockmonitor.core.ObservationCandidate
  * 候选池仅在展示层使用的排序器。
  *
  * 状态机负责决定能否晋级或降档；这里不改变任何状态、风险门控或通知资格。排序严格按
- * 状态档位、个股结构、相对强度、市场风险、真实技术快照、复评进度执行，板块只用于
- * 其他条件相同时的平手裁决。
+ * 状态档位、个股结构、入场资格命中数、相对强度、市场风险、真实技术快照、复评进度执行，
+ * 板块只用于其他条件相同时的平手裁决。
+ *
+ * 入场资格（`score`）必须参与排序：界面上会展示“资格 x/3”，如果排序完全忽略它，
+ * 用户会看到高资格分的候选排在中后段，无法理解排序依据。
  */
 object ObservationDisplayRankingPolicy {
     fun rank(
@@ -25,6 +28,8 @@ object ObservationDisplayRankingPolicy {
         compareValues(tierOf(left), tierOf(right))
             .takeUnless { it == 0 }
             ?: compareDescending(left.structureQuality.rank, right.structureQuality.rank)
+            .takeUnless { it == 0 }
+            ?: compareDescending(left.score, right.score)
             .takeUnless { it == 0 }
             ?: compareDescendingNullable(left.relativeStrengthPct, right.relativeStrengthPct)
             .takeUnless { it == 0 }

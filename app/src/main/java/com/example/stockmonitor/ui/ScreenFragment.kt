@@ -18,7 +18,9 @@ import com.example.stockmonitor.analysis.ObservationEligibility
 import com.example.stockmonitor.analysis.ObservationDisplayRankingPolicy
 import com.example.stockmonitor.analysis.LimitUpFilterPolicy
 import com.example.stockmonitor.analysis.StrongSectorRankingPolicy
+import com.example.stockmonitor.analysis.TimeUtils
 import com.example.stockmonitor.core.ScreenHit
+import com.example.stockmonitor.core.Store
 import com.example.stockmonitor.core.TrendScreenHit
 import com.example.stockmonitor.core.LimitStock
 import com.example.stockmonitor.core.ObservationAlertState
@@ -40,6 +42,7 @@ import java.util.Locale
  */
 class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
     private val strongRankingCache = mutableMapOf<String, StrongSectorRankingPolicy.Result>()
+    private val store by lazy { Store(requireContext().applicationContext) }
     private var renderPending = false
     private var selectionScrolling = false
     private val selectionScrollIdleRunnable = Runnable {
@@ -103,9 +106,11 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
         val conceptBoards: List<BoardMetric>,
     )
 
-    private fun selectionRankingContext(): SelectionRankingContext = SelectionRankingContext(
+    private fun selectionRankingContext(
+        observationPool: List<ObservationCandidate>,
+    ): SelectionRankingContext = SelectionRankingContext(
         observationByCode = ObservationEligibility
-            .deduplicateCandidates(Repo.observationPool)
+            .deduplicateCandidates(observationPool)
             .associateBy { it.code },
         limitByCode = Repo.limits?.up.orEmpty().associateBy { it.code },
         turnoverRankByCode = rankPercentilesByCode(Repo.quotes.map { it.key to it.value.turnover }),
@@ -255,6 +260,8 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
         pageKey: String,
         titleColor: Int? = null,
         emptyText: String = "暂无符合条件的股票。",
+        /** 当日已提醒的股票；仅观察池分组生效，置顶到本组首行。 */
+        alertedCodes: Set<String> = emptySet(),
     ) {
         val isObservationSection = items.isNotEmpty() && items.all { it.observationCandidate != null }
         val rankedItems = if (isObservationSection) {
@@ -275,6 +282,12 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                 scoreOf = { strongSectorRanking(rankingContext, it.code, it.changePct) },
                 technicalScoreOf = { it.technicalScore },
             ).map { it.item }
+        }
+        // 今日已提醒的候选置顶；sortedWith 是稳定排序，组内其余顺序保持不变。
+        val orderedItems = if (isObservationSection && alertedCodes.isNotEmpty()) {
+            rankedItems.sortedWith(compareByDescending { it.code in alertedCodes })
+        } else {
+            rankedItems
         }
         val heading = android.widget.LinearLayout(context).apply {
             orientation = android.widget.LinearLayout.HORIZONTAL
@@ -305,7 +318,7 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
         }
 
         val pageSize = ObservationEligibility.PAGE_SIZE
-        val lastPage = (rankedItems.size - 1) / pageSize
+        val lastPage = (orderedItems.size - 1) / pageSize
         val pages = context.getSharedPreferences("screen_list_pages", Context.MODE_PRIVATE)
         val pageContent = android.widget.LinearLayout(context).apply {
             orientation = android.widget.LinearLayout.VERTICAL
@@ -326,7 +339,7 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
             currentPage = targetPage.coerceIn(0, lastPage)
             pages.edit().putInt(pageKey, currentPage).apply()
             pageContent.removeAllViews()
-            val visibleItems = rankedItems.drop(currentPage * pageSize).take(pageSize)
+            val visibleItems = orderedItems.drop(currentPage * pageSize).take(pageSize)
             rowKeys = visibleItems.map { "selection:${it.key}" }
             val pageRows = mutableListOf<UiKit.ExpandableQuoteRowView>()
             visibleItems.forEach { item ->
@@ -352,7 +365,7 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                         ?.let { String.format(Locale.CHINA, "%+.1f%%", it) } ?: "数据暂缺"
                     val marketRisk = observation.marketRisk?.label ?: "数据暂缺"
                     val technicalSnapshot = item.technicalScore?.let { "技术 $it/100" } ?: "技术快照暂缺"
-                    val priorityLine = "排序：${observation.structureQuality.label}｜相对强度 $relativeStrength｜市场风险 $marketRisk｜$technicalSnapshot"
+                    val priorityLine = "排序：${observation.structureQuality.label}｜资格${observation.score.coerceIn(0, 3)}/3｜相对强度 $relativeStrength｜市场风险 $marketRisk｜$technicalSnapshot"
                     rankedSummary = SpannableStringBuilder()
                         .append(priorityLine)
                         .append("\n")
@@ -580,7 +593,11 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
         strongRankingCache.clear()
         val context = requireContext()
         val result = Repo.screenResult
-        val rankingContext = selectionRankingContext()
+        // 观察池落盘在本地：监控服务没跑时内存里的 Repo 是空的，页面上不能因此看不见已保存的池子。
+        val observationPool = Repo.observationPool.ifEmpty { store.observationPool.toList() }
+        // 当日已实际提醒过的股票：在持续观察池里标记并置顶，避免发过提醒却要翻好几页才能找到。
+        val alertedCodes = store.alertedStockCodes(TimeUtils.todayText())
+        val rankingContext = selectionRankingContext(observationPool)
         val limitFilter = currentLimitFilter(context)
         addLimitFilter(context, limitFilter)
 
@@ -603,7 +620,7 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
         }
 
         screenCard(context, "observation_pool", "👀 持续观察池").apply {
-            val sections = ObservationEligibility.sections(Repo.observationPool, Repo.quotes)
+            val sections = ObservationEligibility.sections(observationPool, Repo.quotes)
             // 扫描结果按“当前涨停”筛选；持续观察池按股票所属涨跌停制度筛选。
             val active = filterObservationBandItems(
                 items = sections.values.flatten(),
@@ -619,7 +636,7 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                 ObservationEligibility.isLimitUpDeferred(item, Repo.quotes[item.code])
 
             val prioritizedRaw = ObservationEligibility.prioritizedSections(
-                candidates = Repo.observationPool,
+                candidates = observationPool,
                 quotes = Repo.quotes,
             )
             val prioritized = prioritizedRaw.copy(
@@ -717,11 +734,11 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                 val priorityReentry = ObservationEligibility.isPriorityReentry(item)
                 val priorityReentryAwaitingFreshEvaluation =
                     ObservationEligibility.priorityReentryAwaitingFreshEvaluation(item, quote)
-                val stockStrategies = Repo.observationPool
+                val stockStrategies = observationPool
                     .filter { it.code == item.code }
                     .map { it.strategy }
                     .toSet()
-                val stockSources = Repo.observationPool
+                val stockSources = observationPool
                     .filter { it.code == item.code }
                     .flatMap { it.allSources }
                     .distinct()
@@ -767,8 +784,10 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                     }
                     ?.let { "｜首板后第${it}交易日" }
                     .orEmpty()
+                val alertedToday = item.code in alertedCodes
                 val summaryLine =
-                    "$statusLabel｜$routeLabel｜$qualification｜$technical｜已观察${item.observedDays}天" +
+                    (if (alertedToday) "🔔 今日已提醒｜" else "") +
+                        "$statusLabel｜$routeLabel｜$qualification｜$technical｜已观察${item.observedDays}天" +
                         "$postConfirmationWatch$firstBoardClock"
                 val flowWindow = com.example.stockmonitor.analysis.FundFlowWindowPolicy.assess(flowHistory)
                 val flowSummary = FundFlowDisplayPolicy.candidateSummary(currentFlow, flowWindow)
@@ -835,6 +854,11 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                     monthlyTrendLabel = item.monthlyTrendLabel ?: "数据不足",
                     details = listOf(
                         UiKit.DetailRow("状态", statusLabel),
+                        if (alertedToday) {
+                            UiKit.DetailRow("今日提醒", "今天已实际发送过提醒，已置顶到本组首行")
+                        } else {
+                            null
+                        },
                         UiKit.DetailRow("来源池", sourceLabel.ifBlank { "来源暂缺" }),
                         UiKit.DetailRow("策略路线", routeLabel.ifBlank { item.strategy.label }),
                         UiKit.DetailRow("档位依据", concise(tierBasis, 100)),
@@ -905,6 +929,7 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                     items = items.map(::observationRow),
                     pageKey = pageKey,
                     titleColor = accentColor,
+                    alertedCodes = alertedCodes,
                 )
             }
             addStatusGroup(

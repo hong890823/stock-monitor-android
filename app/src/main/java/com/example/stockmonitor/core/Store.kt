@@ -536,6 +536,21 @@ class Store(
             .commit()
     }
 
+    /**
+     * 当日已经实际发过提醒的股票代码（买点、首板承接、突破下杀风险等）。
+     *
+     * 三个去重账本都只在投递成功后保留键，失败会 release，因此可以直接当作
+     * “今天提醒过谁”的权威来源；选股页用它标记并把候选置顶。
+     */
+    fun alertedStockCodes(today: String): Set<String> = synchronized(prefs) {
+        AlertLedgerCodes.codes(
+            today = today,
+            codeKeys = prefs.getStringSet(KEY_CANDIDATE_BUY_ALERT_KEYS, emptySet()).orEmpty() +
+                prefs.getStringSet(KEY_TAIL_OBSERVATION_ALERT_KEYS, emptySet()).orEmpty(),
+            eventKeys = prefs.getStringSet(KEY_ALERT_EVENT_KEYS, emptySet()).orEmpty(),
+        )
+    }
+
     /** 已发送过尾盘候选复核的“交易日:代码”集合，独立于通用通知历史，防止历史裁剪或重启造成重复推送。 */
     var tailObservationAlertKeys: Set<String>
         get() = prefs.getStringSet(KEY_TAIL_OBSERVATION_ALERT_KEYS, emptySet()).orEmpty().toSet()

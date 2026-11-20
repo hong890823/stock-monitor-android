@@ -2222,6 +2222,21 @@ class MonitorService : Service() {
     }
 
     /**
+     * 通知里统一显示股票名称。候选名可能缺失，或被旧缓存/外部导入写成代码，
+     * 此时用行情、自选和持仓里的名称兜底；实在拿不到才退回代码。
+     */
+    private fun alertDisplayName(code: String, fallback: String): String {
+        fun usable(name: String?): String? =
+            name?.takeIf { it.isNotBlank() && it != code }
+        return usable(fallback)
+            ?: usable(Repo.quotes[code]?.name)
+            ?: usable(store.watchlist.firstOrNull { it.code == code }?.name)
+            ?: usable(store.portfolio.positions.firstOrNull { it.code == code }?.name)
+            ?: usable(Repo.watchlistOrder.firstOrNull { it.first == code }?.second)
+            ?: fallback
+    }
+
+    /**
      * 计算当前时刻相对历史同期成交额中位数的倍数。
      * 历史侧按同一钟表时刻取数，和当前实时累计对齐，不用向下取整的槽位起点。
      */
@@ -3873,8 +3888,14 @@ class MonitorService : Service() {
                     type = "observationBreakoutRisk",
                     code = candidate.code,
                     id = NotificationIds.of(ALERT_ID_OBSERVATION_BREAKOUT_RISK, candidate.code),
-                    title = ObservationBreakoutRiskAlert.title(candidate),
-                    body = ObservationBreakoutRiskAlert.body(candidate),
+                    title = ObservationBreakoutRiskAlert.title(
+                        candidate,
+                        alertDisplayName(candidate.code, candidate.name),
+                    ),
+                    body = ObservationBreakoutRiskAlert.body(
+                        candidate,
+                        alertDisplayName(candidate.code, candidate.name),
+                    ),
                     signal = false,
                     consumeBudget = false,
                 )
@@ -4029,8 +4050,14 @@ class MonitorService : Service() {
                     type = "observationBreakoutRisk",
                     code = candidate.code,
                     id = NotificationIds.of(ALERT_ID_OBSERVATION_BREAKOUT_RISK, candidate.code),
-                    title = ObservationBreakoutRiskAlert.title(candidate),
-                    body = ObservationBreakoutRiskAlert.body(candidate),
+                    title = ObservationBreakoutRiskAlert.title(
+                        candidate,
+                        alertDisplayName(candidate.code, candidate.name),
+                    ),
+                    body = ObservationBreakoutRiskAlert.body(
+                        candidate,
+                        alertDisplayName(candidate.code, candidate.name),
+                    ),
                     signal = false,
                     consumeBudget = false,
                 )

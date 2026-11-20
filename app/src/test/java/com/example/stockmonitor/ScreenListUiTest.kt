@@ -152,7 +152,7 @@ class ScreenListUiTest {
             .readText()
 
         assertTrue(source.contains("private data class SelectionRankingContext"))
-        assertTrue(source.contains("private fun selectionRankingContext()"))
+        assertTrue(source.contains("private fun selectionRankingContext("))
         assertTrue(source.contains("strongSectorRanking(rankingContext"))
         assertTrue(source.contains("ObservationDisplayRankingPolicy.rank("))
         assertTrue(source.contains("private var renderPending"))
