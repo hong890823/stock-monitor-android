@@ -1,6 +1,6 @@
 <resources>
     <string name="app_name">股票监控</string>
-    <string name="app_subtitle">A股行情 · 技术分析 · 持仓监控</string>
+    <string name="app_subtitle">龙空龙</string>
 
     <string name="tab_market">市场</string>
     <string name="tab_screen">选股</string>

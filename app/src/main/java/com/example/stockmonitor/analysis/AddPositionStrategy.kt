@@ -93,6 +93,10 @@ data class CostReductionMarket(
     val buyConfirmed: Boolean = false,
     val signal: String? = null,
     val marketNote: String? = null,
+    /** ATR%（占现价比例），用于可达性护栏；缺数据不猜。 */
+    val atrPct: Double? = null,
+    /** 回踩锚位口径标签（如「强势浅回踩锚（MA5）」），为空时 entryLow 沿用「波段回踩区间下沿」。 */
+    val anchorLabel: String? = null,
 )
 
 data class CostReductionPlan(
@@ -125,6 +129,17 @@ object AddPositionStrategy {
     /** 建议价位的优先顺序：回踩区间最贴合项目买点口径，现价垫底。 */
     private val PREFERENCE = listOf("波段回踩区间下沿", "波段回踩区间上沿", "支撑位", "MA20回踩参考", "现价")
 
+    /**
+     * 建议价位排序权重。强势浅回踩锚（含「浅回踩」的标签）永远排最前——
+     * 强势股等不到深回踩口径（见 docs/2026-11-24-divergence-execution-strategy.md 模块 D）；
+     * 其余按 [PREFERENCE]，未知标签垫底。
+     */
+    private fun preferenceIndex(label: String): Int = when {
+        label.contains("浅回踩") -> -1
+        PREFERENCE.contains(label) -> PREFERENCE.indexOf(label)
+        else -> Int.MAX_VALUE
+    }
+
     private const val COST_FEE_RATE = 0.001
     private const val COST_MIN_FEE = 5.0
 
@@ -139,6 +154,7 @@ object AddPositionStrategy {
         maxPositionPct: Double = 0.0,
         availableCapital: Double? = null,
         stopPrice: Double? = null,
+        atrPct: Double? = null,
     ): AddPositionPlan {
         if (listOf(holdingShares, averageCost, targetCost).any { !it.isFinite() } ||
             currentPrice?.isFinite() == false || stopPrice?.isFinite() == false ||
@@ -174,12 +190,21 @@ object AddPositionStrategy {
                 add("失效参考 ${money(it)} 元：候选买入价跌破该价说明结构走坏，补仓容易接飞刀，先按止损口径处理。")
             }
             if (availableCapital != null) add("本次按可用资金 ${money(availableCapital)} 元约束股数。")
+            if (currentPrice != null && atrPct != null) {
+                val deep = levels.filter { PullbackAnchorPolicy.unreachableNote(it.price, currentPrice, atrPct) != null }
+                if (deep.isNotEmpty()) {
+                    add(
+                        "候选价位 ${deep.joinToString("、") { "${it.label} ${money(it.price)}元" }} " +
+                            "距现价超出 2.5×ATR 波动口径，深回踩口径大概率到不了；参考浅锚或等分歧日分批。"
+                    )
+                }
+            }
             add("未计入交易费用（佣金 / 印花税 / 过户费），实际补后成本会略高。")
         }
 
         val suggested = levelPlans
             .filter { it.feasible && it.requiredShares != null }
-            .minByOrNull { PREFERENCE.indexOf(it.label).let { i -> if (i < 0) Int.MAX_VALUE else i } }
+            .minByOrNull { preferenceIndex(it.label) }
 
         return AddPositionPlan(
             holdingShares = holdingShares,
@@ -224,7 +249,7 @@ object AddPositionStrategy {
 
         val buyLevels = buildList {
             addAll(extraBuyLevels)
-            market.entryLow?.let { add(AddLevel("波段回踩区间下沿", it)) }
+            market.entryLow?.let { add(AddLevel(market.anchorLabel ?: "波段回踩区间下沿", it)) }
             market.support?.let { add(AddLevel("支撑位", it)) }
             market.ma20?.let { add(AddLevel("MA20回踩参考", it)) }
             market.currentPrice?.let { add(AddLevel("现价", it)) }
@@ -248,11 +273,7 @@ object AddPositionStrategy {
         val reduceOption = reduceRiskOption(code, holdingShares, market)
 
         val validBuy = buyOptions.filter { it.feasible }
-            .minByOrNull { option ->
-                PREFERENCE.indexOf(option.legs.first().label).let { index ->
-                    if (index < 0) Int.MAX_VALUE else index
-                }
-            }
+            .minByOrNull { preferenceIndex(it.legs.first().label) }
         val validSellRebuy = sellRebuyOptions.filter { it.feasible }
             .maxByOrNull { it.legs[0].price - it.legs[1].price }
         val recommended = when (market.trend) {
@@ -268,6 +289,18 @@ object AddPositionStrategy {
             }
             if (market.stopPrice != null && buyLevels.any { it.price < market.stopPrice }) {
                 add("有候选价低于失效参考 ${money(market.stopPrice)} 元，接回前须重新确认止跌，不能只按目标成本成交。")
+            }
+            val deepLevels = market.currentPrice?.let { current ->
+                buyLevels.filter { level ->
+                    market.atrPct != null &&
+                        PullbackAnchorPolicy.unreachableNote(level.price, current, market.atrPct) != null
+                }
+            }.orEmpty()
+            if (deepLevels.isNotEmpty()) {
+                add(
+                    "候选价 ${deepLevels.joinToString("、") { "${it.label} ${money(it.price)}元" }} " +
+                        "距现价超出 2.5×ATR 波动口径，深回踩口径大概率到不了；参考浅锚或等分歧日分批。"
+                )
             }
             if (market.marketNote?.isNotBlank() == true) add("项目分析：${market.marketNote}")
             add("成本按原始持仓成本减去已实现盈亏和费用的摊薄口径计算，与券商“买入均价”显示可能不同。")
@@ -306,7 +339,7 @@ object AddPositionStrategy {
             "支撑位" to plan.market.support,
             "阻力位" to plan.market.resistance,
             "MA20" to plan.market.ma20,
-            "波段回踩下沿" to plan.market.entryLow,
+            (plan.market.anchorLabel ?: "波段回踩下沿") to plan.market.entryLow,
             "波段区间上沿" to plan.market.entryHigh,
             "失效参考" to plan.market.stopPrice,
         ).forEach { (name, value) -> value?.let { lines.add("$name：${money(it)}元") } }

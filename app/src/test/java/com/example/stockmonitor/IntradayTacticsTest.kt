@@ -374,6 +374,9 @@ class IntradayTacticsTest {
         recentMarketTurnoversYi: List<Double> = emptyList(),
         marketTurnoverRatio: Double? = null,
         impulse: ImpulseContext? = null,
+        openPrice: Double? = null,
+        previousClose: Double? = null,
+        sessionMinutes: Int? = null,
     ) = IntradayTactics.Input(
         code = "sz002185",
         name = "华天科技",
@@ -415,6 +418,9 @@ class IntradayTacticsTest {
         recentMarketTurnoversYi = recentMarketTurnoversYi,
         marketTurnoverRatio = marketTurnoverRatio,
         impulse = impulse,
+        openPrice = openPrice,
+        previousClose = previousClose,
+        sessionMinutes = sessionMinutes,
         holdingTContext = HoldingTContext("2026-10-15", 1000L, HoldingTTrend.RANGE, 1.0, 2.0,
             SwingTrend.UP, SwingTrend.UP),
         holdingTObservation = HoldingTObservation(
@@ -855,6 +861,51 @@ class IntradayTacticsTest {
         assertTrue(signal.body.contains("可先减约 600 股"))
         assertTrue(signal.body.contains("预计接回价"))
         assertTrue(signal.body.contains("净收益"))
+    }
+
+    @Test
+    fun tSellAddsAccelerationEndEvidenceWithoutChangingQuantity() {
+        val signal = IntradayTactics.evaluate(
+            input(price = 20.70, changePct = 3.5, volumeRatio = 1.5, resistance = 22.0, quantity = 2_000.0)
+                .copy(gain5Pct = 15.0, rangeHigh = 20.0)
+        )!!
+
+        assertEquals(IntradaySignalType.T_SELL, signal.type)
+        assertTrue(signal.title.contains("加速末端"))
+        assertTrue(signal.body.contains("优先了结"))
+        assertTrue(signal.body.contains("可先减约 600 股"))
+    }
+
+    @Test
+    fun breakoutAddsAccelerationEndEvidenceWithoutNewSignal() {
+        val setup = EntrySetup(
+            type = EntrySetupType.BREAKOUT,
+            confirmed = true,
+            canBuy = true,
+            priorHigh = 21.0,
+            ma20SlopePct = 1.2,
+            volumeConfirmed = true,
+            marketFilter = MarketFilter.UP,
+            stopPrice = 19.0,
+            reason = "站上前高，放量，M20向上",
+        )
+
+        val base = input(
+            price = 21.20,
+            volumeRatio = 1.5,
+            totalCapital = 100_000.0,
+            entrySetup = setup,
+            sectorChangePct = 1.4,
+            sectorTurnoverRatio = 1.5,
+        )
+        // 当日 >1%、近5日 15%、贴近 60 日高点、量比 1.5 → 加速末端；
+        // 观察状态保持「上行、未回落」，避免被冲高回落分支提前降级。
+        val signal = IntradayTactics.evaluate(
+            base.copy(changePct = 2.0, gain5Pct = 15.0, rangeHigh = 20.0)
+        )!!
+
+        assertEquals(IntradaySignalType.BREAKOUT, signal.type)
+        assertTrue(signal.body.contains("突破仅观察不追"))
     }
 
     @Test
@@ -1556,5 +1607,28 @@ class IntradayTacticsTest {
         assertEquals(IntradaySignalType.T_SELL_DEFERRED, strong.type)
         assertTrue(strong.body.contains("自适应市场节奏"))
         assertEquals(IntradaySignalType.T_SELL, weak.type)
+    }
+
+    @Test
+    fun gapUpFadeWarnsHolderAfterFallingBackBelowOpen() {
+        val signal = IntradayTactics.evaluate(
+            input(
+                price = 10.0,
+                changePct = 0.0,
+                quantity = 1_000.0,
+                cost = 9.0,
+                support = 9.4,
+                resistance = 10.6,
+                openPrice = 10.1,
+                previousClose = 10.0,
+                dailyHighPrice = 10.3,
+                sessionMinutes = 30,
+            ),
+        )!!
+
+        assertEquals(IntradaySignalType.GAP_FADE, signal.type)
+        assertTrue(signal.title.contains("高开低走"))
+        assertTrue(signal.body.contains("做T或减仓"))
+        assertTrue(signal.body.contains("T+1"))
     }
 }

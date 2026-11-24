@@ -311,8 +311,9 @@ class EastMoneyClient {
                 val code = item.optString("f12").takeIf { it.isNotBlank() } ?: continue
                 val netInflow = item.optString("f62").toDoubleOrNull()
                 val netRatio = item.optString("f184").toDoubleOrNull()
+                val amount = item.optString("f6").toDoubleOrNull()
                 if (netInflow == null && netRatio == null) continue
-                flows[code] = SectorFlow(netInflow, netRatio)
+                flows[code] = SectorFlow(netInflow, netRatio, amount)
             }
             return flows
         }

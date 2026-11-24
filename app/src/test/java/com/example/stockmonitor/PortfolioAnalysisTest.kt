@@ -546,6 +546,25 @@ class PortfolioAnalysisTest {
         assertFalse(advice.contains("割肉"))
     }
 
+    @Test
+    fun overallAdviceOnlyNamesImportantHoldingsNotEveryStock() {
+        // 整体建议只挑最重要的：持有观察不逐票点评；风险观察/深套最多点前两只 + 总数。
+        val hold1 = evaluate(price = 31.0, support = 30.0, cost = 30.0, trendWeak = false).copy(name = "持有甲")
+        val hold2 = hold1.copy(code = "sz000011", name = "持有乙")
+        val watch1 = evaluate().copy(code = "sz000021", name = "观察甲")
+        val watch2 = evaluate().copy(code = "sz000022", name = "观察乙")
+        val watch3 = evaluate().copy(code = "sz000023", name = "观察丙")
+        val advice = PortfolioAnalysis.overallAdvice(listOf(hold1, hold2, watch1, watch2, watch3)).joinToString("\n")
+
+        assertFalse(advice.contains("以持有观察为主"))
+        assertFalse(advice.contains("持有甲"))
+        assertFalse(advice.contains("持有乙"))
+        assertTrue(advice.contains("观察甲"))
+        assertTrue(advice.contains("观察乙"))
+        assertTrue(advice.contains("等3只"))
+        assertFalse(advice.contains("观察丙"))
+    }
+
     @Test fun eventCoilIsHighlightedInTodayBriefAndDetailedInReport() {
         // 事件后蓄势要在持仓页「今日要点」置顶高亮（用户靠它决定重点盯哪只），报告里给完整注记。
         val signal = com.example.stockmonitor.analysis.EventCoil.Signal(
@@ -720,6 +739,49 @@ class PortfolioAnalysisTest {
 
         assertEquals(trend, result.trendAssessment)
         assertEquals(highPosition, result.highPosition)
+    }
+
+    @Test
+    fun reportShowsAccelerationResearchTagWithoutChangingDecision() {
+        val trend = TrendAssessment(
+            shortTerm = ShortTermTrend.UP,
+            major = MajorTrend.UP,
+            reason = "测试趋势向上",
+            allowsOrdinaryBuy = true,
+            allowsAddPosition = true,
+            allowsTBuy = true,
+            allowsTSell = true,
+            allowsBottomReversal = false,
+            riskOnly = false,
+        )
+        val evidence = com.example.stockmonitor.analysis.HighPositionEvidence(
+            price = 30.0,
+            rangeHigh = 30.3,
+            rangeLow = 20.0,
+            priceLocation = com.example.stockmonitor.analysis.PriceLocation.HIGH,
+            atrPct = 3.0,
+            gain5Pct = 15.0,
+            volumeRatio = 1.5,
+            pullbackVolumeRatio = null,
+            recentLows = listOf(29.0, 29.2, 29.4, 29.6),
+            recentHighs = listOf(30.0, 30.1, 30.2, 30.3),
+            recentCloses = listOf(29.8, 29.9, 30.0, 30.0),
+            support = 29.0,
+            marketHealthy = true,
+            sectorHealthy = null,
+            dualTimeframeAllowed = false,
+            trend = trend,
+        )
+        val result = evaluate(price = 30.0, cost = 25.0, trendWeak = false).copy(
+            changePct = 2.0,
+            volumeRatio = 1.5,
+            highPositionEvidence = evidence,
+        )
+
+        val report = PortfolioAnalysis.formatReport(listOf(result), "2026-10-15 10:00")
+
+        assertTrue(report.contains("放量加速（研究观察"))
+        assertTrue(report.contains("不参与评分与动作"))
     }
 
     @Test
@@ -1128,6 +1190,51 @@ class PortfolioAnalysisTest {
     }
 
     @Test
+    fun severeRiskWarningsAreNamedInTodayBriefEvenUnderNamingCaps() {
+        // 今日要点可以精简，但可能引发跌停/退市的风险预警（基本面亮红灯：退市风险警示/
+        // 立案/业绩变脸级）必须点名——不能被「等N只」折叠，也不能只报数量。
+        // 制造名单压力：两只破位（严重度高）排在前，亮红灯那只是弱趋势（严重度低）排第三。
+        val alertHealth = FundamentalHealth(
+            level = HealthLevel.ALERT,
+            score = 40,
+            verdict = "亮红灯",
+            reasons = listOf("被立案调查"),
+            analyzedAt = "2026-10-12",
+        )
+        val a = evaluate(price = 30.0, support = 30.5).copy(code = "sh600001", name = "破位甲")
+        val b = evaluate(price = 30.0, support = 30.5).copy(code = "sh600002", name = "破位乙")
+        val c = evaluate(price = 30.0, support = 29.0, health = alertHealth).copy(code = "sh600003", name = "红灯丙")
+        val results = listOf(a, b, c)
+        val portfolio = Portfolio(
+            totalCapital = 400_000.0,
+            availableCapital = 100_000.0,
+            initialEntryPct = 5.0,
+            maxPositionPct = 20.0,
+            positions = mutableListOf(
+                Position("sh600001", "破位甲", 500.0, 45.0),
+                Position("sh600002", "破位乙", 500.0, 45.0),
+                Position("sh600003", "红灯丙", 500.0, 45.0),
+            ),
+        )
+
+        // 持仓卡片「今日要点」：基本面风险点名 + 原因。
+        val card = PortfolioAnalysis.todayBrief(results, portfolio).joinToString("\n")
+        assertTrue(card.contains("红灯丙"))
+        assertTrue(card.contains("被立案调查"))
+
+        // 报告「📌 今日要点」：风险核实行点名 + 原因。
+        val brief = PortfolioAnalysis.brief(results).joinToString("\n")
+        assertTrue(brief.contains("红灯丙"))
+        assertTrue(brief.contains("被立案调查"))
+
+        // 持仓整体操作建议的「风险观察」：严重度排第三也不能被折叠进「等N只」。
+        val advice = brief.substringAfter("持仓整体操作建议：")
+        assertTrue(advice.contains("风险观察："))
+        assertTrue(advice.contains("红灯丙"))
+        assertFalse(advice.contains("等3只"))
+    }
+
+    @Test
     fun reportStartsWithTheBrief() {
         val report = PortfolioAnalysis.formatReport(
             listOf(evaluate(price = 30.0, support = 30.5)),
@@ -1170,5 +1277,21 @@ class PortfolioAnalysisTest {
         )
 
         assertTrue(report.contains("分仓：底仓 200 股｜滚动仓 300 股"))
+    }
+
+    @Test
+    fun divergenceMatrixPromptsAppearInAdvice() {
+        val result = evaluate(price = 31.0, support = 30.0, cost = 28.0, trendWeak = false)
+        val divergence = com.example.stockmonitor.analysis.DivergenceCycleState(
+            com.example.stockmonitor.analysis.DivergencePhase.WATCH, "2026-10-14", "分歧体检通过",
+        )
+        val report = PortfolioAnalysis.formatReport(listOf(result), "2026-10-15 10:00", divergence = divergence)
+        assertTrue(report.contains("分歧观察"))
+        assertTrue(report.contains("今天一根 K 线定方向"))
+        assertTrue(report.contains("禁止：等连续大阳线追确认"))
+        assertTrue(report.contains("分歧期依据：分歧体检通过"))
+
+        // NONE（或不传）不加戏。
+        assertFalse(PortfolioAnalysis.formatReport(listOf(result), "2026-10-15 10:00").contains("分歧观察"))
     }
 }

@@ -204,6 +204,42 @@ class Store(
             prefs.edit().putString(KEY_OBSERVATION_POOL, ObservationPoolJson.encode(value)).apply()
         }
 
+    /**
+     * 首板承接转强（涨停晋级观察）命中记录。只落盘、不推送通知，
+     * 盘后和进程重启后仍可在选股页查看。
+     */
+    var firstBoardReclaimObservations: MutableList<FirstBoardReclaimObservation>
+        get() = cachedJson(KEY_FIRST_BOARD_RECLAIM_OBSERVATIONS, FirstBoardReclaimObservationBook::decode)
+            .toMutableList()
+        set(value) {
+            cacheJson(KEY_FIRST_BOARD_RECLAIM_OBSERVATIONS, value.toList())
+            prefs.edit()
+                .putString(
+                    KEY_FIRST_BOARD_RECLAIM_OBSERVATIONS,
+                    FirstBoardReclaimObservationBook.encode(value),
+                )
+                .apply()
+        }
+
+    /** 原子写入一条首板承接转强记录，返回写入后的完整列表（已去重、已清理过期项）。 */
+    fun appendFirstBoardReclaimObservation(
+        record: FirstBoardReclaimObservation,
+        today: String,
+    ): List<FirstBoardReclaimObservation> = synchronized(prefs) {
+        val updated = FirstBoardReclaimObservationBook.append(
+            FirstBoardReclaimObservationBook.decode(
+                prefs.getString(KEY_FIRST_BOARD_RECLAIM_OBSERVATIONS, null),
+            ),
+            record,
+            today,
+        )
+        cacheJson(KEY_FIRST_BOARD_RECLAIM_OBSERVATIONS, updated)
+        prefs.edit()
+            .putString(KEY_FIRST_BOARD_RECLAIM_OBSERVATIONS, FirstBoardReclaimObservationBook.encode(updated))
+            .commit()
+        updated
+    }
+
     /** 自选股的买点确认状态，独立于观察池保存，避免混入观察池列表和纸上交易。 */
     var watchlistBuyCandidates: MutableList<ObservationCandidate>
         get() = cachedJson(KEY_WATCHLIST_BUY_CANDIDATES, ObservationPoolJson::decode).toMutableList()
@@ -838,6 +874,7 @@ class Store(
         private const val KEY_BOARD_GROUPS = "board_groups"
         private const val KEY_SCREEN_RESULT = "screen_result"
         private const val KEY_OBSERVATION_POOL = "observation_pool"
+        private const val KEY_FIRST_BOARD_RECLAIM_OBSERVATIONS = "first_board_reclaim_observations"
         private const val KEY_WATCHLIST_BUY_CANDIDATES = "watchlist_buy_candidates"
         private const val KEY_FUND_FLOW_HISTORY = "fund_flow_history"
         private const val KEY_SECTOR_STRENGTH_HISTORY = "sector_strength_history"

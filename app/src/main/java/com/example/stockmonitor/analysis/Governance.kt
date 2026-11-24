@@ -36,8 +36,14 @@ object Governance {
     const val WINDOW_DAYS = 180L
 
     private val ALERT_KEYWORDS = listOf(
+        // 风险警示必须排在「退市」前面：*ST 公告标题通常同时含「退市」和「风险警示」，
+        // 先匹配更具体的类型，报告才能说清是退市风险警示还是其他风险警示。
+        "退市风险警示" to "退市风险警示",
+        "其他风险警示" to "其他风险警示",
+        "风险警示" to "风险警示",
         "立案" to "被立案调查",
         "处罚" to "行政处罚",
+        "违规担保" to "违规担保",
         "违规" to "违规事项",
         "冻结" to "股份被冻结",
         "终止上市" to "终止上市",
@@ -111,6 +117,7 @@ object Governance {
             val alert = match(item.title, ALERT_KEYWORDS)
                 ?.takeUnless { item.title.contains("解除") && it == "股份被冻结" }
                 ?.takeUnless { it == "业绩预告修正" && !item.title.contains("年度") }
+                ?.takeUnless { item.title.contains("撤销") && it.contains("风险警示") }
             val good = match(item.title, GOOD_KEYWORDS)
                 ?.takeUnless { item.title.contains("终止") }
             val watch = match(item.title, WATCH_KEYWORDS)
@@ -138,6 +145,21 @@ object Governance {
         }
         if (items.any { it.title.contains("终止回购") || it.title.contains("终止回购计划") }) {
             byReason.remove("股份回购")
+        }
+        if (items.any {
+                it.title.contains("结案") || it.title.contains("终止调查") ||
+                    it.title.contains("不予立案") || it.title.contains("撤销立案")
+            }
+        ) {
+            byReason.remove("被立案调查")
+        }
+        if (items.any { it.title.contains("撤销") && it.title.contains("处罚") }) {
+            byReason.remove("行政处罚")
+        }
+        if (items.any { it.title.contains("撤销") && it.title.contains("风险警示") }) {
+            byReason.remove("退市风险警示")
+            byReason.remove("其他风险警示")
+            byReason.remove("风险警示")
         }
         return byReason.values
             .map { group ->

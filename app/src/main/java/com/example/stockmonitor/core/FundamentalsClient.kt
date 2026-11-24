@@ -7,6 +7,7 @@ import com.example.stockmonitor.analysis.FinancialPeriod
 import com.example.stockmonitor.analysis.Governance
 import com.example.stockmonitor.analysis.MainBusinessItem
 import com.example.stockmonitor.analysis.PeerContext
+import com.example.stockmonitor.analysis.RiskWarningPolicy
 import com.example.stockmonitor.analysis.ShareholderAnalysis
 import com.example.stockmonitor.analysis.ShareholderDisclosure
 import com.example.stockmonitor.analysis.InstitutionalPosition
@@ -37,6 +38,8 @@ data class FundamentalPayload(
     val shareholder: ShareholderAnalysis?,
     /** 东财 F10 的企业类型（如 证券 / 银行 / 保险）：金融企业报表结构不同，评分要换口径。 */
     val orgType: String? = null,
+    /** 行情接口返回的最新简称（可能已带 ST 或 *ST），优先于用户设置里的历史名称。 */
+    val quoteName: String? = null,
 )
 
 /**
@@ -70,6 +73,7 @@ class FundamentalsClient {
         val balance = balanceHistory.firstOrNull()
 
         val snapshot = runCatching { fetchSnapshot(code) }.getOrNull()
+        val quoteName = snapshot?.name?.trim()?.takeIf { it.isNotEmpty() }
         val (valuations, board) = runCatching { fetchValuations(plain) }.getOrDefault(emptyList<ValuationPoint>() to null)
 
         val peers = if (board != null) {
@@ -87,7 +91,9 @@ class FundamentalsClient {
         val mainBusiness = runCatching {
             parseMainBusiness(fetchF10(REPORT_MAINOP, MAINOP_COLUMNS, secucode, 40))
         }.getOrDefault(emptyList())
-        val announcements = runCatching { fetchAnnouncements(plain) }.getOrDefault(emptyList())
+        val announcements = runCatching {
+            fetchAnnouncements(plain, quoteName ?: name)
+        }.getOrDefault(emptyList())
         val shareholder = runCatching { fetchShareholderAnalysis(plain, price) }.getOrNull()
 
         return FundamentalPayload(
@@ -104,6 +110,7 @@ class FundamentalsClient {
             announcements = announcements,
             shareholder = shareholder,
             orgType = parseOrgType(income),
+            quoteName = quoteName,
         )
     }
 
@@ -214,9 +221,13 @@ class FundamentalsClient {
      * 只取第一页是不够的：公告密集的公司 100 条只覆盖三四周，而治理窗口是半年，
      * 那样报告里的「近 180 天」就是虚的。所以按页往回翻，直到最旧一条越过窗口或翻到上限。
      */
-    private fun fetchAnnouncements(plain: String): List<Announcement> {
+    private fun fetchAnnouncements(plain: String, name: String = ""): List<Announcement> {
         val all = mutableListOf<Announcement>()
-        for (page in 1..MAX_ANNOUNCEMENT_PAGES) {
+        var targetDays = Governance.WINDOW_DAYS
+        var maxPages = MAX_ANNOUNCEMENT_PAGES
+        var riskSeen = RiskWarningPolicy.stKind(name) != null
+        var page = 1
+        while (page <= maxPages) {
             val url = "https://np-anotice-stock.eastmoney.com/api/security/ann?sr=-1" +
                 "&page_size=$ANNOUNCEMENT_PAGE_SIZE&page_index=$page&ann_type=A&client_source=web" +
                 "&stock_list=$plain&f_node=0&s_node=0"
@@ -226,17 +237,30 @@ class FundamentalsClient {
             val rows = parseAnnouncements(text)
             if (rows.isEmpty()) break
             all += rows
+            // 普通股票仍只看 180 天；ST 或出现立案/处罚/风险警示时扩到 730 天，
+            // 用来回溯「先立案、后 ST」的完整链条。
+            if (!riskSeen && rows.any { RiskWarningPolicy.isMajorComplianceTitle(it.title) }) {
+                riskSeen = true
+            }
+            if (riskSeen) {
+                targetDays = RiskWarningPolicy.MAJOR_WINDOW_DAYS
+                maxPages = MAX_MAJOR_ANNOUNCEMENT_PAGES
+            }
             // 没填满一页说明已经翻到头了；覆盖满窗口就不用再往回翻。
             if (rows.size < ANNOUNCEMENT_PAGE_SIZE) break
-            if (announcementWindowCovered(all)) break
+            if (announcementWindowCovered(all, targetDays)) break
+            page += 1
         }
         val unique = all.distinctBy { it.date to it.title }.sortedByDescending { it.date }
         val referenceDate = unique.maxOfOrNull { it.date }.orEmpty()
-        val detailKeys = Governance.scan(unique, referenceDate)
+        val detailKeys = (Governance.scan(unique, referenceDate)
             .map { it.date to it.title }
             .toSet() +
             // 回购注销的占股本比例只在正文里（利好判定看占比不看绝对金额），也选择性拉详情。
-            unique.filter { EventCoil.wantsBuybackContent(it.title) }.map { it.date to it.title }
+            unique.filter { EventCoil.wantsBuybackContent(it.title) }.map { it.date to it.title } +
+            RiskWarningPolicy.assess(name, unique, referenceDate).warnings
+                .filter { !it.fromName && it.date != null }
+                .map { it.date!! to it.title })
         return unique.map { item ->
             if ((item.date to item.title) in detailKeys) {
                 item.copy(content = fetchAnnouncementContent(item))
@@ -299,6 +323,8 @@ class FundamentalsClient {
         private const val ANNOUNCEMENT_PAGE_SIZE = 100
         /** 翻页上限：覆盖半年窗口最多用到的页数，防止接口异常时无限翻。 */
         private const val MAX_ANNOUNCEMENT_PAGES = 4
+        /** 风险股回溯两年的翻页上限；只有 ST/立案/处罚等标题才会用到。 */
+        private const val MAX_MAJOR_ANNOUNCEMENT_PAGES = 8
         /** 单条公告正文的分页上限；第一页常是目录，正文从后续页返回。 */
         private const val MAX_ANNOUNCEMENT_DETAIL_PAGES = 8
         private const val VALUATION_PAGE_SIZE = 3000
@@ -668,10 +694,13 @@ class FundamentalsClient {
          * 已抓到的公告是否覆盖满治理窗口：最早一条比「最新一条往回 180 天」还早，就算覆盖到了。
          * 单独提出来是为了不联网也能验证翻页停止条件。
          */
-        fun announcementWindowCovered(items: List<Announcement>): Boolean {
+        fun announcementWindowCovered(
+            items: List<Announcement>,
+            windowDays: Long = Governance.WINDOW_DAYS,
+        ): Boolean {
             val newest = items.maxOfOrNull { it.date } ?: return false
             val oldest = items.minOfOrNull { it.date } ?: return false
-            return daysBetween(oldest, newest) >= Governance.WINDOW_DAYS
+            return daysBetween(oldest, newest) >= windowDays
         }
 
         internal fun daysBetween(from: String, to: String): Long = runCatching {

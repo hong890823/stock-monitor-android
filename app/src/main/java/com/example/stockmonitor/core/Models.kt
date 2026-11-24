@@ -1,6 +1,7 @@
 package com.example.stockmonitor.core
 
 import com.example.stockmonitor.analysis.FiveOneThreeHit
+import com.example.stockmonitor.analysis.AccelerationState
 import com.example.stockmonitor.analysis.BoxRangeAssessment
 import com.example.stockmonitor.analysis.BreakoutRiskDecision
 import com.example.stockmonitor.analysis.EntrySetup
@@ -266,6 +267,8 @@ data class SectorItem(
 data class SectorFlow(
     val mainNetInflow: Double?,
     val mainNetRatio: Double?,
+    /** 板块当日成交额（元），用于把各板块净流入加权成市场级占比；旧缓存可能没有。 */
+    val amountYuan: Double? = null,
 )
 
 data class SectorData(
@@ -811,6 +814,10 @@ data class ObservationSignal(
     val postLimitHighHoldCandidate: Boolean = false,
     /** 当前复评是否发生在连续竞价时段；盘后只允许更新证据，不允许按分钟确认窗口重置买点。 */
     val inTradingSession: Boolean = true,
+    /** 放量加速末端研究状态；只作证据与晋级暂缓，不直接产生买卖信号。 */
+    val acceleration: AccelerationState? = null,
+    /** 非空表示本轮晋级/买点应暂缓；龙头与已确认独立回踩在生成时已豁免。 */
+    val accelerationBlocker: String? = null,
 )
 
 /**

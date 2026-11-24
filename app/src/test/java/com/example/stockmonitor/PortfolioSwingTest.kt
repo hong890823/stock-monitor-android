@@ -295,4 +295,81 @@ class PortfolioSwingTest {
         assertEquals(237.0, PortfolioSwing.roundQuantity("bj920001", 237.8), 0.0)
         assertEquals(0.0, PortfolioSwing.roundQuantity("usAAPL", 237.8), 0.0)
     }
+
+    // ---------- 强度分档回踩锚（docs/2026-11-24-divergence-execution-strategy.md 模块 D）----------
+
+    @Test
+    fun strongTierUsesShallowAnchorInsteadOfDeepMa20Band() {
+        // 现价 10.3 在 M20 深口径区间（9.95～10.2）之外：旧口径判「不追价」给 0 股；
+        // 强势档改锚 MA5 浅回踩（下沿 10.14），应拿到加仓资金。
+        val original = evidence()
+        val input = original.copy(
+            quote = original.quote.copy(price = 10.3, open = 10.2, high = 10.4, low = 10.15),
+            ma5 = 10.24, ma10 = 10.16,
+            recentCloses = listOf(9.9, 10.0, 10.05, 10.1, 10.15, 10.2, 10.25, 10.28, 10.3),
+        )
+        val result = plan(input).rows.single()
+
+        assertEquals(SwingStatus.READY, result.status)
+        assertTrue(result.addQuantity > 0.0)
+        // 浅锚下沿远高于 M20 深口径下沿 9.95：强势股不再被建议等深回踩。
+        assertTrue(result.entryLow!! > 10.05)
+        assertTrue(result.anchorLabel!!.contains("MA5"))
+        assertTrue(result.reason.contains("不硬等"))
+    }
+
+    @Test
+    fun strongTierOffBandWaitsForShallowAnchorNotMa20() {
+        // 强势但短线拉高离开浅锚区间：等浅回踩，文案不引导等 M20 深回踩。
+        val original = evidence()
+        val input = original.copy(
+            quote = original.quote.copy(price = 10.6, open = 10.5, high = 10.7, low = 10.45),
+            entry = entry.copy(stopPrice = 10.0),
+            ma5 = 10.24, ma10 = 10.16,
+            recentCloses = listOf(9.9, 10.0, 10.05, 10.1, 10.15, 10.2, 10.25, 10.28, 10.3),
+        )
+        val result = plan(input).rows.single()
+
+        assertEquals(SwingStatus.WAIT, result.status)
+        assertEquals(0.0, result.addQuantity, 0.0)
+        assertTrue(result.reason.contains("浅回踩"))
+        assertTrue(result.reason.contains("不硬等 M20"))
+    }
+
+    @Test
+    fun belowMa20WeakTierGivesNoBandAndClearReason() {
+        val original = evidence()
+        val input = original.copy(quote = original.quote.copy(price = 9.8, open = 9.9, high = 9.95, low = 9.75))
+        val result = plan(input).rows.single()
+
+        assertEquals(0.0, result.addQuantity, 0.0)
+        assertTrue(result.reason.contains("弱势"))
+        assertNull(result.entryLow)
+    }
+
+    @Test
+    fun neutralTierDeepMa20BandGetsReachabilityNote() {
+        // 缺 MA5/MA10 数据落中性档：深回踩区间附「大概率到不了」注记，不再让人死等深位。
+        val original = evidence()
+        val input = original.copy(
+            quote = original.quote.copy(price = 12.0, open = 11.9, high = 12.1, low = 11.8),
+            resistance = 15.0,
+            entry = entry.copy(stopPrice = 11.0),
+        )
+        val result = plan(input).rows.single()
+
+        assertEquals(SwingStatus.WAIT, result.status)
+        assertTrue(result.reason.contains("大概率到不了"))
+    }
+
+    @Test
+    fun fundedRowCarriesBatchExecutionNote() {
+        // 模块 E：拿到加仓额度的行必须带分批口径，禁止一把梭；作废线进报告。
+        val result = plan().rows.single()
+        assertTrue(result.addQuantity > 0.0)
+        assertTrue(result.action().contains("分批执行，不一次打满"))
+        val report = plan().reportLines().joinToString("\n")
+        assertTrue(report.contains("第1批 40%"))
+        assertTrue(report.contains("取消全部后续批次"))
+    }
 }

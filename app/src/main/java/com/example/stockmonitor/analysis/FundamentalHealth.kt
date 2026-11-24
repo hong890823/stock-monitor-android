@@ -4,7 +4,13 @@ import java.time.LocalDate
 import java.time.temporal.ChronoUnit
 import kotlin.math.roundToInt
 
-data class FundamentalEvidence(val date: String, val reason: String, val financial: Boolean = false)
+data class FundamentalEvidence(
+    val date: String,
+    val reason: String,
+    val financial: Boolean = false,
+    /** 重大合规红灯：窗口按 [RiskWarningPolicy.MAJOR_WINDOW_DAYS]（730 天），与报告「风险预警」回溯同口径。 */
+    val majorCompliance: Boolean = false,
+)
 
 /**
  * 基本面健康分级：把 [FundamentalResult] 折成破位文案用得上的一句「倾向」。
@@ -65,6 +71,13 @@ object FundamentalHealthPolicy {
     /** 拉取失败后的重试间隔（只对没有缓存的代码生效），避免 15 秒轮询反复打接口。 */
     const val RETRY_AFTER_FAILURE_MS = 4L * 60 * 60 * 1000
 
+    /**
+     * 普通公告类红灯的保质期（如业绩预亏/预减）。重大合规类（退市风险警示/立案/处罚级，
+     * [FundamentalEvidence.majorCompliance]）用 [RiskWarningPolicy.MAJOR_WINDOW_DAYS]——
+     * 立案到风险警示常跨半年，180 天会把未结案的红灯提前熄灭，今日要点就不再点名。
+     */
+    const val ANNOUNCEMENT_WINDOW_DAYS = 180L
+
     /** 要不要后台补拉：有新鲜缓存就用缓存；没缓存/已过期才拉，失败后按 [RETRY_AFTER_FAILURE_MS] 节流。 */
     fun needsFetch(snapshot: FundamentalHealthSnapshot?, lastAttemptMs: Long, nowMs: Long): Boolean {
         if (snapshot != null && nowMs - snapshot.fetchedAtMs < CACHE_TTL_MS) return false
@@ -84,7 +97,14 @@ object FundamentalHealthPolicy {
             financialScale = !result.financialQuality.applicable,
         ).copy(intradayEvidence = buildList {
             result.risks.filter { it.level == RiskLevel.ALERT && it.evidenceDate != null }.forEach {
-                add(FundamentalEvidence(it.evidenceDate!!, it.text, financial = !it.announcement))
+                add(
+                    FundamentalEvidence(
+                        it.evidenceDate!!,
+                        it.text,
+                        financial = !it.announcement,
+                        majorCompliance = it.majorCompliance,
+                    ),
+                )
             }
             if (result.quarters.takeLast(2).let { quarters -> quarters.size == 2 && quarters.all {
                 (it.revenueYoy ?: 0.0) <= DOWNTURN_YOY_PCT && (it.netProfitYoy ?: 0.0) <= DOWNTURN_YOY_PCT
@@ -99,7 +119,11 @@ object FundamentalHealthPolicy {
         val current = health.intradayEvidence.filter { evidence ->
             val date = parseDate(evidence.date)
             if (date == null || now == null || date > now) return@filter false
-            if (!evidence.financial) return@filter ChronoUnit.DAYS.between(date, now) in 0..180
+            if (!evidence.financial) {
+                val window =
+                    if (evidence.majorCompliance) RiskWarningPolicy.MAJOR_WINDOW_DAYS else ANNOUNCEMENT_WINDOW_DAYS
+                return@filter ChronoUnit.DAYS.between(date, now) in 0..window
+            }
             val deadline = when (date.monthValue to date.dayOfMonth) {
                 12 to 31 -> LocalDate.of(date.year + 1, 4, 30)
                 3 to 31 -> LocalDate.of(date.year, 8, 31)

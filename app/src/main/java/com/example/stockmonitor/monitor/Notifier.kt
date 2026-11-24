@@ -476,6 +476,43 @@ object Notifier {
         return posted
     }
 
+    /**
+     * 盘中资金环境：只读提示，跟随「买卖点 / 做T提醒」开关，但不生成建议计划、不影响做 T 份额。
+     * 用独立 kind/triggerType，便于提醒历史里与买卖信号区分。
+     */
+    fun marketFundFlow(
+        context: Context,
+        id: Int,
+        title: String,
+        text: String,
+    ): Boolean {
+        val store = Store(context)
+        if (!store.alertsEnabled || !store.intradaySignalEnabled) return false
+        ensureChannels(context)
+        val record =
+            newAlertRecord(
+                notificationId = id,
+                kind = "market_fund_flow",
+                title = title,
+                text = text,
+                level = "SIGNAL",
+                triggerType = "market_fund_flow",
+            )
+        val notification =
+            buildRecordedNotification(
+                context = context,
+                record = record,
+                channelId = CHANNEL_SIGNAL,
+                priority = NotificationCompat.PRIORITY_DEFAULT,
+                category = NotificationCompat.CATEGORY_STATUS,
+            )
+        val status = signalStatus(context)
+        val posted =
+            postRecordedNotification(context, record, notification, CHANNEL_SIGNAL, "盘中资金环境发送失败")
+        if (posted && shouldVibrateReminder(status)) vibrateSignal(context)
+        return posted
+    }
+
     /** 尾盘候选复核：与实时买点同通道，但用独立 triggerType 做跨重启的每日去重。 */
     fun tailObservation(
         context: Context,

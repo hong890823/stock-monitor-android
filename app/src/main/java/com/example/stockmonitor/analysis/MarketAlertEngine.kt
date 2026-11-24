@@ -35,6 +35,11 @@ class MarketAlertEngine {
         val turnoverRatio: Double? = null,
         /** 近20个已完成交易日的稳健日波动率（百分点）；缺失时策略退回指数最低容差。 */
         val dailyVolatilityPct: Double? = null,
+        /** 高开低走判定所需；旧调用方不传时保持 null，不改变原预警行为。 */
+        val open: Double? = null,
+        val previousClose: Double? = null,
+        val high: Double? = null,
+        val sessionMinutes: Int? = null,
     )
 
     data class IndexBar(
@@ -105,6 +110,7 @@ class MarketAlertEngine {
         val type: String,
         val reason: String,
         val indexName: String? = null,
+        val code: String? = null,
     )
 
     private var tradingDay: String? = null
@@ -113,6 +119,8 @@ class MarketAlertEngine {
     private var emittedLevel: MarketAlertLevel? = null
     private var emittedScope: MarketAlertScope? = null
     private var lastEmitAtMs: Long = 0L
+    /** 每只指数当日只报一次高开低走，避免同一走势反复提醒。 */
+    private val gapFadeEmitted = mutableSetOf<String>()
 
     fun update(
         snapshots: List<IndexSnapshot>,
@@ -142,10 +150,11 @@ class MarketAlertEngine {
         if (speedBatchKey != null) lastSpeedBatchKey = speedBatchKey
 
         val daily = dailyCandidate(current, breadth)
+        val gapFade = gapFadeCandidate(current)
         val speed = newestBarTimestamp
             ?.takeIf { newBarBatch }
             ?.let { speedCandidate(marketSpeedBars, breadth, it) }
-        val candidate = listOfNotNull(daily, speed).maxWithOrNull(candidateComparator())
+        val candidate = listOfNotNull(daily, gapFade, speed).maxWithOrNull(candidateComparator())
         if (candidate == null) {
             if (isRearmed(current)) resetState()
             return emptyList()
@@ -153,6 +162,7 @@ class MarketAlertEngine {
         // 日线候选只依赖实时快照，冷却也必须使用同一批行情的时间；不能因5分钟K线暂缺而永不重报。
         val notificationTimestamp = current.maxOfOrNull { it.timestamp }
         if (!shouldEmit(candidate, notificationTimestamp)) return emptyList()
+        candidate.code?.takeIf { candidate.type.startsWith("index_gap_fade") }?.let { gapFadeEmitted.add(it) }
         emittedLevel = candidate.level
         emittedScope = candidate.scope
         notificationTimestamp?.let { lastEmitAtMs = it }
@@ -162,6 +172,7 @@ class MarketAlertEngine {
     fun reset() {
         tradingDay = null
         lastSpeedBatchKey = null
+        gapFadeEmitted.clear()
         resetState()
     }
 
@@ -169,6 +180,35 @@ class MarketAlertEngine {
         emittedLevel = null
         emittedScope = null
         lastEmitAtMs = 0L
+    }
+
+    /**
+     * 指数级高开低走：高开 → 跌破开盘价 → 从日高明显回落。
+     *
+     * 与绝对跌幅/5分钟急跌相互独立：高开低走常发生在指数仍红盘时，
+     * 只盯跌幅阈值会整段静默。每只指数当日只报一次。
+     */
+    private fun gapFadeCandidate(snapshots: List<IndexSnapshot>): Candidate? {
+        for (snapshot in snapshots) {
+            if (snapshot.code in gapFadeEmitted) continue
+            val finding = GapFadePolicy.evaluate(
+                openPrice = snapshot.open,
+                previousClose = snapshot.previousClose,
+                highPrice = snapshot.high,
+                price = snapshot.price,
+                sessionMinutes = snapshot.sessionMinutes,
+                holding = false,
+            ) ?: continue
+            return Candidate(
+                level = if (finding.severity == "danger") MarketAlertLevel.DANGER else MarketAlertLevel.WARNING,
+                scope = MarketAlertScope.INDEX,
+                type = "index_gap_fade:${snapshot.code}",
+                reason = GapFadePolicy.indexReason(finding),
+                indexName = snapshot.name,
+                code = snapshot.code,
+            )
+        }
+        return null
     }
 
     private fun dailyCandidate(
@@ -448,13 +488,19 @@ class MarketAlertEngine {
         val indexText = snapshots.joinToString("，") {
             String.format(Locale.CHINA, "%s %+.2f%%", it.name, it.changePct)
         }
-        val title = when (candidate.scope) {
-            MarketAlertScope.INDEX -> "⚠️ ${candidate.indexName ?: "单一指数"}风险确认"
-            MarketAlertScope.MARKET -> "🚨 市场风险预警"
-            MarketAlertScope.SYSTEMIC -> "💥 系统性风险预警"
+        val isGapFade = candidate.type.startsWith("index_gap_fade")
+        val title = if (isGapFade) {
+            "📉 ${candidate.indexName ?: "指数"}高开低走"
+        } else {
+            when (candidate.scope) {
+                MarketAlertScope.INDEX -> "⚠️ ${candidate.indexName ?: "单一指数"}风险确认"
+                MarketAlertScope.MARKET -> "🚨 市场风险预警"
+                MarketAlertScope.SYSTEMIC -> "💥 系统性风险预警"
+            }
         }
         val body =
-            "$indexText；${candidate.reason}；${breadth.summary()}。请注意控制仓位。"
+            "$indexText；${candidate.reason}；${breadth.summary()}。" +
+                if (isGapFade) "注意指数回落向持仓传导；不追高、不在下跌途中补仓。" else "请注意控制仓位。"
         return Alert(
             level = candidate.level,
             scope = candidate.scope,

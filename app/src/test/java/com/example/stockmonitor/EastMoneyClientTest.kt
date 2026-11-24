@@ -82,8 +82,8 @@ class EastMoneyClientTest {
     fun parsesIndustryBoardMainFlowFields() {
         val json = """
             {"data":{"diff":[
-              {"f12":"BK0438","f14":"半导体","f62":"1250000000","f184":"3.25"},
-              {"f12":"BK0001","f14":"银行","f62":"-800000000","f184":"-1.40"}
+              {"f12":"BK0438","f14":"半导体","f6":"52000000000","f62":"1250000000","f184":"3.25"},
+              {"f12":"BK0001","f14":"银行","f6":"30000000000","f62":"-800000000","f184":"-1.40"}
             ]}}
         """.trimIndent()
 
@@ -92,6 +92,7 @@ class EastMoneyClientTest {
         assertEquals(2, result.size)
         assertEquals(1_250_000_000.0, result["BK0438"]?.mainNetInflow!!, 0.0)
         assertEquals(3.25, result["BK0438"]?.mainNetRatio!!, 0.0)
+        assertEquals(52_000_000_000.0, result["BK0438"]?.amountYuan!!, 0.0)
         assertEquals(-1.40, result["BK0001"]?.mainNetRatio!!, 0.0)
     }
 }

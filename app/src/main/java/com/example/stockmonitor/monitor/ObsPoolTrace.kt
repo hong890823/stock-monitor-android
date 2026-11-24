@@ -91,8 +91,9 @@ internal object ObsPoolTrace {
         line("event=reclaimGate day=$day code=$code name=$name eligible=$eligible detail=$detail")
     }
 
-    fun reclaimAlert(day: String, code: String, price: Double) {
-        line("event=reclaimAlert day=$day code=$code price=$price")
+    /** 首板承接转强命中：只写入「涨停晋级观察」卡片，不再推送通知。 */
+    fun reclaimObservation(day: String, code: String, price: Double) {
+        line("event=reclaimObservation day=$day code=$code price=$price")
     }
 
     fun reclaimBudgetBlocked(day: String, code: String) {

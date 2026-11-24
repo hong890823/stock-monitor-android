@@ -90,7 +90,17 @@ data class QuarterPoint(
 
 enum class RiskLevel { GOOD, WATCH, ALERT }
 
-data class RiskItem(val level: RiskLevel, val text: String, val evidenceDate: String? = null, val announcement: Boolean = false)
+data class RiskItem(
+    val level: RiskLevel,
+    val text: String,
+    val evidenceDate: String? = null,
+    val announcement: Boolean = false,
+    /**
+     * 重大合规（[RiskWarningPolicy] 入列的立案/处罚/风险警示/退市级）：盘中红灯保质期按
+     * [RiskWarningPolicy.MAJOR_WINDOW_DAYS]（730 天，对齐报告「风险预警」回溯），不是普通公告的 180 天。
+     */
+    val majorCompliance: Boolean = false,
+)
 
 data class InstitutionalPosition(
     val name: String,
@@ -259,6 +269,8 @@ data class FundamentalResult(
     val pbPercentile: Double?,
     /** 口径提醒：亏损、历史不足、各方法分歧大、周期高点等。 */
     val notes: List<String>,
+    /** 行情简称/公告里的 ST、风险警示、立案等重大风险；报告顶部与风险清单共用。 */
+    val riskWarning: RiskWarningAssessment? = null,
 )
 
 /**
@@ -367,6 +379,10 @@ object Fundamentals {
         val today: String = "",
         /** 东财 F10 企业类型（证券/银行/保险…）；金融企业换评分口径，见 [isFinancialOrg]。 */
         val orgType: String? = null,
+        /** 用户设置里的名称，可能是 ST 前的旧名称；仅作兜底。 */
+        val name: String = "",
+        /** 行情接口返回的最新简称（可能已带 ST 或 *ST），优先用于风险预警。 */
+        val quoteName: String? = null,
     )
 
     /**
@@ -415,9 +431,15 @@ object Fundamentals {
             announcements = input.announcements,
         )
 
+        val referenceDate = input.today.ifBlank { input.valuations.lastOrNull()?.date.orEmpty() }
         val governance = Governance.scan(
             items = input.announcements,
-            referenceDate = input.today.ifBlank { input.valuations.lastOrNull()?.date.orEmpty() },
+            referenceDate = referenceDate,
+        )
+        val riskWarning = RiskWarningPolicy.assess(
+            stockName = input.quoteName?.takeIf { it.isNotBlank() } ?: input.name,
+            announcements = input.announcements,
+            referenceDate = referenceDate,
         )
         val financialDate = listOfNotNull(input.periods.maxByOrNull { it.date }?.date, balance?.date).minOrNull()
         val risks = riskScan(input, deductRatio, ocfToProfit, cashToRevenue, netCashRatio, roe, financial)
@@ -432,10 +454,13 @@ object Fundamentals {
                 }
                 risks.add(RiskItem(level, warning, financialDate))
             }
-        // 公告里的重大风险（立案、处罚、冻结）直接进风险清单；提示类只留在公告一节，避免刷屏。
-        governance.filter { it.level == RiskLevel.ALERT }.forEach {
+        // 重大合规（立案/处罚/风险警示）由 riskWarning 统一入列，避免同一条公告重复两次。
+        governance.filter {
+            it.level == RiskLevel.ALERT && !RiskWarningPolicy.isMajorComplianceTitle(it.title)
+        }.forEach {
             risks.add(RiskItem(RiskLevel.ALERT, "公告提示：${it.title}（${it.date}）", it.date, announcement = true))
         }
+        risks.addAll(RiskWarningPolicy.riskItems(riskWarning, referenceDate))
         input.shareholder?.let { shareholder ->
             val institutionOutflow = shareholder.institutionalNetFunds?.let { it < 0.0 } == true
             val holderDispersion = shareholder.retailHolderChangePct?.let { it >= 5.0 } == true
@@ -507,6 +532,7 @@ object Fundamentals {
             financialQuality = financialQuality,
             mainBusiness = mainBusinessOf(input.mainBusiness),
             governance = governance,
+            riskWarning = riskWarning,
             shareholder = input.shareholder,
             announcementsScanned = input.announcements.size,
             announcementFrom = input.announcements.minOfOrNull { it.date },

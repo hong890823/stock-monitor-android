@@ -140,4 +140,32 @@ class AddPositionStrategyTest {
         assertTrue(report.contains("按整手反推入手价"))
         assertTrue(report.contains("不构成投资建议"))
     }
+
+    @Test
+    fun deepAnchorBeyondAtrBandGetsReachabilityWarning() {
+        // 建议价距现价超过 2.5×ATR 波动口径：必须注记「大概率到不了」，不能让人死等深位。
+        val plan = AddPositionStrategy.plan(
+            code = "sh600000",
+            holdingShares = 1000.0,
+            averageCost = 13.0,
+            targetCost = 12.0,
+            levels = listOf(AddLevel("波段回踩区间下沿", 9.0), AddLevel("现价", 12.0)),
+            currentPrice = 12.0,
+            atrPct = 2.0,
+        )
+        assertTrue(plan.warnings.any { it.contains("大概率到不了") && it.contains("波段回踩区间下沿") })
+    }
+
+    @Test
+    fun noAtrDataMeansNoReachabilityClaim() {
+        val plan = AddPositionStrategy.plan(
+            code = "sh600000",
+            holdingShares = 1000.0,
+            averageCost = 13.0,
+            targetCost = 12.0,
+            levels = listOf(AddLevel("波段回踩区间下沿", 9.0)),
+            currentPrice = 12.0,
+        )
+        assertTrue(plan.warnings.none { it.contains("大概率到不了") })
+    }
 }

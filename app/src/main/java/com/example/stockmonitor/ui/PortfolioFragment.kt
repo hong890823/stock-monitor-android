@@ -3,6 +3,7 @@ package com.example.stockmonitor.ui
 import com.example.stockmonitor.analysis.PortfolioAnalysis
 import com.example.stockmonitor.analysis.DeepLossPolicy
 import com.example.stockmonitor.analysis.HoldingAdvicePolicy
+import com.example.stockmonitor.analysis.MarketFundFlowPolicy
 import com.example.stockmonitor.analysis.DailyAdvicePolicy
 import com.example.stockmonitor.analysis.TimeUtils
 
@@ -529,6 +530,10 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             quote?.quoteDate,
             Repo.fundFlowHistory[position.code].orEmpty(),
         )
+        val fundEnvironment = MarketFundFlowPolicy.holdingAdvice(
+            Repo.marketFundFlow,
+            Repo.fundFlowHistory[position.code].orEmpty().lastOrNull()?.mainNetPct,
+        )
         return listOfNotNull(
         adviceText?.let { UiKit.DetailRow("今日建议计划", it, dividerAfter = true) },
         UiKit.DetailRow(
@@ -560,6 +565,9 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
         },
         holdingAdvice?.let {
             UiKit.DetailRow("持仓视角", it, dividerAfter = true)
+        },
+        fundEnvironment?.let {
+            UiKit.DetailRow("资金环境", it.text)
         },
         quote?.let {
             UiKit.DetailRow(
@@ -594,6 +602,10 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             result.analysisDate,
             Repo.fundFlowHistory[result.code].orEmpty(),
         )
+        val fundEnvironment = MarketFundFlowPolicy.holdingAdvice(
+            Repo.marketFundFlow,
+            Repo.fundFlowHistory[result.code].orEmpty().lastOrNull()?.mainNetPct,
+        )
         return listOfNotNull(
             adviceText?.let { UiKit.DetailRow("今日建议计划", it, dividerAfter = true) },
             UiKit.DetailRow(
@@ -618,6 +630,7 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                 "主力意图",
                 mainForce.summary,
             ),
+            fundEnvironment?.let { UiKit.DetailRow("资金环境", it.text) },
             UiKit.DetailRow(
                 "资金依据",
                 mainForce.evidence.replace("｜", "\n"),

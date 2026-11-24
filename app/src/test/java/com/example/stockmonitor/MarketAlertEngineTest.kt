@@ -344,4 +344,28 @@ class MarketAlertEngineTest {
         assertTrue(volatile > stable)
         assertEquals(1.6, volatile, 0.001)
     }
+
+    @Test
+    fun gapUpFadeIsReportedEvenWhileIndexIsStillPositive() {
+        val engine = MarketAlertEngine()
+        val snapshot = MarketAlertEngine.IndexSnapshot(
+            code = "sh000001",
+            name = "上证指数",
+            price = 3035.0,
+            changePct = 0.17,
+            turnover = 1_000_000.0,
+            timestamp = 60 * 60_000L,
+            open = 3050.0,
+            previousClose = 3030.0,
+            high = 3055.0,
+            sessionMinutes = 30,
+        )
+
+        val alerts = engine.update(listOf(snapshot), emptyMap(), "2026-11-24")
+
+        assertEquals(1, alerts.size)
+        assertEquals("index_gap_fade:sh000001", alerts.single().type)
+        assertTrue(alerts.single().title.contains("高开低走"))
+        assertEquals(MarketAlertLevel.WARNING, alerts.single().level)
+    }
 }

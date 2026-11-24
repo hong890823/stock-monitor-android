@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import com.example.stockmonitor.analysis.DailyReview
+import com.example.stockmonitor.analysis.AccelerationPolicy
 import com.example.stockmonitor.analysis.AdviceDirection
 import com.example.stockmonitor.analysis.AdviceKind
 import com.example.stockmonitor.analysis.DailyAdvicePolicy
@@ -50,6 +51,10 @@ import com.example.stockmonitor.analysis.FirstBoardReclaimPolicy
 import com.example.stockmonitor.analysis.BuyPointFundFlowPolicy
 import com.example.stockmonitor.analysis.MainForceConfidence
 import com.example.stockmonitor.analysis.MainForceDirectionPolicy
+import com.example.stockmonitor.analysis.MarketFundFlowPolicy
+import com.example.stockmonitor.analysis.MarketFundFlowState
+import com.example.stockmonitor.analysis.MarketFundFlowTone
+import com.example.stockmonitor.analysis.MarketFundFlowTracker
 import com.example.stockmonitor.analysis.ObservationPoolRetentionPolicy
 import com.example.stockmonitor.analysis.AlertEventKeys
 import com.example.stockmonitor.analysis.AlertOrchestrator
@@ -66,6 +71,7 @@ import com.example.stockmonitor.analysis.MarketBreadthSnapshot
 import com.example.stockmonitor.analysis.MarketEnvironmentQuality
 import com.example.stockmonitor.analysis.MarketTurnoverFallbackPolicy
 import com.example.stockmonitor.analysis.MarketTurnoverSource
+import com.example.stockmonitor.analysis.MarketDivergenceCheck
 import com.example.stockmonitor.analysis.MarketRegime
 import com.example.stockmonitor.analysis.NewsFocusContext
 import com.example.stockmonitor.analysis.MarketRiskContext
@@ -137,6 +143,7 @@ import com.example.stockmonitor.core.EastMoneyClient
 import com.example.stockmonitor.core.EastMoneyLimitClient
 import com.example.stockmonitor.core.EastMoneyFundFlowClient
 import com.example.stockmonitor.core.FundFlowHistoryJson
+import com.example.stockmonitor.core.FirstBoardReclaimObservation
 import com.example.stockmonitor.core.Errors
 import com.example.stockmonitor.core.FundamentalsClient
 import com.example.stockmonitor.core.GuardedAction
@@ -294,6 +301,10 @@ class MonitorService : Service() {
     /** 量价异动最近一次触发的时刻（code→ms）：同一「放量」事件别再从 BREAKOUT 通道重复推。 */
     private val volumePriceAnomalyAtMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
     private val intradayFundFlowTracker = IntradayFundFlowTracker()
+    private val marketFundFlowTracker = MarketFundFlowTracker()
+    private var marketFundFlowNotifyDay: String? = null
+    private var marketFundFlowNotifyCount = 0
+    private var marketFundFlowLastNotifyAtMs = 0L
     private val lastVolumePriceFundFlowRefreshAtMs = java.util.concurrent.atomic.AtomicLong(0L)
     private val portfolioSignals = mutableMapOf<String, String>()
     private val exitReviewDedup = com.example.stockmonitor.core.ExitReviewDedup()
@@ -427,6 +438,7 @@ class MonitorService : Service() {
         // 先用落盘的概念板块榜垫上，避免服务刚起来时卡片显示“暂无数据”，等首轮刷新再覆盖。
         Repo.concepts = store.conceptBoards
         Repo.observationPool = store.observationPool
+        Repo.firstBoardReclaimObservations = store.firstBoardReclaimObservations.toList()
         Repo.fundFlowHistory = store.fundFlowHistory
         Repo.sectorStrengthHistory = store.sectorStrengthHistory
         Repo.observationSnapshots = store.observationSnapshots
@@ -627,7 +639,7 @@ class MonitorService : Service() {
                 refreshIntradayBars(freshQuotes, calendar)
                 checkIntradaySignals(calendar, freshQuotes)
                 launchObservationPoolRefresh(freshQuotes)
-                checkFirstBoardReclaimAlerts(calendar, freshQuotes)
+                checkFirstBoardReclaimObservations(calendar, freshQuotes)
             } else {
                 Log.w(TAG, "今日行情未更新（today=$today），跳过盘中预警")
             }
@@ -867,7 +879,57 @@ class MonitorService : Service() {
             }
         Repo.sectorFlows = fetched
         Repo.sectorFlowAsOfMs = System.currentTimeMillis()
+        val today = TimeUtils.todayText()
+        val marketFundFlow = marketFundFlowTracker.update(
+            today,
+            MarketFundFlowPolicy.assess(fetched.values),
+        )
+        Repo.marketFundFlow = marketFundFlow
+        maybeNotifyMarketFundFlow(marketFundFlow, today)
         captureSectorStrengthSnapshot()
+    }
+
+    /**
+     * 资金环境转向时才提醒：档位跃迁由 [MarketFundFlowTracker] 连续两次同向采样确认，
+     * 这里再做交易时段、日内次数和冷却三道闸门。只读提示，不生成建议计划、不改做 T 份额。
+     */
+    private fun maybeNotifyMarketFundFlow(state: MarketFundFlowState, today: String) {
+        if (!state.changed || state.tone == MarketFundFlowTone.UNAVAILABLE) return
+        if (!store.alertsEnabled || !store.intradaySignalEnabled) return
+        if (!TradingCalendar.inMarketHoursForAlert(Calendar.getInstance())) return
+        val held = store.portfolio.positions.filter { it.quantity > 0 }
+        if (held.isEmpty()) return
+        val now = System.currentTimeMillis()
+        if (marketFundFlowNotifyDay != today) {
+            marketFundFlowNotifyDay = today
+            marketFundFlowNotifyCount = 0
+            marketFundFlowLastNotifyAtMs = 0L
+        }
+        if (marketFundFlowNotifyCount >= MARKET_FUND_FLOW_MAX_NOTIFY_PER_DAY) return
+        if (now - marketFundFlowLastNotifyAtMs < MARKET_FUND_FLOW_COOLDOWN_MS) return
+        val lines = held.take(MARKET_FUND_FLOW_MAX_HOLDING_LINES).mapNotNull { position ->
+            val stockPct = intradayFundFlowTracker.context(position.code)?.dayMainNetPct
+                ?: Repo.fundFlowHistory[position.code]?.lastOrNull()?.mainNetPct
+            MarketFundFlowPolicy.holdingAdvice(state, stockPct)
+                ?.let { "${position.name}：${it.text}" }
+        }
+        if (lines.isEmpty()) return
+        val body = buildString {
+            append(MarketFundFlowPolicy.marketSummary(state.snapshot))
+            append('。')
+            append('\n')
+            append(lines.joinToString("\n"))
+            append("\n资金流按订单规模估算，不代表机构身份，不构成交易指令。")
+        }
+        val posted = Notifier.marketFundFlow(
+            this,
+            NotificationIds.of(ALERT_ID_MARKET_FUND_FLOW, "market_fund_flow"),
+            MarketFundFlowPolicy.notificationTitle(state),
+            body,
+        )
+        if (!posted) return
+        marketFundFlowNotifyCount += 1
+        marketFundFlowLastNotifyAtMs = now
     }
 
     /**
@@ -1622,6 +1684,17 @@ class MonitorService : Service() {
      * 市场风险预警：使用指数相对昨收的日内跌幅，而不是相邻两轮的跌幅。
      * 这样全天缓慢下跌到危险区间时也能提醒；同一轮风险在重新武装前只提醒一次。
      */
+    private fun tradingMinutesSinceOpen(time: java.time.LocalTime): Int {
+        val minute = time.hour * 60 + time.minute
+        return when {
+            minute < 570 -> 0
+            minute <= 690 -> minute - 570
+            minute < 780 -> 120
+            minute <= 900 -> 120 + (minute - 780)
+            else -> 240
+        }
+    }
+
     private fun checkMarketRiskAlert(
         quotes: Map<String, Quote>,
         calendar: Calendar,
@@ -1636,6 +1709,10 @@ class MonitorService : Service() {
         }
         val turnoverRatio = marketTurnoverRatio(quotes, calendar)
         refreshMarketFiveMinuteBars(quotes, timestamp)
+        val sessionMinutes = calendar.toInstant()
+            .atZone(java.time.ZoneId.systemDefault())
+            .toLocalTime()
+            .let(::tradingMinutesSinceOpen)
         val snapshots =
             MARKET_RISK_INDEX_CODES.mapNotNull { code ->
                 quotes[code]?.let { quote ->
@@ -1650,6 +1727,10 @@ class MonitorService : Service() {
                         dailyVolatilityPct = marketRiskDailyVolatility[code]
                             ?.takeIf { it.first == today }
                             ?.second,
+                        open = quote.open,
+                        previousClose = quote.prevClose,
+                        high = quote.high,
+                        sessionMinutes = sessionMinutes,
                     )
                 }
             }
@@ -1929,19 +2010,27 @@ class MonitorService : Service() {
         }
     }
 
-    private fun checkFirstBoardReclaimAlerts(
+    /**
+     * 首板承接转强 → 选股页「🔥 涨停晋级观察」卡片。
+     *
+     * 只记录、不推送：满足首板后 1–3 个交易日、日内下探开盘价、低点稳定后收复开盘价、
+     * MA5 乖离不超边界且资金未在出货的候选，写入本地记录供盘后选股复核。
+     *
+     * 资金在出货时不记录并回滚 `emitted`，资金转好后同一形态仍可再触发。
+     * 记录不依赖提醒开关：它是选股数据而不是盘中打扰，只要监控服务在盘中运行就会积累。
+     */
+    private fun checkFirstBoardReclaimObservations(
         calendar: Calendar,
         currentQuotes: Map<String, Quote>,
     ) {
-        if (!store.alertsEnabled || !store.intradaySignalEnabled ||
-            !TradingCalendar.inMarketHoursForAlert(calendar)
-        ) return
+        if (!TradingCalendar.inMarketHoursForAlert(calendar)) return
         val today = TimeUtils.todayText()
         // 用指数日线的真实交易日序列计算首板窗口：法定节假日不算交易日。
         val tradingDates = observationBenchmark()?.map { it.date }.orEmpty().also {
             if (it.isNotEmpty()) Repo.marketTradingDates = it
         }
         val qualityByCode = mutableMapOf<String, BuyPointFundFlowPolicy.Decision>()
+        val candidateByCode = mutableMapOf<String, ObservationCandidate>()
         val candidates = store.observationPool.asSequence()
             .filter { candidate ->
                 val windowOk = candidate.limitStreak == 1 &&
@@ -1982,8 +2071,9 @@ class MonitorService : Service() {
                     )
                     return@mapNotNull null
                 }
-                // 价格形态转强还不够：主力是否在借反弹出货、有没有资金承接，决定要不要打扰用户。
+                // 价格形态转强还不够：主力是否在借反弹出货、有没有资金承接，决定值不值得进观察卡。
                 qualityByCode[candidate.code] = buyPointFundFlowDecision(candidate.code, quote)
+                candidateByCode[candidate.code] = candidate
                 FirstBoardReclaimTracker.Sample(
                     code = candidate.code,
                     name = candidate.name,
@@ -2002,25 +2092,36 @@ class MonitorService : Service() {
             val alert = firstBoardReclaimTracker.update(sample) ?: return@forEach
             val quality = qualityByCode[sample.code]
             if (quality != null && !quality.allow) {
-                // 形态满足但资金在出货且无承接：回滚 emitted，资金转好后同一形态仍可再报。
+                // 形态满足但资金在出货且无承接：回滚 emitted，资金转好后同一形态仍可再记录。
                 firstBoardReclaimTracker.rearm(sample.code)
                 ObsPoolTrace.reclaimGate(today, sample.code, sample.name, false, "fundFlow")
                 return@forEach
             }
-            val posted =
-                sendCheckedAlert(
-                    type = "firstBoardReclaim",
-                    code = alert.code,
-                    id = NotificationIds.of(ALERT_ID_FIRST_BOARD_RECLAIM, alert.code),
-                    title = alert.title,
-                    body = alert.body + (quality?.let { "｜资金：${it.evidence}；${it.reason}" } ?: ""),
-                    signal = false,
-                )
-            if (!posted) {
-                firstBoardReclaimTracker.rearm(alert.code)
-                return@forEach
-            }
-            ObsPoolTrace.reclaimAlert(today, alert.code, sample.price)
+            val candidate = candidateByCode[sample.code]
+            val boardDate = candidate?.let(FirstBoardClockPolicy::effectiveBoardDate).orEmpty()
+            val record = FirstBoardReclaimObservation(
+                code = alert.code,
+                name = sample.name.ifBlank { alert.code },
+                tradingDay = today,
+                detectedAt = TimeUtils.nowText(),
+                firstBoardDate = boardDate,
+                tradingDaysAfterBoard = FirstBoardReclaimPolicy.tradingDaysAfter(
+                    boardDate,
+                    today,
+                    tradingDates,
+                ),
+                previousClose = sample.previousClose,
+                open = sample.open,
+                low = sample.low,
+                price = sample.price,
+                biasFromMa5Pct = sample.biasFromMa5Pct,
+                fundFlowEvidence = quality?.evidence.orEmpty(),
+                fundFlowReason = quality?.reason.orEmpty(),
+                boards = candidate?.boards.orEmpty(),
+            )
+            Repo.firstBoardReclaimObservations = store.appendFirstBoardReclaimObservation(record, today)
+            ObsPoolTrace.reclaimObservation(today, alert.code, sample.price)
+            Repo.notifyChanged()
         }
     }
 
@@ -2695,10 +2796,13 @@ class MonitorService : Service() {
                     breakObservation = breakObservation,
                     openPrice = quote.open,
                     previousClose = quote.prevClose,
+                    sessionMinutes = tradingMinutesSinceOpen(nowLocal.toLocalTime()),
                     priceContext = currentPriceContext,
                     trendAssessment = level?.trendAssessment,
                     boxRange = level?.boxRange,
                     highPosition = highPositionDecision,
+                    gain5Pct = level?.highPositionEvidence?.gain5Pct,
+                    rangeHigh = level?.highPositionEvidence?.rangeHigh,
                     tradeDate = today,
                     dailyRiskContext = dailyContext,
                     timeframeEvidence = timeframeEvidence,
@@ -2767,7 +2871,8 @@ class MonitorService : Service() {
             // 「破位提示」是 NOTICE 缓释档：只报告风险事实，不生成卖量，也不占机会类预算。
             // 此前 RISK_FACT 被 ACTIONABLE 过滤掉，导致这一档在 UI 可见但从不通知。
             if (guarded.level == GuardedActionLevel.RISK_FACT &&
-                signal.type == IntradaySignalType.BREAK_NOTICE
+                (signal.type == IntradaySignalType.BREAK_NOTICE ||
+                    signal.type == IntradaySignalType.GAP_FADE)
             ) {
                 sendCheckedAlert(
                     type = "breakNotice",
@@ -4587,6 +4692,24 @@ class MonitorService : Service() {
             trend?.type == EntrySetupType.M20_PULLBACK && trend.confirmed && trend.canBuy &&
             trend.volumeConfirmed && trend.ma20SlopePct?.let { it > 0.0 } == true &&
             ma20SupportByAtr && stopConfirmations >= 2 && !limitUpBlocked && !limitUpShrinkAcceleration
+        val run5Pct = analysisCloses.takeIf { it.size >= 6 }?.let {
+            val base = it[it.lastIndex - 5]
+            if (base > 0.0) (quote.price / base - 1.0) * 100.0 else null
+        }
+        val acceleration = AccelerationPolicy.assess(
+            price = quote.price,
+            run5Pct = run5Pct,
+            volumeRatio = volumeRatio,
+            high60 = priorRangeHigh,
+            todayPct = quote.changePct,
+        )
+        val accelerationBlocker = AccelerationPolicy.entryBlocker(
+            acceleration,
+            leader = candidate.strategy == ObservationStrategy.LEADER ||
+                candidate.strategy == ObservationStrategy.LIMIT_UP_CONTINUATION,
+            confirmedPullback = (trend?.type == EntrySetupType.M20_PULLBACK && trend.confirmed) ||
+                postLimitDailyBaseEntry,
+        )
         val ratio = volumeRatio ?: 0.0
         val candidateFlowHistory = Repo.fundFlowHistory[candidate.code].orEmpty().filter {
             (it.tradingDate ?: "") >= candidate.addedDate
@@ -4680,6 +4803,8 @@ class MonitorService : Service() {
                     postLimitDailyBaseEntry = postLimitDailyBaseEntry,
                     postLimitHighHoldCandidate = postLimitHighHoldCandidate,
                     inTradingSession = TradingCalendar.isMarketOpen(),
+                    acceleration = acceleration.state,
+                    accelerationBlocker = accelerationBlocker,
                     signalReason =
                         when {
                             limitUpShrinkAcceleration -> ObservationEligibility.SHRINK_WAIT_REASON
@@ -4768,6 +4893,8 @@ class MonitorService : Service() {
                     postLimitDailyBaseEntry = postLimitDailyBaseEntry,
                     postLimitHighHoldCandidate = postLimitHighHoldCandidate,
                     inTradingSession = TradingCalendar.isMarketOpen(),
+                    acceleration = acceleration.state,
+                    accelerationBlocker = accelerationBlocker,
                     signalReason =
                         String.format(
                             Locale.CHINA,
@@ -5109,6 +5236,13 @@ class MonitorService : Service() {
                     ),
                     market = market,
                     swingPlan = swingPlan,
+                    // 分歧期状态（模块 A/B）：只用已完成指数日线（剔除今日未收盘 K 线）推导，
+                    // 不落盘——状态可从历史确定性重算，见 MarketDivergenceCheck.phaseOf。
+                    divergence = MarketDivergenceCheck.phaseOf(
+                        MarketDivergenceCheck.fromBars(
+                            benchmark.orEmpty().filter { it.date != TimeUtils.todayText() },
+                        ),
+                    ),
                     strongContinuationEvents = Repo.strongContinuationEvents.filter { it.date == TimeUtils.todayText() },
                     positionAllocations = store.positionAllocations,
                     expectedPositionCount = portfolio.positions.count {
@@ -5224,6 +5358,9 @@ class MonitorService : Service() {
                     val bars = ObservationEntryPolicy.withLiveBar(history, quote)
                     val entry = TrendEntryStrategy.evaluateDaily(bars, marketBars, elapsedTradingMinutes = elapsed)
                     val ma20 = bars.takeLast(20).map { it.close }.average()
+                    val recentCloses = bars.takeLast(10).map { it.close }
+                    val ma5 = bars.takeLast(5).map { it.close }.average()
+                    val ma10 = bars.takeLast(10).map { it.close }.average()
                     val atr =
                         if (bars.isNotEmpty()) {
                             Indicators
@@ -5265,6 +5402,9 @@ class MonitorService : Service() {
                             trendAssessment = results.firstOrNull { it.code == position.code }?.trendAssessment,
                             boxRange = results.firstOrNull { it.code == position.code }?.boxRange,
                             highPosition = results.firstOrNull { it.code == position.code }?.highPosition,
+                            ma5 = ma5,
+                            ma10 = ma10,
+                            recentCloses = recentCloses,
                         )
                 }.toMap()
         holdingTContexts = tContexts.toMap()
@@ -5293,6 +5433,8 @@ class MonitorService : Service() {
                     shareholder = payload.shareholder,
                     today = TimeUtils.todayText(),
                     orgType = payload.orgType,
+                    name = payload.name,
+                    quoteName = payload.quoteName,
                 ),
             )
         Repo.publishFundamentalHealth(code, FundamentalHealthPolicy.grade(result, TimeUtils.nowText()))
@@ -5841,8 +5983,12 @@ class MonitorService : Service() {
 
         private const val ALERT_ID_OBSERVATION_BUY = 8000
         private const val ALERT_ID_TAIL_OBSERVATION = 8200
-        private const val ALERT_ID_FIRST_BOARD_RECLAIM = 8400
         private const val ALERT_ID_LAUNCH_DISCOVERY = 8600
+        /** 盘中资金环境（只读提示）：档位跃迁时才推，日内次数与冷却另行限制。 */
+        private const val ALERT_ID_MARKET_FUND_FLOW = 8700
+        private const val MARKET_FUND_FLOW_MAX_NOTIFY_PER_DAY = 3
+        private const val MARKET_FUND_FLOW_COOLDOWN_MS = 30 * 60_000L
+        private const val MARKET_FUND_FLOW_MAX_HOLDING_LINES = 6
         /** 观察池/自选候选“突破延续下杀风险”（风险事实，不占机会预算）。 */
         private const val ALERT_ID_OBSERVATION_BREAKOUT_RISK = 8800
 

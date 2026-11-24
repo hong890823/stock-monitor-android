@@ -7,6 +7,7 @@ import com.example.stockmonitor.analysis.FundamentalCard
 import com.example.stockmonitor.analysis.FundamentalHealth
 import com.example.stockmonitor.analysis.FundamentalHealthSnapshot
 import com.example.stockmonitor.analysis.GlobalCard
+import com.example.stockmonitor.analysis.MarketFundFlowState
 import com.example.stockmonitor.analysis.MarketRiskContext
 import com.example.stockmonitor.analysis.MarketState
 import com.example.stockmonitor.analysis.PaperTradeRecord
@@ -23,6 +24,7 @@ import com.example.stockmonitor.core.BoardMember
 import com.example.stockmonitor.core.ConceptBoards
 import com.example.stockmonitor.core.ConceptSummary
 import com.example.stockmonitor.core.FundFlow
+import com.example.stockmonitor.core.FirstBoardReclaimObservation
 import com.example.stockmonitor.core.LimitData
 import com.example.stockmonitor.core.ObservationCandidate
 import com.example.stockmonitor.core.ObservationSnapshot
@@ -76,6 +78,10 @@ object Repo {
 
     @Volatile
     var observationPool: List<ObservationCandidate> = emptyList()
+
+    /** 首板承接转强记录；只作选股页「涨停晋级观察」卡片展示，不再对应推送通知。 */
+    @Volatile
+    var firstBoardReclaimObservations: List<FirstBoardReclaimObservation> = emptyList()
 
     @Volatile
     var fundFlowHistory: Map<String, List<FundFlow>> = emptyMap()
@@ -194,6 +200,13 @@ object Repo {
 
     @Volatile
     var sectorFlowAsOfMs: Long? = null
+
+    /**
+     * 盘中资金环境（行业板块资金合计 + 个股资金合成的只读提示）。
+     * 只影响展示与低频提醒，不参与买卖信号和做 T 份额。
+     */
+    @Volatile
+    var marketFundFlow: MarketFundFlowState? = null
 
     /**
      * 各归类的「龙头」集合（`{"BK0438": SectorLeaders(...)}`），做 T 降级只认它们。
@@ -394,6 +407,7 @@ object Repo {
         limits = null
         screenResult = ScreenResult(emptyList(), emptyList())
         observationPool = emptyList()
+        firstBoardReclaimObservations = emptyList()
         fundFlowHistory = emptyMap()
         observationSnapshots = emptyList()
         paperTrades = emptyList()
@@ -415,6 +429,7 @@ object Repo {
         sectorTurnoverRatios = emptyMap()
         sectorDataAsOfMs = null
         sectorFlows = emptyMap()
+        marketFundFlow = null
         sectorLeaders = emptyMap()
         sectorMembers = emptyMap()
         sectorFlowAsOfMs = null

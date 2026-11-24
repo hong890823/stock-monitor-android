@@ -69,6 +69,56 @@ class ObservationPoolTest {
     }
 
     @Test
+    fun accelerationBlockerDefersPromotionWithoutEliminatingCandidate() {
+        val result = ObservationPool.evaluate(
+            candidate(),
+            ObservationSignal(
+                date = "2026-10-13",
+                price = 10.3,
+                hasScreenSignal = true,
+                confirmedEntry = true,
+                canBuy = true,
+                trendWeak = false,
+                stopPrice = 9.6,
+                changePct = 2.0,
+                acceleration = AccelerationState.ACCELERATING,
+                accelerationBlocker = "近5日涨15.0%且量比1.6，贴近60日高；放量加速末端暂缓晋级，等待回踩确认",
+            ),
+        )
+
+        assertEquals(ObservationStage.OBSERVING, result.stage)
+        assertTrue(result.reason.contains("放量加速末端"))
+    }
+
+    @Test
+    fun accelerationBlockerKeepsPreviouslyConfirmedCandidateInNearEntry() {
+        val confirmed = candidate().copy(
+            stage = ObservationStage.BUY_CANDIDATE,
+            highestStage = ObservationStage.BUY_CANDIDATE,
+            lastEvaluatedDate = "2026-10-12",
+            entryConfirmationRounds = 2,
+        )
+        val result = ObservationPool.evaluate(
+            confirmed,
+            ObservationSignal(
+                date = "2026-10-13",
+                price = 10.3,
+                hasScreenSignal = true,
+                confirmedEntry = true,
+                canBuy = true,
+                trendWeak = false,
+                stopPrice = 9.6,
+                changePct = 2.0,
+                acceleration = AccelerationState.ACCELERATING,
+                accelerationBlocker = "近5日涨15.0%且量比1.6，贴近60日高；放量加速末端暂缓晋级，等待回踩确认",
+            ),
+        )
+
+        assertEquals(ObservationStage.NEAR_ENTRY, result.stage)
+        assertTrue(result.reason.contains("放量加速末端"))
+    }
+
+    @Test
     fun majorDownCannotPromoteObservationCandidate() {
         val result = ObservationPool.evaluate(
             candidate(),

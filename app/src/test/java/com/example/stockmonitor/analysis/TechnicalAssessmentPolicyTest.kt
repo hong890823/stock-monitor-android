@@ -107,6 +107,67 @@ class TechnicalAssessmentPolicyTest {
     }
 
     @Test
+    fun pullbackAdviceForStrongStockCitesShallowAnchorNotTwentyDayLow() {
+        // 海立股份 2026-11-19 回放（entry-timing-2026-11-19/600619.json）：
+        // 现价 15.07、20 日低点 11.04。「回踩支撑 11.04」意味着趋势已死，属误导；
+        // 分档锚给 MA5 浅锚，操作建议不得再把 20 日低点当回踩参考。
+        val result = TechnicalAssessmentPolicy.evaluate(
+            technical = technical().copy(
+                price = 15.07,
+                priceChange = 9.9,
+                ma5 = 13.14,
+                ma10 = 12.55,
+                ma20 = 12.17,
+                support = 11.04,
+                resistance = 15.07,
+                highPosition = HighPositionDecision(
+                    phase = HighPositionPhase.EXTENDED_WATCH,
+                    reason = "首板后连续拉升",
+                    allowBuy = false,
+                    allowSecondWaveEntry = false,
+                    allowHoldBase = true,
+                    riskPriority = true,
+                ),
+                pullbackAnchor = PullbackAnchorPolicy.anchorFor(
+                    price = 15.07,
+                    ma5 = 13.14,
+                    ma10 = 12.55,
+                    ma20 = 12.17,
+                    recentCloses = listOf(11.95, 12.01, 12.07, 11.90, 11.90, 11.91, 13.10, 13.70, 15.07),
+                ),
+            ),
+            weeklyTrend = SwingTrend.UP,
+            monthlyTrend = SwingTrend.UP,
+        )
+
+        assertTrue(result.primaryAdvice.contains("回踩"))
+        assertTrue(result.primaryAdvice.contains("MA5（13.14）"))
+        assertFalse("20日低点是破位口径，不能当回踩锚", result.primaryAdvice.contains("11.04"))
+    }
+
+    @Test
+    fun pullbackAdviceFallsBackToMa20NotTwentyDayLowWithoutAnchor() {
+        // 缺预计算锚位时按缺证据降级到 MA20 口径，同样不引20日低点当回踩锚。
+        val result = TechnicalAssessmentPolicy.evaluate(
+            technical = technical().copy(
+                highPosition = HighPositionDecision(
+                    phase = HighPositionPhase.EXTENDED_WATCH,
+                    reason = "连续拉升后接近区间上沿",
+                    allowBuy = false,
+                    allowSecondWaveEntry = false,
+                    allowHoldBase = true,
+                    riskPriority = true,
+                ),
+            ),
+            weeklyTrend = SwingTrend.UP,
+            monthlyTrend = SwingTrend.UP,
+        )
+
+        assertTrue(result.primaryAdvice.contains("MA20（10.90）"))
+        assertFalse(result.primaryAdvice.contains("10.5"))
+    }
+
+    @Test
     fun highPositionNormalDivergenceDoesNotGetRapidHeatCap() {
         val result = TechnicalAssessmentPolicy.evaluate(
             technical = technical().copy(

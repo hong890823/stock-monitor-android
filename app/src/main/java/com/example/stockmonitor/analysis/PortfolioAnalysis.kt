@@ -312,6 +312,9 @@ object PortfolioAnalysis {
                 envNote(envContext, changePct)
         } else {
             signal = "等待"
+            // 「回踩」买点参照走强度分档锚（PullbackAnchorPolicy）；supportLabel（20 日低点）
+            // 只用在破位口径——不然强势股的「回踩支撑」会指到趋势已死的位置。
+            val pullbackRef = technical.pullbackRef
             // 同为「等待」，成因不同就该给不同的下一步，不能每只股票印同一句话。
             action = when {
                 chasingHigh ->
@@ -322,7 +325,8 @@ object PortfolioAnalysis {
                         "等有效突破站稳再考虑初始仓位。"
                 score >= 2 && volumeSignal == VolumePriceSignal.EXPAND_UP ->
                     "量能已放大、评分尚可，但距压力 $resistanceLabel 还有 ${pct(toResistancePct)}；" +
-                        "等突破，或回踩支撑 $supportLabel 不破再考虑。"
+                        if (pullbackRef != null) "等突破，或回踩 $pullbackRef 不破再考虑。"
+                        else "等突破站稳；趋势偏弱，不给回踩买点参考。"
                 // 放量但没涨上去（放量滞涨 / 高位放量上涨）：句子不能说成「量能没跟上」，
                 // 否则和上面那行的量价标签自相矛盾。
                 score >= 2 && volumeRatio >= VolumeRatio.EXPAND_THRESHOLD ->
@@ -330,7 +334,8 @@ object PortfolioAnalysis {
                         "跌破支撑 $supportLabel 则先观察。"
                 score >= 2 ->
                     "技术评分尚可但量能还没跟上：等放量突破压力 $resistanceLabel，" +
-                        "或回踩支撑 $supportLabel 后止跌再介入。"
+                        (pullbackRef?.let { "或回踩 $it 后止跌再介入。" }
+                            ?: "或等缩量企稳后再介入（趋势偏弱，不给回踩买点参考）。")
                 score < 0 ->
                     "技术面偏弱（评分 ${signed(score)}），暂不介入；等站回 MA20（$ma20Label）并出现放量确认。"
                 else ->
@@ -550,6 +555,8 @@ object PortfolioAnalysis {
         dayPnl: DayPnl.Summary? = null,
         market: MarketState? = null,
         swingPlan: SwingPlan? = null,
+        /** 分歧期状态（模块 A/B）：非空且非 NONE 时在操作建议里追加矩阵提示。 */
+        divergence: DivergenceCycleState? = null,
     ): List<String> {
         val lines = mutableListOf<String>()
         // 算一次复用：头行在 ① 前展示，后三行在 ④ 后展示；overallAdvice 的正文不再内嵌
@@ -597,7 +604,7 @@ object PortfolioAnalysis {
         lines.add(envLine)
 
         // ③ 要做什么：按信号分档点名，没动作的也要说「不用动」——否则用户会以为都得处理
-        lines.add("持仓整体操作建议：\n" + adviceBody(results, swingPlan).joinToString("\n"))
+        lines.add("持仓整体操作建议：\n" + adviceBody(results, swingPlan, divergence).joinToString("\n"))
 
         // ④ 风险点
         val risks = briefRisks(results, dayPnl)
@@ -883,28 +890,76 @@ object PortfolioAnalysis {
         }
     }
 
-    fun overallAdvice(results: List<PositionResult>, swingPlan: SwingPlan? = null): List<String> =
-        prioritySummary(results) + adviceBody(results, swingPlan)
+    fun overallAdvice(
+        results: List<PositionResult>,
+        swingPlan: SwingPlan? = null,
+        divergence: DivergenceCycleState? = null,
+    ): List<String> = prioritySummary(results) + adviceBody(results, swingPlan, divergence)
 
     /**
-     * 整体建议正文（风险观察/现有仓位/深套处理/资金检查），不含统一优先级摘要：
-     * brief 头尾各展示一次摘要，这里再内嵌就会重复两遍；formatReport/DailyReview 走
-     * [overallAdvice] 拿完整版。
+     * 整体建议正文。要点只回答「今天干什么」：**点名的只有要动手/要核实的票**——
+     * 多只确认处置点名补齐（单只时顶部「当前优先事项」已点名不复读），
+     * 风险观察、深套最多点前两只 + 总数；持有观察不逐票点评，逐票明细在逐股报告里。
+     * 不含统一优先级摘要：brief 头尾各展示一次摘要，这里再内嵌就会重复两遍；
+     * formatReport/DailyReview 走 [overallAdvice] 拿完整版。
      */
-    private fun adviceBody(results: List<PositionResult>, swingPlan: SwingPlan? = null): List<String> = buildList {
+    private fun adviceBody(
+        results: List<PositionResult>,
+        swingPlan: SwingPlan? = null,
+        divergence: DivergenceCycleState? = null,
+    ): List<String> = buildList {
         val ranked = PortfolioPriorityPolicy.rank(results.map(::priorityInput), TimeUtils.todayText())
+        val toAct = ranked.filter { it.actionConfirmed }
+        if (toAct.size > 1) {
+            add("今天要处理：" + toAct.joinToString("、") { "${it.input.name}（${it.state.label}）" } + "；按证据分批处置，不自动卖出")
+        }
         val watching = ranked.filter { it.state == PriorityState.WATCH }
-        if (watching.isNotEmpty()) add("风险观察：" + watching.joinToString("、") { it.input.name } + "；按证据核实，不自动卖出")
+        if (watching.isNotEmpty()) {
+            add(
+                "风险观察：" + nameCapped(
+                    watching.map { it.input.name },
+                    pinned = watching.filter { it.input.fundamentalAlert }.map { it.input.name },
+                ) + "；按证据核实，不自动卖出",
+            )
+        }
         val holding = ranked.filter { it.state == PriorityState.HOLD && !it.input.fundamentalAlert }
-        if (holding.isNotEmpty()) add("现有仓位：" + holding.joinToString("、") { it.input.name } + "以持有观察为主，暂不主动调仓")
+        if (holding.isNotEmpty()) {
+            // 「不用动」要说（否则用户以为每只都得处理），但报数就够，不逐票点名。
+            add("持有观察 ${holding.size} 只：未触发处置条件，暂不主动调仓")
+        }
         val deepLoss = results.filter {
             it.quantity > 0 && DeepLossPolicy.isDeepLoss(it.cost, it.price, it.volatility.atrPct)
         }
         if (deepLoss.isNotEmpty()) {
-            // 行动清单要点名：只说「浮亏不自动升级」没有可执行对象，列出是谁深套。
-            add("深套处理：${deepLoss.joinToString("、") { it.name }}（深套口径），浮亏不自动升级或豁免风险；不因深套延后退出评估，不自动补仓或做T")
+            add(
+                "深套处理：" + nameCapped(
+                    deepLoss.map { it.name },
+                    pinned = deepLoss.filter { it.fundamentalHealth?.level == HealthLevel.ALERT }.map { it.name },
+                ) + "（深套口径），浮亏不自动升级或豁免风险；不因深套延后退出评估，不自动补仓或做T",
+            )
         }
         swingPlan?.capitalIssue?.let { add("资金检查：$it") }
+        // 分歧期矩阵（模块 C）：按大盘分歧状态 × 仓位状态给提示文案，提示不命令。
+        divergence?.takeIf { it.phase != DivergencePhase.NONE }?.let { state ->
+            val hasHoldings = results.any { it.quantity.isFinite() && it.quantity > 0 }
+            val riskFlag = results.any {
+                it.signal.contains("减仓") || it.signal.contains("退出") || it.signal.contains("风险")
+            }
+            DivergenceActionMatrix.promptsFor(state.phase, hasHoldings, riskFlag).forEach { add(it) }
+            if (state.detail.isNotBlank()) add("分歧期依据：${state.detail}")
+        }
+    }
+
+    /**
+     * 点名最多两只，其余报总数：要点只留最重要的，逐票明细在逐股报告。
+     * [pinned]（基本面亮红灯：退市风险警示/立案/业绩变脸级）永不折叠进「等N只」——
+     * 可能引发跌停/退市的风险预警必须点名，今日要点的精简不能精简掉重大风险。
+     */
+    private fun nameCapped(names: List<String>, max: Int = 2, pinned: List<String> = emptyList()): String {
+        val pinnedSet = pinned.toSet()
+        val shown = names.filter { it in pinnedSet } + names.filter { it !in pinnedSet }.take(max)
+        return if (shown.size >= names.size) shown.joinToString("、")
+        else shown.joinToString("、") + " 等${names.size}只"
     }
 
     /** 风险点：破位 / 深套 / 集中度 / 缺数据，只列有量的那几条。 */
@@ -961,6 +1016,8 @@ object PortfolioAnalysis {
         strongContinuationEvents: List<StrongContinuationEvent> = emptyList(),
         marketEnvironment: MarketEnvironmentQuality? = null,
         swingPlan: SwingPlan? = null,
+        /** 分歧期状态（模块 A/B）：透传给操作建议的矩阵提示。 */
+        divergence: DivergenceCycleState? = null,
         positionAllocations: Map<String, PositionAllocationConfig> = emptyMap(),
         /** 期望参与分析的持仓数（数量 > 0）；results 少于它说明有股票分析失败。 */
         expectedPositionCount: Int = results.count { it.quantity.isFinite() && it.quantity > 0 },
@@ -981,13 +1038,13 @@ object PortfolioAnalysis {
         lines.add("持仓整体操作建议")
         val gap = analysisGapNote(results, expectedPositionCount, analysisFailures)
         gap?.let { lines.add("· $it") }
-        overallAdvice(results, effectiveSwing)
+        overallAdvice(results, effectiveSwing, divergence)
             // 有分析缺口时不能再说“暂无已确认的买卖动作”：没分析不等于没动作。
             .filterNot { gap != null && it.startsWith("当前优先事项：暂无已确认的买卖动作") }
             .forEach { lines.add("· $it") }
         lines.add("")
         lines.add("📌 今日要点")
-        brief(results, dayPnl, market, effectiveSwing)
+        brief(results, dayPnl, market, effectiveSwing, divergence)
             .filterNot { it.startsWith("持仓整体操作建议：") }.forEach { lines.add("· $it") }
         effectiveSwing?.let {
             it.capitalIssue?.let { issue -> lines.add("资金检查：$issue") }
@@ -1050,6 +1107,7 @@ object PortfolioAnalysis {
         if (results.isEmpty()) {
             lines.add("尚未配置监控股票，或当前没有可用分析结果。")
         }
+        var accelerationTagShown = false
         for (result in priorityOrdered(results)) {
             val decision = priorityDecision(result)
             val swing = effectiveSwing?.rows?.firstOrNull { it.code == result.code }
@@ -1107,6 +1165,21 @@ object PortfolioAnalysis {
                         "｜${VolumePrice.tag(result.volumeSignal)}"
                     }
             )
+            result.highPositionEvidence?.let { evidence ->
+                val label = AccelerationPolicy.watchLabel(
+                    AccelerationPolicy.assess(
+                        price = result.price,
+                        run5Pct = evidence.gain5Pct,
+                        volumeRatio = result.volumeRatio,
+                        high60 = evidence.rangeHigh,
+                        todayPct = result.changePct,
+                    ),
+                )
+                label?.let {
+                    accelerationTagShown = true
+                    lines.add(it)
+                }
+            }
             result.fundamentalHealth?.let { health ->
                 lines.add(
                     "基本面：${health.level.label}｜${health.reasons.joinToString("；")}｜判断于 ${health.analyzedAt}" +
@@ -1116,6 +1189,9 @@ object PortfolioAnalysis {
             lines.add("应对：${decision.reason}")
             lines.add("数据口径：行情${result.analysisDate.ifBlank { "未知" }}｜技术${result.priorityEvidenceDate.ifBlank { "未知" }}｜前复权技术位｜${PortfolioPriorityPolicy.VERSION}")
             lines.add("")
+        }
+        if (accelerationTagShown) {
+            lines.add("研究观察：放量加速/高位分歧来自历史事件研究，未实盘验证，不参与评分与动作。")
         }
         lines.add("说明：本报告只提供条件式技术信号，不自动下单；未持仓股票的建议不考虑个人成本。")
         lines.add("⚠️ 市场有风险，投资需谨慎，不构成投资建议。")

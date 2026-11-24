@@ -604,6 +604,8 @@ object Dialogs {
                         result?.signal?.contains("买入确认") == true,
                     signal = result?.signal,
                     marketNote = analysisNote,
+                    atrPct = result?.volatility?.atrPct,
+                    anchorLabel = swing?.anchorLabel,
                 )
 
                 val plan = runCatching {

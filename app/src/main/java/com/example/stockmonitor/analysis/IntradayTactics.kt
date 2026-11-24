@@ -23,6 +23,7 @@ enum class IntradaySignalType(val label: String) {
     BREAKOUT("放量突破"),
     T_SELL("冲高做T"),
     T_SELL_DEFERRED("冲高回落·暂缓做T"),
+    GAP_FADE("高开低走"),
     T_HOLD("强势延续观察"),
     T_HOLD_CAUTION("高成交额谨慎观察"),
     T_TREND_HOLD("趋势延续观察"),
@@ -82,6 +83,8 @@ data class IntradaySignal(
     val holdingExitStage: HoldingExitStage? = null,
     /** 做T卖出通过双边费用、滑点和最低净收益门槛后的计划；其他信号为空。 */
     val tSellNetProfitEstimate: IntradayTNetProfitEstimate? = null,
+    /** 高开低走的结构化事实；通知层只格式化这些数值，不回显原始行情文本。 */
+    val gapFade: GapFadeFinding? = null,
 )
 
 /**
@@ -252,10 +255,16 @@ object IntradayTactics {
         val breakObservation: HoldingBreakObservation? = null,
         val openPrice: Double? = null,
         val previousClose: Double? = null,
+        /** 开盘后经过的交易分钟数；缺失时不启用开盘前10分钟静默。 */
+        val sessionMinutes: Int? = null,
         val priceContext: PriceContext? = null,
         val trendAssessment: TrendAssessment? = null,
         val boxRange: BoxRangeAssessment? = null,
         val highPosition: HighPositionDecision? = null,
+        /** 近 5 日涨幅（%）；用于放量加速末端证据，缺失则不判定。 */
+        val gain5Pct: Double? = null,
+        /** 近 60 日区间高点；缺失时用高位状态代替。 */
+        val rangeHigh: Double? = null,
         /** 行情数据源交易日；缺失时统一动作守卫只允许观察。 */
         val tradeDate: String? = null,
         val dailyRiskContext: DailyRiskContext? = null,
@@ -367,6 +376,28 @@ object IntradayTactics {
         if (breakoutRisk.risk) return breakoutReversalRisk(input, breakoutRisk)
         if (input.highPosition?.riskPriority == true && holding) {
             return highDistributionRisk(input, input.highPosition)
+        }
+        // 高开低走/冲高回落（持仓）：优先于做T与突破观察。
+        // 旧做T分支要求现价仍高于阈值涨幅，跌回昨收下方时 rally 为假，
+        // 恰好在最该提醒的回落段静默；这里用开盘价/日高/现价独立判定。
+        if (holding) {
+            val gapFade = GapFadePolicy.evaluate(
+                openPrice = input.openPrice,
+                previousClose = input.previousClose,
+                highPrice = input.dailyHighPrice,
+                price = input.price,
+                atrPct = input.atrPct,
+                sessionMinutes = input.sessionMinutes,
+                holding = true,
+            )
+            if (gapFade != null) {
+                return IntradaySignal(
+                    type = IntradaySignalType.GAP_FADE,
+                    title = GapFadePolicy.holdingTitle(input.name, gapFade),
+                    body = GapFadePolicy.holdingBody(gapFade),
+                    gapFade = gapFade,
+                )
+            }
         }
         input.trendAssessment?.let { trend ->
             if (trend.major == MajorTrend.MISSING) return trendWatch(input, trend)
@@ -761,10 +792,22 @@ object IntradayTactics {
         )
     }
 
+    private fun acceleration(input: Input): AccelerationAssessment = AccelerationPolicy.assessIntraday(
+        price = input.price,
+        todayPct = input.changePct,
+        run5Pct = input.gain5Pct,
+        volumeRatio = input.volumeRatio,
+        high60 = input.rangeHigh,
+        highPosition = input.highPosition,
+    )
+
     private fun breakout(input: Input, holding: Boolean): IntradaySignal {
         val level = input.entrySetup?.priorHigh ?: input.resistance
+        val accelerationNote = AccelerationPolicy.breakoutNote(acceleration(input))
+            ?.let { "；$it" }
+            .orEmpty()
         val head = "现价 ${price(input.price)} 放量突破前高 ${price(level)}" +
-            "（量比 ${ratio(input.volumeRatio)}${sectorConfirmation(input)})"
+            "（量比 ${ratio(input.volumeRatio)}${sectorConfirmation(input)}$accelerationNote)"
         val action = if (holding) {
             val stopText = input.entrySetup?.stopPrice?.let { "，止损参考 ${price(it)}" } ?: ""
             "持仓 ${qty(input.quantity)} 股可继续持有，不追高；回踩 ${price(level)} 不破再看$stopText。"
@@ -824,6 +867,7 @@ object IntradayTactics {
 
     private fun tSell(input: Input, expanded: Boolean): IntradaySignal {
         val sizing = tQuantity(input, expanded)
+        val accelerationNote = AccelerationPolicy.tSellNote(acceleration(input))
         // 文案阈值与 evaluate 判定路径同源（见 deepRetreatFactor）：实际阈值是
         // 节奏因子与龙头因子的较大者，写死 2 倍会在节奏因子更高时误导用户白等深度。
         val deepRetreatFactor = maxOf(
@@ -831,6 +875,7 @@ object IntradayTactics {
             if (leadersStrong(input)) DEEP_RETREAT_FACTOR else 1.0,
         )
         val reason = (if (expanded) "放量冲高后出现连续回落" else "接近压力 ${price(input.resistance)} 后出现连续回落") +
+            (accelerationNote?.let { "；$it" } ?: "") +
             (if (leadersStrong(input)) "；同板块龙头仍强，但回落已加深到 ${String.format(Locale.CHINA, "%.1f", deepRetreatFactor)} 倍阈值，按真回落处理" else "")
         if (sizing.quantity <= 0.0) {
             val blockedReason = if (sizing.liquidityBlocked) {
@@ -866,7 +911,11 @@ object IntradayTactics {
             "${String.format(Locale.CHINA, "%.2f", estimate.requiredNetProfit)} 元）。"
         return IntradaySignal(
             type = IntradaySignalType.T_SELL,
-            title = "🔔 ${input.name}·冲高做T",
+            title = if (accelerationNote != null) {
+                "🔔 ${input.name}·加速末端｜冲高做T"
+            } else {
+                "🔔 ${input.name}·冲高做T"
+            },
             body = "现价 ${price(input.price)}（${pct(input.changePct)}，$reason）。" +
                 "${input.holdingTContext?.summary()}。$action",
             tSellNetProfitEstimate = estimate,

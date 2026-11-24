@@ -152,6 +152,9 @@ object TechnicalAssessmentPolicy {
         val ma60 = formatPrice(technical.ma60)
         val nearSupport = technical.support > 0 && technical.price <= technical.support * 1.02
         val nearResistance = technical.resistance > 0 && technical.price >= technical.resistance * 0.98
+        // 「回踩」话术的参考锚位：强势浅锚（MA5/突破位）、中性 MA20（见 PullbackAnchorPolicy）。
+        // 20 日低点 $support 只用在破位/位置话术——强势股回踩到那里趋势已经结束了。
+        val pullbackRef = technical.pullbackRef
         val trendText = "周K${weeklyTrend.label}、月K${monthlyTrend.label}"
         val movingAverageTrend = MovingAverageTrendPolicy.evaluate(
             price = technical.price,
@@ -181,7 +184,11 @@ object TechnicalAssessmentPolicy {
                 "短中期均线偏弱：现价 $price 未站上 MA5（$ma5），MA20（$ma20）仍低于或贴近 MA60（$ma60）；不把反弹当加仓依据，先观察能否站回 MA20，支撑参考 $support。"
             movingAverageTrend == MovingAverageTrend.SHORT_BULLISH_MID_WEAK ||
                 movingAverageTrend == MovingAverageTrend.SHORT_REBOUND_BELOW_MA20 ->
-                "短期反弹观察：${movingAverageTrend.label}，中期尚未转强；接近压力 $resistance 不追入，只有回踩支撑 $support 企稳并站上 MA20（$ma20）后再评估。"
+                if (pullbackRef != null) {
+                    "短期反弹观察：${movingAverageTrend.label}，中期尚未转强；接近压力 $resistance 不追入，只有回踩 $pullbackRef 附近企稳并站上 MA20（$ma20）后再评估。"
+                } else {
+                    "短期反弹观察：${movingAverageTrend.label}，中期尚未转强；接近压力 $resistance 不追入，趋势偏弱不给回踩买点参考，站上 MA20（$ma20）企稳后再评估。"
+                }
             movingAverageTrend == MovingAverageTrend.MID_BULLISH_SHORT_PULLBACK ->
                 if (nearSupport) {
                     "中期持有、短期防守：MA20（$ma20）仍在 MA60（$ma60）上方，现价靠近支撑 $support；等待重新站上 MA5（$ma5）并确认承接，未确认前不追加仓位。"
@@ -192,12 +199,16 @@ object TechnicalAssessmentPolicy {
                 normalDivergence.line == NormalDivergenceLine.MA5 &&
                 !hotRisk ->
                 "正常分歧：股价处于高位但守住 MA5（${normalDivergence.linePrice?.let(::formatPrice) ?: "暂缺"}），量价仍有配合；不视为破位，回踩不破 MA5 再观察。"
-            hotRisk ->
+            hotRisk -> {
+                // 回踩观察的参照是分档锚，不是20日低点：真回踩到20日低点就不是「回踩确认」而是趋势死亡。
+                val pullbackHold = pullbackRef?.let { "回踩不破 $it 再评估。" }
+                    ?: "偏弱口径不给回踩买点参考；不破前低 $support 也只作观察。"
                 if (technical.highPosition?.riskPriority == true) {
-                    "等待回踩确认：当前处于高位风险区，${trendText}尚可但不追高；回踩不破支撑 $support 再评估。"
+                    "等待回踩确认：当前处于高位风险区，${trendText}尚可但不追高；$pullbackHold"
                 } else {
-                    "等待回踩确认：短线偏热或量价波动放大，${trendText}未完全消化，回踩不破支撑 $support 再评估。"
+                    "等待回踩确认：短线偏热或量价波动放大，${trendText}未完全消化，$pullbackHold"
                 }
+            }
             technical.trendAssessment?.shortTerm == ShortTermTrend.RANGE ->
                 "持有观察：价格仍在区间内，压力 $resistance、支撑 $support 之间没有形成一致方向，不追高。"
             // 大盘塌陷期不因为个股强就给加仓类建议（口径同 PortfolioAnalysis 环境改写）：
@@ -217,10 +228,13 @@ object TechnicalAssessmentPolicy {
                         technical.entrySetup.confirmed &&
                         technical.entrySetup.canBuy &&
                         technical.entrySetup.volumeConfirmed ->
-                        "可分批参与：${trendText}向上，短中期均线多头排列，入场结构和量价已确认；首次仓位宜轻，回踩不破支撑 $support 再加。"
+                        "可分批参与：${trendText}向上，短中期均线多头排列，入场结构和量价已确认；首次仓位宜轻，" +
+                            (pullbackRef?.let { "回踩不破 $it 再加。" } ?: "回踩加仓参考暂缺，等站稳后再评估。")
                     technical.entrySetup.type != EntrySetupType.NONE &&
                         technical.entrySetup.confirmed && !technical.entrySetup.canBuy ->
-                        "入场结构仅作观察：${technical.entrySetup.label}已确认，但当前规则不允许据此开仓；等待回踩支撑 $support 企稳或形成可买结构。"
+                        "入场结构仅作观察：${technical.entrySetup.label}已确认，但当前规则不允许据此开仓；" +
+                            (pullbackRef?.let { "等待回踩 $it 企稳或形成可买结构。" }
+                                ?: "等待站上 MA20（$ma20）企稳或形成可买结构。")
                     technical.entrySetup.type != EntrySetupType.NONE ->
                         "观察入场结构：${trendText}偏强，短中期均线多头排列，但突破/回踩尚未完成确认，等待确认后再分批。"
                     nearResistance ->

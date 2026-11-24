@@ -65,6 +65,7 @@ object ObservationEvidenceFactory {
         if (signal.limitUpShrinkAcceleration) {
             counter += ObservationEligibility.SHRINK_WAIT_REASON
         }
+        signal.accelerationBlocker?.takeIf { it.isNotBlank() }?.let { counter += it }
         if (signal.changePct < 0) {
             counter += String.format(Locale.CHINA, "当日涨跌幅%+.1f%%", signal.changePct)
         }

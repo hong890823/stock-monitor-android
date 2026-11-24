@@ -1,6 +1,6 @@
 # AI 项目导航索引
 
-更新时间：2026-11-17
+更新时间：2026-11-24
 
 这份文档是给 Codex、其他代码 AI 和维护者使用的项目地图。它只负责回答“应该先看哪里”，不复制完整实现。最终行为以当前源码和测试为准。
 
@@ -98,6 +98,19 @@ Repo 中的缓存、分析报告和只读数据工具
 - `ui/PortfolioBriefCard.kt`：显示本轮实际获得追加资金的重点持仓数量。
 - `ui/PortfolioFragment.kt`：每只持仓详情展示自己的波段追加数量、区间和原因。
 
+### 分歧日执行与强度分档回踩锚
+
+- `analysis/PullbackAnchorPolicy.kt`：回踩锚位强度分档（强势浅锚 MA5/突破位、中性 M20 现口径、弱势不给区间）与建议价可达性护栏（2.5×ATR，超口径注记「大概率到不了」）。
+- `analysis/MarketDivergenceCheck.kt`：大盘分歧日体检（高开兑现回落 + 放量 + 结构未破坏）与 D+1/D+2 证伪状态机（`DivergenceCycleState`，宁降勿拖；与 `ObvDivergence.DivergenceState` 的 OBV 背离同名不同义）。状态从已完成指数日线推导，不落盘。
+- `analysis/DivergenceActionMatrix.kt`：分歧期状态矩阵文案（市场状态 × 仓位状态），提示不命令；追三连阳禁令只补措辞，拦截仍走 MA5 乖离上限。
+- `analysis/AddBatchPolicy.kt`：波段加仓 40/30/30 分批口径与作废线（收盘破失效参考取消后续批次），只切分额度不放大。
+- `analysis/PortfolioSwing.kt`：回踩区间按档位选锚（`SwingEvidence.ma5/ma10/recentCloses`），`SwingDecision.anchorLabel`，报告挂分批口径。
+- `analysis/AddPositionStrategy.kt`：浅回踩锚优先于深位（`preferenceIndex`），深位候选价过护栏出注记。
+- `analysis/PortfolioAnalysis.kt`：整体建议只点名要动手/要核实的票（最多两只 + 总数），持有观察报数不点名；分歧期矩阵行进持仓建议。
+- `monitor/MonitorService.kt`：波段证据补短均线/近10日收盘；持仓报告透传分歧期状态（剔除今日未收盘 K 线）。
+
+口径、阈值初始值与待定稿清单见 [分歧日执行策略](2026-11-24-divergence-execution-strategy.md)；改动清单与不动口径见 [实现归档](2026-11-24-divergence-execution-implementation.md)。恐慌坑（深跌回升）口径不变，与分歧日状态机不串口。
+
 ### 底仓、滚动仓与风险观察仓
 
 - `core/PositionAllocation.kt`：分仓模式、固定底仓目标和独立 JSON 编解码；配置损坏时由 `Store` 保留原始值，不静默覆盖。
@@ -178,7 +191,7 @@ MonitorService.runPortfolioAnalysis
 - `ui/PortfolioFragment.kt`：持仓卡片和单股详情；不要把展示文案误认为策略判定。
 - `ui/PortfolioBriefCard.kt`：持仓页“今日要点”卡片。
 
-修改持仓买入/加仓逻辑时，必须同时检查 `PortfolioAnalysis`、`PortfolioSwing`、`PortfolioPriorityPolicy`、`MonitorService` 和 `PortfolioFragment`，因为它们分别负责判定、分配、组合门控、发布和展示。
+修改持仓买入/加仓逻辑时，必须同时检查 `PortfolioAnalysis`、`PortfolioSwing`、`PullbackAnchorPolicy`、`PortfolioPriorityPolicy`、`AddBatchPolicy`、`MonitorService` 和 `PortfolioFragment`，因为它们分别负责判定、回踩锚位、分配、组合门控、分批口径、发布和展示。
 
 ### 自选股、选股和观察池
 
@@ -188,7 +201,10 @@ MonitorService.runPortfolioAnalysis
 - `analysis/ObservationPool.kt`：观察候选状态机和晋级/降级。
 - `analysis/ObservationEligibility.kt`：候选资格、去重、过期和风险/涨停延期。
 - `analysis/ObservationEntryPolicy.kt`：观察池入场条件。
+- `analysis/AccelerationPolicy.kt`：观察池/买点确认的加速末端暂缓；龙头与已确认独立回踩豁免。
 - `analysis/ObservationBuyAlert.kt`：买点确认后的通知资格和通知文案。
+- `analysis/FirstBoardReclaimTracker.kt`、`FirstBoardReclaimPolicy.kt`：首板承接转强的形态与窗口判定。
+- `core/FirstBoardReclaimObservation.kt`：选股页「🔥 涨停晋级观察」卡片的记录落盘、去重和 14 天保留期；命中只记录、不推送通知。
 - `analysis/WatchlistBuyCandidatePool.kt`：自选股买入候选池。
 - `ui/ScreenFragment.kt`：候选分组、排序和列表展示。
 
@@ -201,6 +217,7 @@ MonitorService.runPortfolioAnalysis
 - `analysis/TrendEntryStrategy.kt`：回踩、突破、止损和入场结构。
 - `analysis/MarketRegime.kt`：大盘趋势状态。
 - `analysis/MarketRiskPolicy.kt`、`MarketRiskContext.kt`：市场风险和组合级风险背景。
+- `analysis/GapFadePolicy.kt`：指数/持仓共用的高开低走、冲高回落判定；`MarketAlertEngine` 用于指数预警，`IntradayTactics` 用于持仓“做T/减仓评估”风险事实，不直接生成卖量。
 - `analysis/SectorContext.kt`、`SectorStrengthPolicy.kt`、`StrongSectorRankingPolicy.kt`：行业/概念板块环境和强弱。
 - `analysis/EnvContext.kt`：把大盘、板块和历史快照传给个股策略的组合上下文。
 - `analysis/AdaptiveRhythmPolicy.kt`：市场节奏和追涨/回踩节奏修饰。
@@ -211,11 +228,14 @@ MonitorService.runPortfolioAnalysis
 
 - `analysis/FundFlowPolicy.kt`、`FundFlowDisplayPolicy.kt`：资金流计算、评分影响和展示解释。
 - `analysis/MainForceDirectionPolicy.kt`：主力意图文案。
+- `analysis/AccelerationPolicy.kt`：放量加速末端研究口径；日报只读标签、观察池晋级暂缓、盘中文案证据。
+- `analysis/MarketFundFlowPolicy.kt`：盘中资金环境 v1（行业板块资金合计 + 个股资金合成，只读提示；不改买卖信号和做 T 份额）。
 - `analysis/FinancialQualityPolicy.kt`：净现比、扣非比例、高杠杆现金流、存货/营收错配、应收周转和合同负债证据的跨期规则。
 - `analysis/Fundamentals.kt`、`FundamentalHealth.kt`、`FundamentalsReport.kt`：基本面分析、财务质量报告和健康等级。
 - `core/FundamentalsClient.kt`：基本面接口字段、多期资产负债表和合同负债/预收款解析。
 - `docs/fundamental-quality.md`：财务质量阈值、适用范围、数据缺口和 AI 修改入口。
 - `analysis/AnnouncementSummary.kt`、`NewsDetailPolicy.kt`、`NewsRelatedQueryPolicy.kt`：公告/新闻关联和摘要规则。
+- `analysis/RiskWarningPolicy.kt`：ST 或 *ST、立案、处罚、资金占用、违规担保、审计非标等重大风险警示的识别与报告置顶；公告时间窗与 mac 侧 `risk_warning_policy.py` 同口径。
 - `core/MarketNewsClient.kt`：新闻来源和降级策略。
 - `analysis/DailyReview.kt`：收盘复盘，把盈亏、环境、新闻和持仓建议组合成报告。
 
@@ -305,6 +325,7 @@ ToolsFragment
 | 技术评分或趋势不对 | `TechnicalSummary.kt` | `Indicators.kt`、`TechnicalAssessmentPolicy.kt`、`TechnicalTrendSnapshotPolicy.kt` |
 | 个股强但整体建议变弱 | `EnvContext.kt` | `MarketRegime.kt`、`SectorContext.kt`、`MarketRiskContext.kt` |
 | 资金流解释不一致 | `FundFlowPolicy.kt` | `FundFlowDisplayPolicy.kt`、`MainForceDirectionPolicy.kt` |
+| 资金环境提示太吵/太安静 | `MarketFundFlowPolicy.kt` | `MonitorService.refreshSectorFlows`、`MarketFundFlowTracker`、通知闸门常量 |
 | 复盘内容或优先级不对 | `DailyReview.kt` | `PortfolioAnalysis.kt`、新闻/盈亏数据链路 |
 | AI 调错工具或回答过长 | `AiAnalysis.kt` | `StockAiToolExecutor.kt`、工具定义和系统提示 |
 | 重启后结果丢失/旧结果复现 | `Store.kt`、`Repo.kt` | 对应 `*Json.kt`、缓存和日期校验 |

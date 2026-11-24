@@ -58,6 +58,13 @@ data class TechnicalResult(
     val ma60: Double,
     val support: Double,
     val resistance: Double,
+    /**
+     * 强度分档回踩锚（[PullbackAnchorPolicy]）：「回踩」话术的参考价位。
+     * [support]（20 日低点）是破位口径的结构支撑，不是回踩锚——强势股回踩到那里趋势
+     * 已经结束（海立 2026-11-19：现价 15.07 引「回踩支撑 11.04」案例）。缺省 null 时
+     * [pullbackRef] 按缺证据降级（不猜强势档）。
+     */
+    val pullbackAnchor: PullbackAnchor? = null,
     val entrySetup: EntrySetup,
     val macd: MacdValues,
     val rsi: Double?,
@@ -83,6 +90,21 @@ data class TechnicalResult(
 ) {
     val intradayScore: Int
         get() = score - fundFlowScoreDelta
+
+    /**
+     * 操作建议「回踩」话术的锚位片段（如「MA5（13.14）」「MA20（12.17）」），弱势档为 null。
+     * [pullbackAnchor] 缺失时按缺证据降级（近期收盘缺失不猜强势档）。
+     */
+    val pullbackRef: String?
+        get() = (pullbackAnchor ?: PullbackAnchorPolicy.anchorFor(
+            price = price,
+            ma5 = ma5,
+            ma10 = ma10,
+            ma20 = ma20,
+            trendWeak = entrySetup.trendWeak,
+            majorTrendDown = trendAssessment?.major == MajorTrend.DOWN,
+            priorHigh = entrySetup.priorHigh,
+        )).adviceRef()
 }
 
 /**
@@ -206,6 +228,19 @@ object StockAnalysis {
         val trendAssessment = TrendAssessmentPolicy.evaluateBars(
             history = bars,
             asOf = TimeUtils.todayText(),
+        )
+        // 回踩锚按强度分档（docs/2026-11-24-divergence-execution-strategy.md 模块 D）：
+        // 强势浅锚（MA5/突破位）、中性 M20 口径、弱势不给。操作建议的「回踩支撑」用它；
+        // support（20 日低点）只作破位口径——不然强势股的「回踩支撑」会指到回不到的位置。
+        val pullbackAnchor = PullbackAnchorPolicy.anchorFor(
+            price = price,
+            ma5 = ma5,
+            ma10 = ma10,
+            ma20 = ma20,
+            recentCloses = close.takeLast(9),
+            trendWeak = entrySetup.trendWeak,
+            majorTrendDown = trendAssessment?.major == MajorTrend.DOWN,
+            priorHigh = entrySetup.priorHigh,
         )
         val highPositionEvidence = HighPositionEvidence(
             price = price,
@@ -461,6 +496,7 @@ object StockAnalysis {
             ma60 = ma60,
             support = support,
             resistance = resistance,
+            pullbackAnchor = pullbackAnchor,
             entrySetup = entrySetup,
             macd = MacdValues(difValue, deaValue, histValue, previousHistValue),
             rsi = rsiValue,

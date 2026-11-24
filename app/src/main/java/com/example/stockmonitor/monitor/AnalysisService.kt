@@ -368,6 +368,8 @@ class AnalysisService : Service() {
                     shareholder = data.shareholder,
                     today = TimeUtils.todayText(),
                     orgType = data.orgType,
+                    name = data.name,
+                    quoteName = data.quoteName,
                 ),
             )
         // 事件后蓄势：利好落地公告 + 量价蓄势形态，属观察线索（见 EventCoil）。

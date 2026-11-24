@@ -21,6 +21,7 @@ import com.example.stockmonitor.analysis.StrongSectorRankingPolicy
 import com.example.stockmonitor.analysis.TimeUtils
 import com.example.stockmonitor.core.ScreenHit
 import com.example.stockmonitor.core.Store
+import com.example.stockmonitor.core.FirstBoardReclaimObservationBook
 import com.example.stockmonitor.core.TrendScreenHit
 import com.example.stockmonitor.core.LimitStock
 import com.example.stockmonitor.core.ObservationAlertState
@@ -769,7 +770,7 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                 val technical = item.technicalScore?.let { "技术$it/100" } ?: "技术快照暂缺"
                 val postConfirmationWatch = item.postConfirmationWatchDays
                     .takeIf { it > 0 }?.let { "｜失效后复评${it}天" }.orEmpty()
-                // 双时钟：淘汰用“观察第 N 日”，首板承接提醒用“首板后第 N 交易日”。两者都展示，
+                // 双时钟：淘汰用“观察第 N 日”，首板晋级观察用“首板后第 N 交易日”。两者都展示，
                 // 避免复盘时把不同口径当成同一把尺子。
                 val firstBoardClock = item.limitStreak
                     ?.takeIf { it == 1 }
@@ -974,6 +975,121 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                 pageKey = "observation:status:risk",
                 titleColor = R.color.risk_alert,
             )
+            container.addView(view)
+        }
+
+        screenCard(context, "limit_promotion_observation", "🔥 涨停晋级观察").apply {
+            // 盘中只记录、不推送；服务没跑时从本地落盘恢复，盘后和进程重启后仍能复核。
+            val reclaimRecords = Repo.firstBoardReclaimObservations
+                .ifEmpty { store.firstBoardReclaimObservations.toList() }
+            val poolByCode = ObservationEligibility
+                .deduplicateCandidates(observationPool)
+                .associateBy { it.code }
+            fun money(value: Double): String =
+                if (value.isFinite() && value > 0.0) String.format(Locale.CHINA, "%.2f", value) else "暂缺"
+            addText(
+                "首板后 1–3 个交易日，盘中下探开盘价、低点稳定 5 分钟后收复开盘价，" +
+                    "且 MA5 乖离 ≤10%、资金未在出货的股票会自动记入这里。",
+                11.5f,
+                UiKit.color(context, R.color.text_secondary),
+            )
+            addText(
+                "只积累选股线索，不再单独推送盘中提醒；保留最近 " +
+                    "${FirstBoardReclaimObservationBook.KEEP_DAYS} 天，盘后仍可据此选股复核。",
+                11.5f,
+                UiKit.color(context, R.color.brand_primary),
+            )
+            val byDay = reclaimRecords
+                .groupBy { it.tradingDay }
+                .toSortedMap(compareByDescending { it })
+            if (reclaimRecords.isEmpty()) {
+                addText("近期还没有满足首板承接转强的股票。", 12f)
+            } else {
+                addKeyValue(
+                    "记录",
+                    "${byDay.size}个交易日 · ${reclaimRecords.size}只（最新 ${byDay.keys.first()}）",
+                )
+            }
+            byDay.forEach { (day, dayRecords) ->
+                addDivider()
+                addText("$day（${dayRecords.size}只）", 13f, UiKit.color(context, R.color.risk_watch))
+                dayRecords.sortedByDescending { it.detectedAt }.forEach { record ->
+                    val quote = Repo.quotes[record.code]
+                    val currentPrice = quote?.price?.takeIf { it.isFinite() && it > 0.0 } ?: record.price
+                    val clock = record.detectedAt.substringAfter(' ').ifBlank { record.detectedAt }
+                    val dayCount = record.tradingDaysAfterBoard?.let { "首板后第${it}交易日" }
+                        ?: "首板后交易日未知"
+                    val dipText = if (record.open > 0.0 && record.low > 0.0) {
+                        String.format(
+                            Locale.CHINA,
+                            "低点较开盘 %+.1f%%",
+                            (record.low / record.open - 1.0) * 100.0,
+                        )
+                    } else {
+                        "低点数据暂缺"
+                    }
+                    val biasText = record.biasFromMa5Pct
+                        ?.takeIf { it.isFinite() }
+                        ?.let { String.format(Locale.CHINA, "%+.1f%%", it) }
+                        ?: "数据暂缺"
+                    val fundText = listOf(record.fundFlowEvidence, record.fundFlowReason)
+                        .filter { it.isNotBlank() }
+                        .joinToString("；")
+                        .ifBlank { "资金数据暂缺" }
+                    val boardText = record.boards.joinToString("＋").ifBlank { "板块暂缺" }
+                    val candidate = poolByCode[record.code]
+                    val poolText = when {
+                        candidate == null -> "已不在观察池，仅保留当日记录"
+                        candidate.stage == ObservationStage.ELIMINATED ->
+                            "已从观察池淘汰，仅保留当日记录"
+                        else -> "仍在观察池：${candidate.stage.label}"
+                    }
+                    val summary = SpannableStringBuilder()
+                        .append("🔥 首板承接转强｜$dayCount｜$clock 触发")
+                        .append("\n")
+                        .append("回收开盘价 ${money(record.open)}，日内低点 ${money(record.low)}（$dipText）")
+                        .apply {
+                            setSpan(
+                                ForegroundColorSpan(UiKit.color(context, R.color.risk_watch)),
+                                0,
+                                length,
+                                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                            )
+                        }
+                    val details = listOfNotNull(
+                        UiKit.DetailRow("触发", "${record.detectedAt}（$dayCount）"),
+                        UiKit.DetailRow("首板日", record.firstBoardDate.ifBlank { "暂缺" }),
+                        UiKit.DetailRow(
+                            "盘口快照",
+                            "开 ${money(record.open)}｜低 ${money(record.low)}｜触发价 ${money(record.price)}｜$dipText",
+                        ),
+                        UiKit.DetailRow("MA5乖离", biasText),
+                        UiKit.DetailRow("资金承接", fundText),
+                        UiKit.DetailRow("板块", boardText),
+                        UiKit.DetailRow("观察池现状", poolText),
+                        candidate?.stopPrice?.let {
+                            UiKit.DetailRow("止损参考", String.format(Locale.CHINA, "%.2f", it))
+                        },
+                        UiKit.DetailRow(
+                            "操作提示",
+                            "观察量价承接与失效位，不等同买入确认，勿追涨停。",
+                            dividerBefore = true,
+                        ),
+                    )
+                    add(
+                        UiKit.expandableQuoteRow(
+                            context = context,
+                            stateKey = "reclaim:${record.tradingDay}:${record.code}",
+                            name = record.name.ifBlank { record.code },
+                            code = record.code,
+                            price = money(currentPrice),
+                            changePct = quote?.changePct ?: Double.NaN,
+                            summary = summary,
+                            details = details,
+                        ).view,
+                    )
+                }
+            }
             container.addView(view)
         }
 

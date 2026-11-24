@@ -7,6 +7,7 @@ object AnnouncementSummary {
         val plain = toPlainText(content) ?: return null
         return when {
             reason == "定增/再融资事项" -> privatePlacement(title, plain)
+            reason.contains("风险警示") -> riskWarning(plain)
             reason.contains("处罚") || reason.contains("立案") || reason.contains("监管") ||
                 reason.contains("纪律") || reason.contains("违规") -> negativeCompliance(plain)
             reason == "股东质押" -> pledge(plain)
@@ -106,7 +107,21 @@ object AnnouncementSummary {
             plain.contains("整改") -> "违规整改事项"
             else -> "监管或处罚事项"
         }
-        return "偏利空：涉及$subject，可能带来罚款、整改或追责影响，需关注后续处理结果。"
+        val tail = if (plain.contains("立案") || plain.contains("处罚")) {
+            "严重时可能触发风险警示或退市；"
+        } else {
+            ""
+        }
+        return "偏利空：涉及$subject，可能带来罚款、整改或追责影响；${tail}需关注后续处理结果。"
+    }
+
+    private fun riskWarning(plain: String): String = when {
+        plain.contains("撤销") ->
+            "影响待确认：公告涉及撤销风险警示，需确认生效日期、是否已恢复普通股票交易规则，以及触发原因是否真正消除。"
+        plain.contains("退市风险警示") ->
+            "偏利空：公司股票被实施退市风险警示（*ST），存在终止上市风险；需核对触发指标、整改期限和撤销条件，具体以交易所公告为准。"
+        else ->
+            "偏利空：公司股票被实施其他风险警示（ST），涨跌幅限制、流动性与退市规则不同于普通股票；需核对触发原因、整改期限和撤销条件。"
     }
 
     private fun pledge(plain: String): String = if (plain.contains("解除质押") &&

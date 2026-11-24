@@ -134,6 +134,18 @@ object TradeNotification {
                 "风险观察：破位风险提示只报告风险，不生成确定性卖量。$riskContext",
             )
         }
+        // 高开低走是“风险事实 + 评估建议”，不是可直接执行的减仓指令：
+        // 先把回落事实送达用户，股数与 15/30 分钟证据留给风险/普通卖出通道复核。
+        if (signal.type == IntradaySignalType.GAP_FADE) {
+            val detail = signal.gapFade?.let {
+                GapFadePolicy.holdingBody(it) + "｜" + GapFadePolicy.holdingNotification(it)
+            } ?: "高开低走风险事实待复核"
+            return GuardedTradeAction(
+                GuardedActionLevel.RISK_FACT,
+                com.example.stockmonitor.core.GuardedAction.HOLD,
+                "$detail｜风险事实，不生成确定性卖量。$riskContext",
+            )
+        }
         val intent = when (signal.type) {
             IntradaySignalType.REDUCE_POSITION,
             IntradaySignalType.BREAK_SUPPORT,

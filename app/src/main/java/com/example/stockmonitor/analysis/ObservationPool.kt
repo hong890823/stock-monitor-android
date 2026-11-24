@@ -231,7 +231,8 @@ object ObservationPool {
         // 二波确认和两板以上回踩 MA20 的日线承接均可作为独立结构；
         // 不改变普通 BREAKOUT 仅观察的全局规则。
         val entryConfirmed = signal.confirmedEntry || secondWaveEntry || independentHighHoldEntry
-        val entryCanBuy = signal.canBuy || secondWaveEntry || independentHighHoldEntry
+        val accelerationBlocked = !signal.accelerationBlocker.isNullOrBlank()
+        val entryCanBuy = (signal.canBuy || secondWaveEntry || independentHighHoldEntry) && !accelerationBlocked
         val environmentTightened = signal.environmentTightened
         val leader = candidate.strategy == ObservationStrategy.LEADER ||
             candidate.strategy == ObservationStrategy.LIMIT_UP_CONTINUATION
@@ -347,6 +348,8 @@ object ObservationPool {
             fundFlowDelay && previouslyConfirmed && trendIntact -> ObservationStage.NEAR_ENTRY
             fundFlowDelay && candidate.stage == ObservationStage.BUY_CANDIDATE -> ObservationStage.NEAR_ENTRY
             fundFlowDelay -> ObservationStage.OBSERVING
+            accelerationBlocked && previouslyConfirmed && trendIntact -> ObservationStage.NEAR_ENTRY
+            accelerationBlocked -> ObservationStage.OBSERVING
             confirmed -> ObservationStage.BUY_CANDIDATE
             observingOnlyConfirmed -> ObservationStage.OBSERVING
             eligible && entryCanBuy -> ObservationStage.NEAR_ENTRY
@@ -377,6 +380,7 @@ object ObservationPool {
                 softRisk && softRiskRounds < 2 ->
                     "${effectiveBreakoutRisk?.reason ?: "突破结构出现软风险"}｜软风险首次出现，保留原档位，等待15分钟后的新行情复核"
                 signal.riskFlag -> "${signal.signalReason.ifBlank { "风险信号" }}｜风险条件仍成立，不晋级"
+                accelerationBlocked -> signal.accelerationBlocker ?: "放量加速末端暂缓晋级"
                 trendGate != null -> trendGate
                 environmentTightened -> "市场风险提高普通候选晋级门槛，等待更强的日线承接或二波确认"
                 fundFlowDelay -> fundFlowDelayReason(signal)
@@ -392,6 +396,7 @@ object ObservationPool {
                     "${effectiveBreakoutRisk?.reason ?: "突破结构弱点已确认"}｜软风险已间隔确认2轮，降级观察"
                 softRisk -> "${effectiveBreakoutRisk?.reason ?: "突破结构出现软风险"}｜软风险等待15分钟间隔复核"
                 signal.riskFlag -> "${signal.signalReason.ifBlank { "风险信号" }}｜风险条件仍成立，仅保持观察"
+                accelerationBlocked -> signal.accelerationBlocker ?: "放量加速末端暂缓晋级"
                 trendGate != null -> trendGate
                 effectiveBreakoutRisk?.risk == true -> effectiveBreakoutRisk.reason
                 fundFlowDelay -> fundFlowDelayReason(signal)

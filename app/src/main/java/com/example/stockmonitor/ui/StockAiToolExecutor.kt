@@ -668,6 +668,8 @@ internal class StockAiToolExecutor(context: Context) : AiToolExecutor {
                 shareholder = data.shareholder,
                 today = SimpleDateFormat("yyyy-MM-dd", Locale.CHINA).format(Date()),
                 orgType = data.orgType,
+                name = data.name,
+                quoteName = data.quoteName,
             ),
         )
         return FundamentalsReport.format(name, code, data.price, nowStamp(), result).also {

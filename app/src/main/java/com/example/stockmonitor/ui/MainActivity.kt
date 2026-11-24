@@ -10,6 +10,9 @@ import android.os.Bundle
 import android.os.Process
 import android.os.PowerManager
 import android.provider.Settings
+import android.text.SpannableStringBuilder
+import android.text.Spanned
+import android.text.style.RelativeSizeSpan
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
@@ -45,7 +48,18 @@ class MainActivity : AppCompatActivity() {
         store = Store(this)
 
         findViewById<MaterialToolbar>(R.id.toolbar).apply {
-            subtitle = getString(R.string.app_subtitle)
+            // 副标题与主标题同一行：TitleLarge 20sp 下用 0.8 倍字号，保持层级但不再另起一行。
+            title = SpannableStringBuilder(getString(R.string.app_name)).apply {
+                append(" · ")
+                val subtitleStart = length
+                append(getString(R.string.app_subtitle))
+                setSpan(
+                    RelativeSizeSpan(0.8f),
+                    subtitleStart,
+                    length,
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                )
+            }
             inflateMenu(R.menu.main_menu)
             setOnMenuItemClickListener { item ->
                 when (item.itemId) {

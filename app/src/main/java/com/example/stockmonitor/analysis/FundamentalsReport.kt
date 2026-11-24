@@ -65,6 +65,12 @@ object FundamentalsReport {
             appendLine("行情：${money(price)} 元｜最新报告期：${latest?.date ?: "—"}｜生成于 $asOf")
             appendLine()
 
+            val banner = RiskWarningPolicy.bannerLines(result.riskWarning)
+            if (banner.isNotEmpty()) {
+                banner.forEach { appendLine(it) }
+                appendLine()
+            }
+
             // 顶部只给概览，真正的综合结论放在报告最后（第十三节），关键数据在那里标红。
             appendLine("一、快速概览")
             if (!result.financialQuality.applicable) {
@@ -943,7 +949,14 @@ object FundamentalsReport {
         val good = result.risks.count { it.level == RiskLevel.GOOD }
         val base = "本期共 ${result.risks.size} 条（⛔ $alerts 条、⚠️ $watches 条、✅ $good 条）。"
         return base + when {
-            alerts > 0 -> "有 ⛔ 级信号，这些项在买入前应当先核实清楚。"
+            alerts > 0 -> {
+                val riskPrefix = if (result.riskWarning?.hasWarning == true) {
+                    "存在风险警示/重大合规事项，先处理交易资格与合规风险；"
+                } else {
+                    ""
+                }
+                riskPrefix + "有 ⛔ 级信号，这些项在买入前应当先核实清楚。"
+            }
             watches > 0 -> "没有 ⛔ 级信号，但 ⚠️ 项会在行业下行时放大，建议列进跟踪清单。"
             else -> "没有需要警惕的信号。"
         }
@@ -962,6 +975,12 @@ object FundamentalsReport {
             builder.appendLine("公告接口未返回数据，这一节暂缺（不是因为没问题）。")
             appendShareholder(builder, result)
             builder.appendLine("结论：${governanceConclusion(result)}")
+            if (result.riskWarning?.hasWarning == true) {
+                builder.appendLine(
+                    "历史重大合规（立案/处罚/风险警示）按 730 天回溯，见报告顶部「风险预警」；" +
+                        "本节只列 180 天内的常规公告事项。",
+                )
+            }
             builder.appendLine()
             return
         }
@@ -980,6 +999,12 @@ object FundamentalsReport {
         }
         appendShareholder(builder, result)
         builder.appendLine("结论：${governanceConclusion(result)}")
+        if (result.riskWarning?.hasWarning == true) {
+            builder.appendLine(
+                "历史重大合规（立案/处罚/风险警示）按 730 天回溯，见报告顶部「风险预警」；" +
+                    "本节只列 180 天内的常规公告事项。",
+            )
+        }
         builder.appendLine()
     }
 

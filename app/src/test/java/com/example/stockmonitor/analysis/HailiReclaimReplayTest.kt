@@ -62,4 +62,35 @@ class HailiReclaimReplayTest {
         }
         throw AssertionError("no reclaim alert on $day")
     }
+
+    /**
+     * 强势段回踩锚位：11-19 收盘 15.07 是首板后转强段。旧口径回踩区间锚在 M20
+     * （约 12.2×1.02≈12.41），深到强势股回不到；分档后浅锚应整体高于 M20 深口径。
+     */
+    @Test
+    fun strongStagePullbackAnchorIsShallowNotMa20() {
+        val fixture = LaunchDiscoveryPrototype.loadFixture("600619")
+        val i = fixture.dates.indexOf("2026-11-19")
+        assertTrue(i >= 20)
+        val closes = fixture.closes
+        val price = closes[i]
+        val ma5 = closes.subList(i - 4, i + 1).average()
+        val ma10 = closes.subList(i - 9, i + 1).average()
+        val ma20 = closes.subList(i - 19, i + 1).average()
+        val recent = closes.subList(i - 9, i + 1)
+
+        val tier = PullbackAnchorPolicy.tierOf(price, ma5, ma10, ma20, recent)
+        assertEquals(StrengthTier.STRONG, tier)
+
+        val strong = PullbackAnchorPolicy.bandOf(
+            tier = StrengthTier.STRONG, price = price, ma5 = ma5, ma20 = ma20,
+            priorHigh = null, stop = ma20, target = price * 1.3, minRewardRisk = 2.0,
+        )
+        val neutral = PullbackAnchorPolicy.bandOf(
+            tier = StrengthTier.NEUTRAL, price = price, ma5 = ma5, ma20 = ma20,
+            priorHigh = null, stop = ma20, target = price * 1.3, minRewardRisk = 2.0,
+        )
+        // 浅锚区间整体高于 M20 深口径：强势股的加仓参考价不再低到回不到的位置。
+        assertTrue(strong.low!! > neutral.high!!)
+    }
 }

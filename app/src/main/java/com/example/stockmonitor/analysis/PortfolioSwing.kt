@@ -22,6 +22,11 @@ data class SwingEvidence(
     val trendAssessment: TrendAssessment? = null,
     val boxRange: BoxRangeAssessment? = null,
     val highPosition: HighPositionDecision? = null,
+    /** 强度分档用的短均线；缺数据不判强势档，落中性保持 M20 口径（见 [PullbackAnchorPolicy]）。 */
+    val ma5: Double? = null,
+    val ma10: Double? = null,
+    /** 近 10 日收盘（旧→新），用于强势档的 MA5 站稳计数；不足 9 根不判强势。 */
+    val recentCloses: List<Double> = emptyList(),
 )
 
 enum class SwingStatus(val label: String) {
@@ -120,15 +125,20 @@ data class SwingDecision(
     val addQuantity: Double = 0.0,
     val estimatedCash: Double = 0.0,
     val afterPositionPct: Double? = null,
+    /** 回踩锚位口径（如「强势浅回踩锚（MA5）」「MA20回踩口径」），供报告与补仓测算展示。 */
+    val anchorLabel: String? = null,
 ) {
     val diagnosis: SwingDiagnosis get() = SwingDiagnosis.from(this)
 
     fun action(): String = if (addQuantity > 0) {
-        "按分析价${money(price!!)}测算，本次最多追加${shares(addQuantity)}股，预计占用${money(estimatedCash)}元（含预留费用），加后仓位${money(afterPositionPct!!)}%"
+        "按分析价${money(price!!)}测算，本次最多追加${shares(addQuantity)}股，预计占用${money(estimatedCash)}元（含预留费用），" +
+            "加后仓位${money(afterPositionPct!!)}%；分批执行，不一次打满（见分批口径）"
     } else "新增资金0股：${diagnosis.summary()}（$reason）"
 
     fun levels(): String = if (entryLow != null && entryHigh != null && riskPrice != null && target != null) {
-        "参考区间${money(entryLow)}～${money(entryHigh)}｜失效参考${money(riskPrice)}｜压力参考${money(target)}"
+        "参考区间${money(entryLow)}～${money(entryHigh)}" +
+            (anchorLabel?.let { "（$it）" } ?: "") +
+            "｜失效参考${money(riskPrice)}｜压力参考${money(target)}"
     } else "买点或有效风险价位未齐备，不给执行区间"
 }
 
@@ -166,6 +176,7 @@ data class SwingPlan(
             add("重点${index + 1}：${row.name}｜${row.action()}")
             add(row.levels())
         }
+        if (focusedRows.isNotEmpty()) add(AddBatchPolicy.summary())
         rows.take(3).forEachIndexed { index, row ->
             add("${index + 1}. ${row.name}｜${row.status.label}｜${if (row.addQuantity > 0) "重点${focusedRows.indexOf(row) + 1}" else "追加0股"}：${row.reason}")
             add("诊断：${row.diagnosis.summary()}")
@@ -349,16 +360,40 @@ object PortfolioSwing {
             ?: return base.copy(reason = "上方压力空间无法核实，不推算收益空间")
         val rewardRisk = (target - quote.price) / (quote.price - stop)
         if (rewardRisk < MIN_REWARD_RISK) return base.copy(status = SwingStatus.WAIT, reason = "距离上方压力太近，潜在盈亏比不足2倍")
-        val low = maxOf(input.ma20 * (1 - TrendEntryStrategy.MA20_BREAK_TOLERANCE_PCT / 100), stop + 0.01)
-        val high = minOf(input.ma20 * (1 + TrendEntryStrategy.PULLBACK_ABOVE_MA20_PCT / 100),
-            (target + MIN_REWARD_RISK * stop) / (MIN_REWARD_RISK + 1))
-        if (quote.price !in low..high) return base.copy(status = SwingStatus.WAIT, reason = "现价已离开回踩参考区间，不追价")
+        // 回踩区间按强度分档选锚：强势给 MA5/突破位浅锚，中性维持 M20 口径，弱势不给区间。
+        val tier = PullbackAnchorPolicy.tierOf(
+            price = quote.price,
+            ma5 = input.ma5,
+            ma10 = input.ma10,
+            ma20 = input.ma20,
+            recentCloses = input.recentCloses,
+            trendWeak = entry.trendWeak,
+            majorTrendDown = trendAssessment?.major == MajorTrend.DOWN,
+        )
+        val band = PullbackAnchorPolicy.bandOf(
+            tier = tier,
+            price = quote.price,
+            ma5 = input.ma5,
+            ma20 = input.ma20,
+            priorHigh = entry.priorHigh,
+            stop = stop,
+            target = target,
+            minRewardRisk = MIN_REWARD_RISK,
+        )
+        val low = band.low
+        val high = band.high
+        if (low == null || high == null || quote.price !in low..high) {
+            return base.copy(status = SwingStatus.WAIT, reason = band.offBandReason(quote.price, input.atrPct))
+        }
         val score = 60 + (if (cycles.monthTrend == SwingTrend.UP) 20 else 10) + (rewardRisk.coerceAtMost(4.0) * 5).toInt()
+        val bandNote = band.onBandNote()
         return base.copy(status = if (bottoming) SwingStatus.BOTTOM_TRIAL else SwingStatus.READY, score = score,
             reason = (if (bottoming) "大趋势筑底，最多按初始仓位25%轻仓试错；" else "") +
                 "${cycles.summary()}；日线回踩条件通过，潜在盈亏比${money(rewardRisk)}倍" +
+                (if (bandNote.isNotEmpty()) "；$bandNote" else "") +
                 if (input.sectorRegime == null) "；板块趋势暂缺" else "",
-            price = quote.price, entryLow = low, entryHigh = high, riskPrice = stop, target = target, rewardRisk = rewardRisk)
+            price = quote.price, entryLow = low, entryHigh = high, riskPrice = stop, target = target, rewardRisk = rewardRisk,
+            anchorLabel = band.anchorLabel)
     }
 
     /**

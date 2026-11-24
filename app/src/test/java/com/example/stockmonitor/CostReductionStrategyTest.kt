@@ -127,4 +127,31 @@ class CostReductionStrategyTest {
         assertTrue(report.contains("T+1"))
         assertTrue(report.contains("不构成投资建议"))
     }
+
+    @Test
+    fun shallowAnchorLabelOutranksDeepLevelsAndDeepGapGetsGuardNote() {
+        // 强势浅锚优先于支撑/MA20 深位；深位过不了可达性护栏时给出「大概率到不了」注记。
+        val plan = AddPositionStrategy.costReductionPlan(
+            holdingShares = 1000.0,
+            averageCost = 13.0,
+            targetCost = 12.0,
+            market = CostReductionMarket(
+                currentPrice = 12.0,
+                support = 9.0,
+                resistance = 15.0,
+                ma20 = 9.5,
+                entryLow = 11.6,
+                entryHigh = 12.2,
+                stopPrice = 8.5,
+                trend = CostReductionTrend.UPTREND,
+                atrPct = 2.0,
+                anchorLabel = "强势浅回踩锚（MA5）",
+            ),
+        )
+
+        assertEquals("强势浅回踩锚（MA5）", plan.recommended?.legs?.single()?.label)
+        val warnings = plan.warnings.joinToString("\n")
+        assertTrue(warnings.contains("大概率到不了"))
+        assertTrue(warnings.contains("支撑位"))
+    }
 }
