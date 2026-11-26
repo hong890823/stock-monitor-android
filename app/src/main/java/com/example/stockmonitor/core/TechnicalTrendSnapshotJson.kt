@@ -34,7 +34,10 @@ object TechnicalTrendSnapshotJson {
                         .put("ma20", snapshot.ma20.finiteOrZero())
                         .put("ma60", snapshot.ma60.finiteOrZero())
                         .put("volume_ratio", snapshot.volumeRatio ?: JSONObject.NULL)
-                        .put("atr_pct", snapshot.atrPct ?: JSONObject.NULL),
+                        .put("atr_pct", snapshot.atrPct ?: JSONObject.NULL)
+                        .put("chip_line", snapshot.chipLine ?: JSONObject.NULL)
+                        .put("chip_trapped_line", snapshot.chipTrappedLine ?: JSONObject.NULL)
+                        .put("momentum_line", snapshot.momentumLine ?: JSONObject.NULL),
                 )
             }
         }.toString()
@@ -72,6 +75,9 @@ object TechnicalTrendSnapshotJson {
                         ma60 = json.optDouble("ma60", 0.0).takeIf { it.isFinite() } ?: 0.0,
                         volumeRatio = json.optDoubleOrNull("volume_ratio"),
                         atrPct = json.optDoubleOrNull("atr_pct"),
+                        chipLine = json.optNullableString("chip_line"),
+                        chipTrappedLine = json.optNullableString("chip_trapped_line"),
+                        momentumLine = json.optNullableString("momentum_line"),
                     )
                     put(code, snapshot)
                 }
@@ -89,5 +95,11 @@ object TechnicalTrendSnapshotJson {
         if (!has(key) || isNull(key)) return null
         val value = optDouble(key, Double.NaN)
         return value.takeIf { it.isFinite() }
+    }
+
+    /** null/缺失/空白都返回 null。 */
+    private fun JSONObject.optNullableString(key: String): String? {
+        if (!has(key) || isNull(key)) return null
+        return optString(key).takeIf { it.isNotBlank() }
     }
 }

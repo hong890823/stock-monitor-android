@@ -80,10 +80,12 @@ object TradeActionGuard {
         if (evidence == null) return observe("15/30分钟证据缺失，当前仅观察，不执行买入、卖出或做T。")
         val reentry = normalizedIntent in setOf("t_buy", "reentry")
         if (kind == GuardedAction.BUY_SMALL) {
-            val allowed = if (reentry) {
-                permissions?.allowReentry != false
-            } else {
-                permissions?.allowBuy != false
+            // 权限按动作意图取对应能力位（2026-11-26 权限解耦）："add" 走 allowAdd，
+            // 接回走 allowReentry，其余买入走 allowBuy——不再出现 allowAdd 无人消费。
+            val allowed = when {
+                reentry -> permissions?.allowReentry != false
+                normalizedIntent == "add" -> permissions?.allowAdd != false
+                else -> permissions?.allowBuy != false
             }
             if (!allowed) {
                 val blocker = permissions?.blockers?.joinToString("；")

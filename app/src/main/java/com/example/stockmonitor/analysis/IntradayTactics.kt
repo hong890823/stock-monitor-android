@@ -211,6 +211,12 @@ object IntradayTactics {
         /** 跌破之后是否曾重新站回支撑，用于区分「首次破位」和「反抽失败再度破位」。 */
         val reclaimedSupport: Boolean = false,
         /**
+         * 支撑是否被验证（[SupportValidityPolicy]：近20根触及≥2次未收破，或强势锚档）。
+         * false 时支撑类买点（站回/接回/回踩）只留痕不推送（[AlertPushPolicy.classifySupportOp]）；
+         * null（旧缓存/缺数据）fail-open 放行。
+         */
+        val supportValid: Boolean? = null,
+        /**
          * 大盘状态。塌陷期**买入侧信号一律压制**——「回踩接回」「站回补仓」「试仓」在
          * 系统性下跌里都是接飞刀；减仓侧不受影响，反而更该提醒。
          */
@@ -399,20 +405,22 @@ object IntradayTactics {
                 )
             }
         }
+        // 大趋势向下只封买侧（2026-11-26 权限解耦）：不再整体 return null——
+        // 做T卖出/深套红灯反弹离场是减风险动作，此前被「转弱不接回」连带封死。
+        val riskOnly = input.trendAssessment?.riskOnly == true
         input.trendAssessment?.let { trend ->
             if (trend.major == MajorTrend.MISSING) return trendWatch(input, trend)
-            if (trend.riskOnly) return null
         }
         val highPosition = input.highPosition
-        if (highPosition?.phase == HighPositionPhase.SECOND_WAVE_CONFIRMED &&
+        if (!riskOnly && highPosition?.phase == HighPositionPhase.SECOND_WAVE_CONFIRMED &&
             highPosition.allowSecondWaveEntry
         ) {
             return secondWave(input, highPosition)
         }
-        if (highPosition?.phase == HighPositionPhase.SECOND_WAVE_CANDIDATE) {
+        if (!riskOnly && highPosition?.phase == HighPositionPhase.SECOND_WAVE_CANDIDATE) {
             return secondWaveCandidate(input, highPosition)
         }
-        if (highPosition?.phase == HighPositionPhase.CONSOLIDATION && input.score >= 2) {
+        if (!riskOnly && highPosition?.phase == HighPositionPhase.CONSOLIDATION && input.score >= 2) {
             return highConsolidation(input, highPosition)
         }
         if (input.trendAssessment?.major == MajorTrend.BOTTOMING) {
@@ -436,6 +444,9 @@ object IntradayTactics {
         val tBuyAllowed = input.trendAssessment?.allowsTBuy != false &&
             boxAllowsBuy && divergenceAllowsNewAction
         val tSellAllowed = input.trendAssessment?.allowsTSell != false
+        // 做T卖出是减风险动作：大趋势向下也照常评估（反弹减仓是深套框架的标准动作）；
+        // 「持有观察」类建议仍要求趋势许可，不混用这条口径。
+        val tSellRiskAllowed = tSellAllowed || riskOnly
         val highAllowsNewBuy = highPosition == null ||
             highPosition.phase == HighPositionPhase.NONE ||
             highPosition.allowBuy
@@ -503,12 +514,12 @@ object IntradayTactics {
                 (expanded || atResistance(input)) && cautiousContinuation(input, expanded) ->
                 tHoldCaution(input)
             // 板块龙头仍强：冲高后的首次回落先不给减仓股数，龙头强势途中下车容易卖飞。
-            tSellAllowed && holding && rollover && !deepRollover && sectorHot && rally &&
+            tSellRiskAllowed && holding && rollover && !deepRollover && sectorHot && rally &&
                 (expanded || atResistance(input)) -> tSellDeferred(input, expanded)
-            tSellAllowed && holding && rollover && !deepRollover && rhythm.retreatFactor > 1.0 && rally &&
+            tSellRiskAllowed && holding && rollover && !deepRollover && rhythm.retreatFactor > 1.0 && rally &&
                 (expanded || atResistance(input)) -> tSellDeferred(input, expanded)
             // 回落真加深了（或板块无涨停）照样给做T股数，不静音。
-            tSellAllowed && holding && deepRollover && rally &&
+            tSellRiskAllowed && holding && deepRollover && rally &&
                 (expanded || atResistance(input)) -> tSell(input, expanded)
             // 买入侧：转弱就别接回，塌陷直接不提——系统性下跌里接回是接飞刀。
             tBuyAllowed && highAllowsNewBuy && holding && input.changePct <= -tThreshold(input) &&

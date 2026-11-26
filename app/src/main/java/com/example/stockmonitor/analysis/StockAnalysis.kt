@@ -70,6 +70,12 @@ data class TechnicalResult(
     val rsi: Double?,
     val kdj: KdjValues,
     val chip: ChipPeaks,
+    /** 获利盘/套牢密度/压力位/近N日成本（[ChipDistributionPolicy] 成交量加权估算）；数据不足为 null。 */
+    val chipDistribution: ChipDistributionPolicy.ChipDistribution? = null,
+    /** 支撑有效性（[SupportValidityPolicy]）：支撑类买点（补仓/接回/站回/回踩）推送前的验证档。 */
+    val supportValidity: SupportValidityPolicy.SupportValidity? = null,
+    /** 增强动量证据（红绿柱形态/Squeeze/CMF/Aroon，[EnhancedMomentumPolicy]）；证据层展示，不单独计分。 */
+    val momentumDetail: EnhancedMomentumPolicy.MomentumDetail? = null,
     val score: Int,
     val signals: List<String>,
     /** 量价那条结论（如「低位放量滞涨，量能主要在换手，尚需价格确认」）。signals 末尾只留三条，报告第二节单独用它。 */
@@ -197,6 +203,16 @@ object StockAnalysis {
         val location = priceContext?.location
 
         val chip = ChipEstimator.estimate(bars)
+        // 获利盘/套牢密度/压力位/近N日成本（成交量加权估算，当日收盘前不进分布）。
+        val chipDistribution = ChipDistributionPolicy.evaluate(bars, price = price)
+        // 增强动量证据（红绿柱形态/Squeeze/CMF/Aroon）：证据层，不单独计分。
+        val momentumDetail = EnhancedMomentumPolicy.evaluate(
+            macdHist = macdHist.toList(),
+            high = high,
+            low = low,
+            close = close,
+            volume = volume,
+        )
         val difValue = dif[latest]
         val deaValue = dea[latest]
         val histValue = macdHist[latest]
@@ -241,6 +257,13 @@ object StockAnalysis {
             trendWeak = entrySetup.trendWeak,
             majorTrendDown = trendAssessment?.major == MajorTrend.DOWN,
             priorHigh = entrySetup.priorHigh,
+        )
+        // 支撑有效性（2026-11-26 口径）：support 作为操作依据前先验证——
+        // 近 20 根触及 ≥2 次且未收破，或强势档锚点；不满足时支撑类买点只留痕不推送。
+        val supportValidity = SupportValidityPolicy.evaluate(
+            support = support,
+            bars = bars,
+            anchorStrong = pullbackAnchor?.tier == StrengthTier.STRONG,
         )
         val highPositionEvidence = HighPositionEvidence(
             price = price,
@@ -502,6 +525,9 @@ object StockAnalysis {
             rsi = rsiValue,
             kdj = KdjValues(kValue, dValue, jValue),
             chip = chip,
+            chipDistribution = chipDistribution,
+            supportValidity = supportValidity,
+            momentumDetail = momentumDetail,
             score = score,
             signals = signals,
             volumeNote = volumeNote,
@@ -732,6 +758,9 @@ object StockAnalysis {
             )
             appendLine("结论（KDJ）：$kdjMeaning")
             appendLine("结论（RSI）：$rsiMeaning")
+            result.momentumDetail?.let {
+                appendLine("增强动量证据（不单独计分）：${it.summaryLine}")
+            }
             appendLine()
             appendLine("八、筹码峰结构（估算）")
             appendLine(
@@ -748,6 +777,10 @@ object StockAnalysis {
             appendLine("控盘提示：${chip.controlCaution}")
             appendLine("估算成本中枢：${chip.averageCost?.let { price(it) } ?: "暂缺"}")
             appendLine("成交密集区：$peakText")
+            result.chipDistribution?.let { dist ->
+                dist.summaryLine?.let { appendLine(it) }
+                dist.trappedLine?.let { appendLine(it) }
+            }
             appendLine("方法说明：${chip.method}；不是券商真实持仓筹码分布。")
             appendLine("结论：${chip.interpretation}成交密集区可作潜在支撑/压力参考，但不是真实持仓成本，也没有必然的支撑作用。")
             appendLine()

@@ -304,9 +304,27 @@ class IndicatorScreener(private val sina: SinaClient) {
             val previousD = kdj.d[previous]
             val latestRsi = rsi[last]
 
-            // 严格策略
-            val strictMacd = previousDif <= previousDea && latestDif > latestDea &&
-                latestDif > 0 && latestDea > 0
+            // 严格策略：水上金叉（近3根内）且金叉后红柱连续放大——确认型口径，
+            // 过滤一日游假金叉（红绿柱用法升级 2026-11-26：红柱质量作金叉确认，不作重复计分）。
+            val strictMacd = run {
+                var confirmed = false
+                for (j in last downTo maxOf(1, last - 2)) {
+                    val cross = dif[j] > dea[j] && dif[j - 1] <= dea[j - 1] && dif[j] > 0 && dea[j] > 0
+                    if (!cross) continue
+                    var histGrowing = true
+                    for (k in j..last) {
+                        if (dif[k] - dea[k] <= dif[k - 1] - dea[k - 1]) {
+                            histGrowing = false
+                            break
+                        }
+                    }
+                    if (histGrowing) {
+                        confirmed = true
+                        break
+                    }
+                }
+                confirmed
+            }
             val strictRsi = !latestRsi.isNaN() && latestRsi < 30
             val strictKdj = previousK <= previousD && latestK > latestD && latestK < 30
 

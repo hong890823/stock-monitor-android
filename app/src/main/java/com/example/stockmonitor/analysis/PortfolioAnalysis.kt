@@ -59,6 +59,8 @@ data class PositionResult(
     val boxRange: BoxRangeAssessment? = null,
     val highPositionEvidence: HighPositionEvidence? = null,
     val highPosition: HighPositionDecision? = null,
+    /** 支撑有效性（[SupportValidityPolicy]）：支撑类买点推送前的验证档。 */
+    val supportValidity: SupportValidityPolicy.SupportValidity? = null,
     val rhythm: AdaptiveRhythmDecision? = null,
     val impulse: ImpulseContext? = null,
     val fundFlowScoreDelta: Int = 0,
@@ -387,6 +389,7 @@ object PortfolioAnalysis {
             trendAssessment = technical.trendAssessment,
             boxRange = technical.boxRange,
             highPositionEvidence = technical.highPositionEvidence,
+            supportValidity = technical.supportValidity,
             highPosition = technical.highPosition,
             rhythm = rhythm,
             impulse = technical.impulse,

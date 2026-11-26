@@ -155,6 +155,71 @@ object Indicators {
         return total
     }
 
+    /** Keltner 通道（SMA±mult×ATR，TTM Squeeze 标准参数 period=20、mult=1.5）；早期样本为 NaN。 */
+    fun keltner(
+        high: List<Double>,
+        low: List<Double>,
+        close: List<Double>,
+        period: Int = 20,
+        mult: Double = 1.5,
+    ): BollSeries {
+        val size = close.size
+        val atrSeries = atr(high, low, close)
+        val middle = DoubleArray(size) { Double.NaN }
+        val upper = DoubleArray(size) { Double.NaN }
+        val lower = DoubleArray(size) { Double.NaN }
+        for (i in period - 1 until size) {
+            val mid = close.subList(i - period + 1, i + 1).sum() / period
+            middle[i] = mid
+            upper[i] = mid + mult * atrSeries[i]
+            lower[i] = mid - mult * atrSeries[i]
+        }
+        return BollSeries(middle, upper, lower)
+    }
+
+    /**
+     * Chaikin 资金流（CMF，period=20）：(2×收-高-低)/(高-低)×成交量 的窗口占比和。
+     * 比裸 OBV 更稳的量价持续性；区间约 ±1，>0 买方占优。数据不足或零成交返回 null。
+     */
+    fun cmf(
+        high: List<Double>,
+        low: List<Double>,
+        close: List<Double>,
+        volume: List<Double>,
+        period: Int = 20,
+    ): Double? {
+        val n = minOf(high.size, low.size, close.size, volume.size)
+        if (n < period || period <= 0) return null
+        var moneyFlowVolume = 0.0
+        var totalVolume = 0.0
+        for (i in n - period until n) {
+            val range = high[i] - low[i]
+            val multiplier = if (range > 0) ((close[i] - low[i]) - (high[i] - close[i])) / range else 0.0
+            moneyFlowVolume += multiplier * volume[i]
+            totalVolume += volume[i]
+        }
+        return if (totalVolume > 0) moneyFlowVolume / totalVolume else null
+    }
+
+    /** Aroon（period=25）：距窗口内最高/最低价的时间占比，0-100；早期样本为 NaN。 */
+    fun aroon(high: List<Double>, low: List<Double>, period: Int = 25): AroonSeries? {
+        val n = minOf(high.size, low.size)
+        if (n < period + 1 || period <= 0) return null
+        val up = DoubleArray(n) { Double.NaN }
+        val down = DoubleArray(n) { Double.NaN }
+        for (i in period until n) {
+            var highIndex = i
+            var lowIndex = i
+            for (j in i - period..i) {
+                if (high[j] >= high[highIndex]) highIndex = j
+                if (low[j] <= low[lowIndex]) lowIndex = j
+            }
+            up[i] = (period - (i - highIndex)) / period.toDouble() * 100
+            down[i] = (period - (i - lowIndex)) / period.toDouble() * 100
+        }
+        return AroonSeries(up, down)
+    }
+
     /** 成交量加权分位数，用于筹码区间估算。 */
     fun weightedQuantile(values: List<Double>, weights: List<Double>, quantile: Double): Double {
         val order = values.indices.sortedBy { values[it] }
@@ -198,6 +263,7 @@ object Indicators {
     data class KdjSeries(val k: DoubleArray, val d: DoubleArray, val j: DoubleArray)
     data class BollSeries(val middle: DoubleArray, val upper: DoubleArray, val lower: DoubleArray)
     data class AdxSeries(val plusDi: DoubleArray, val minusDi: DoubleArray, val adx: DoubleArray)
+    data class AroonSeries(val up: DoubleArray, val down: DoubleArray)
 }
 
 /** 筹码峰估算结果，对应 stock_analysis._estimate_chip_peaks。 */

@@ -523,8 +523,8 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
         adviceText: String? = null,
         allocations: Map<String, com.example.stockmonitor.core.PositionAllocationConfig> = emptyMap(),
     ): List<UiKit.DetailRow> {
-        val holdingAdvice = HoldingAdvicePolicy
-            .evaluate(position, quote, technicalTrend, Repo.fundFlowHistory[position.code].orEmpty().lastOrNull())
+        val mergedAdvice = HoldingAdvicePolicy
+            .mergedAdvice(position, quote, technicalTrend, Repo.fundFlowHistory[position.code].orEmpty().lastOrNull())
         val mainForce = FundFlowDisplayPolicy.mainForceDirection(
             quote?.changePct,
             quote?.quoteDate,
@@ -549,6 +549,8 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             technicalTrend?.volumeRatio?.let { String.format(Locale.CHINA, "%.2f", it) } ?: "暂缺",
         ),
         UiKit.DetailRow("均线", technicalTrend?.let { maStructureText(it) } ?: "暂缺"),
+        chipDetailText(technicalTrend)?.let { UiKit.DetailRow("筹码", it) },
+        technicalTrend?.momentumLine?.let { UiKit.DetailRow("增强指标", it) },
         technicalTrend?.let {
             UiKit.DetailRow(
                 "技术分构成",
@@ -556,15 +558,10 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                 dividerAfter = true,
             )
         },
-        technicalTrend?.let {
-            UiKit.DetailRow(
-                "操作建议",
-                it.primaryAdvice,
-                dividerAfter = holdingAdvice != null,
-            )
-        },
-        holdingAdvice?.let {
-            UiKit.DetailRow("持仓视角", it, dividerAfter = true)
+        // 「操作建议」与「持仓视角」合并成一项：技术口径 + 持仓上下文由
+        // HoldingAdvicePolicy.mergedAdvice 收口成一段话，口径冲突时不让两句话互相打架。
+        mergedAdvice?.let {
+            UiKit.DetailRow("操作建议", it, dividerAfter = true)
         },
         fundEnvironment?.let {
             UiKit.DetailRow("资金环境", it.text)
@@ -606,6 +603,14 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             Repo.marketFundFlow,
             Repo.fundFlowHistory[result.code].orEmpty().lastOrNull()?.mainNetPct,
         )
+        // 与等待态同一口径：操作建议 = 技术面 + 持仓上下文的合并项（HoldingAdvicePolicy 收口），
+        // 深套票上的技术买点同样按做T口径降级，不和旁边的「应对」顶牛。
+        val mergedAdvice = HoldingAdvicePolicy.mergedAdvice(
+            Position(result.code, result.name, result.quantity, result.cost),
+            Repo.quotes[result.code],
+            technicalTrend,
+            Repo.fundFlowHistory[result.code].orEmpty().lastOrNull(),
+        )
         return listOfNotNull(
             adviceText?.let { UiKit.DetailRow("今日建议计划", it, dividerAfter = true) },
             UiKit.DetailRow(
@@ -620,8 +625,10 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
                     dividerAfter = true,
                 )
             },
-            technicalTrend?.let { UiKit.DetailRow("操作建议", it.primaryAdvice) },
+            mergedAdvice?.let { UiKit.DetailRow("操作建议", it) },
             UiKit.DetailRow("支撑 / 压力", supportResistanceText(result.support, result.resistance, result.price)),
+            chipDetailText(technicalTrend)?.let { UiKit.DetailRow("筹码", it) },
+            technicalTrend?.momentumLine?.let { UiKit.DetailRow("增强指标", it) },
             UiKit.DetailRow(
                 "量比 / 量价",
                 String.format(Locale.CHINA, "%.2f倍", result.volumeRatio) + volumeTag(result),
@@ -665,6 +672,13 @@ class PortfolioFragment : BaseFragment(R.layout.fragment_scroll) {
             ),
         )
         return "${allocation.displayText}｜建议：${recommendation.summary}"
+    }
+
+    /** 筹码行：获利盘/压力位/近20日浮盈 + 上方套牢副行；数据不足（旧缓存/缺行情）不占一行。 */
+    private fun chipDetailText(technicalTrend: TechnicalTrendSnapshot?): String? {
+        val summary = technicalTrend?.chipLine ?: return null
+        val trapped = technicalTrend.chipTrappedLine
+        return if (trapped != null) "$summary\n$trapped" else summary
     }
 
     /** 支撑/压力不只是两个数：标注现价在区间里的位置（贴近支撑/压力、已跌破、区间百分比）。 */

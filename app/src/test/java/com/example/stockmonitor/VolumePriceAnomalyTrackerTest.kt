@@ -359,6 +359,72 @@ class VolumePriceAnomalyTrackerTest {
         assertEquals(15_000_000.0, last?.recent15MainNetYuan ?: 0.0, 0.001)
     }
 
+    @Test
+    fun ignitionIsTwoStageWithOutcomeOnFade() {
+        // 点火分级双段（2026-11-26）：点火瞬间返回「点火观察」（含四维诱多评级），
+        // 跌回整理平台上沿出「点火结果」只留痕，之后不再打扰。
+        val tracker = VolumePriceAnomalyTracker()
+        quietBaseline().forEach { assertNull(tracker.update(it, day)) }
+        val observation = tracker.update(surge(multiplier = 4.0, price = 14.07), day, supportiveFlow())
+        assertNotNull(observation)
+        assertEquals(VolumePriceAnomalyTracker.Phase.OBSERVATION, observation?.phase)
+        assertTrue(observation?.title?.contains("点火观察") == true)
+        assertTrue(observation?.body?.contains("四维诱多评级") == true)
+
+        // 跌回平台上沿（14.00）下方 → 点火结果。
+        val outcome = tracker.update(
+            sample(
+                price = 13.98,
+                cumulativeVolume = 2_400_000.0,
+                cumulativeTurnover = 2_400_000.0 * 14.0,
+                timestamp = at(41),
+                high = 14.07,
+            ),
+            day,
+        )
+        assertNotNull(outcome)
+        assertEquals(VolumePriceAnomalyTracker.Phase.OUTCOME, outcome?.phase)
+        assertTrue(outcome?.title?.contains("点火结果") == true)
+        assertTrue(outcome?.outcomeReason?.contains("跌回") == true)
+        // 结果行之后不再打扰。
+        assertNull(
+            tracker.update(
+                sample(
+                    price = 14.10,
+                    cumulativeVolume = 2_500_000.0,
+                    cumulativeTurnover = 2_500_000.0 * 14.1,
+                    timestamp = at(42),
+                    high = 14.10,
+                ),
+                day,
+            ),
+        )
+    }
+
+    @Test
+    fun holdingPlatformWithContinuedVolumeUpgradesToConfirm() {
+        // 确认窗内现价守住平台上沿且量能延续 → 「点火确认」（此刻才弹强提醒）。
+        val tracker = VolumePriceAnomalyTracker()
+        quietBaseline().forEach { assertNull(tracker.update(it, day)) }
+        val observation = tracker.update(surge(multiplier = 4.0, price = 14.07), day, supportiveFlow())
+        assertEquals(VolumePriceAnomalyTracker.Phase.OBSERVATION, observation?.phase)
+
+        val confirm = tracker.update(
+            sample(
+                price = 14.08,
+                cumulativeVolume = 2_600_000.0,
+                cumulativeTurnover = 2_600_000.0 * 14.05,
+                timestamp = at(41),
+                high = 14.08,
+            ),
+            day,
+        )
+        assertNotNull(confirm)
+        assertEquals(VolumePriceAnomalyTracker.Phase.CONFIRM, confirm?.phase)
+        assertTrue(confirm?.strong == true)
+        assertTrue(confirm?.title?.contains("点火确认") == true)
+    }
+
     private object DurationMinutes {
         fun fromOpen(value: LocalDateTime, origin: LocalDateTime): Long =
             java.time.Duration.between(origin, value).toMinutes()

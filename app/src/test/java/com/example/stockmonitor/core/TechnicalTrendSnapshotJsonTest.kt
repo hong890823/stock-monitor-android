@@ -38,6 +38,9 @@ class TechnicalTrendSnapshotJsonTest {
                 ma60 = 11.40,
                 volumeRatio = 1.52,
                 atrPct = 2.3,
+                chipLine = "筹码：获利盘72%｜压力位13.05（距+5.8%）｜近20日浮盈+3.2%",
+                chipTrappedLine = "上方套牢：+3%内6.2%｜+5%内9.8%｜+8%内13.1%（成交量加权估算）",
+                momentumLine = "红柱 3 连放大｜波动率压缩 8 根｜CMF +0.12（承接偏强）｜Aroon 82/18（上行趋势）",
             ),
         )
 

@@ -466,8 +466,10 @@ class MarketFragment : BaseFragment(R.layout.fragment_scroll) {
                 UiKit.DetailRow(
                     "技术分构成",
                     it.evidenceSummary.removePrefix("技术分构成："),
-                    dividerAfter = true,
                 )
+            },
+            technicalTrend?.momentumLine?.let {
+                UiKit.DetailRow("增强指标", it, dividerAfter = true)
             },
             technicalTrend?.let {
                 UiKit.DetailRow(

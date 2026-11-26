@@ -24,7 +24,9 @@ class TechnicalTrendUiTest {
         assertTrue(portfolio.contains("周/月趋势"))
         assertTrue(portfolio.contains("技术分构成"))
         assertTrue(portfolio.contains("操作建议"))
-        assertTrue(portfolio.contains("primaryAdvice"))
+        // 持仓的操作建议是合并项：技术面 primaryAdvice 由 HoldingAdvicePolicy 收口持仓语境后输出。
+        assertTrue(portfolio.contains("HoldingAdvicePolicy.mergedAdvice"))
+        assertTrue(snapshot.contains("primaryAdvice"))
         assertFalse(portfolio.contains("补仓参考"))
         listOf("日K依据", "趋势档位", "评分依据").forEach { repeatedRow ->
             assertFalse(market.contains("UiKit.DetailRow(\"$repeatedRow\""))

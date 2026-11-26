@@ -11,6 +11,8 @@ import com.example.stockmonitor.R
 import com.example.stockmonitor.analysis.FiveOneThreeHit
 import com.example.stockmonitor.analysis.FiveOneThreeStage
 import com.example.stockmonitor.analysis.FundFlowDisplayPolicy
+import com.example.stockmonitor.analysis.FirstBoardReclaimValidationPolicy
+import com.example.stockmonitor.analysis.SelectionCardPriority
 import com.example.stockmonitor.analysis.VolumePrice
 import com.example.stockmonitor.analysis.VolumePriceSignal
 import com.example.stockmonitor.analysis.ObservationBuyAlert
@@ -46,6 +48,8 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
     private val store by lazy { Store(requireContext().applicationContext) }
     private var renderPending = false
     private var selectionScrolling = false
+    /** 候选池搜索的查询词；页面重建后保留。 */
+    private var searchQuery: String = ""
     private val selectionScrollIdleRunnable = Runnable {
         selectionScrolling = false
         renderIfStale()
@@ -601,6 +605,158 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
         val rankingContext = selectionRankingContext(observationPool)
         val limitFilter = currentLimitFilter(context)
         addLimitFilter(context, limitFilter)
+        // 卡片买点优先级（2026-11-26）：股票卡按卡内最好买点档位降序挂载、同档比只数；
+        // 没有买点相关行的卡不展示。「扫描状态」固定顶部、「说明」固定底部不参与。
+        val stockCards = mutableListOf<Pair<SelectionCardPriority.CardPriority, android.view.View>>()
+
+        // ── 候选池搜索（2026-11-26）：按名称/代码在持续观察池、快扫/深扫命中和涨停晋级
+        // 记录里查找，命中即给选股详情。查询词存 fragment 字段，页面重建后不丢。
+        val searchResults = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+        }
+        fun refreshSearchResults() {
+            searchResults.removeAllViews()
+            fun line(text: String, colorRes: Int? = null, size: Float = 12f) {
+                searchResults.addView(
+                    android.widget.TextView(context).apply {
+                        this.text = text
+                        textSize = size
+                        setTextColor(UiKit.color(context, colorRes ?: R.color.text_primary))
+                        setPadding(0, UiKit.dp(context, 2), 0, UiKit.dp(context, 2))
+                    },
+                )
+            }
+            val query = searchQuery.trim()
+            if (query.isEmpty()) {
+                line(
+                    "输入股票名称或代码（如：科达制造 / 600499），在持续观察池、快扫/深扫命中和涨停晋级记录里查找。",
+                    R.color.text_secondary,
+                    11.5f,
+                )
+                return
+            }
+            val pool = Repo.observationPool.ifEmpty { store.observationPool.toList() }
+            val scan = Repo.screenResult
+            val reclaims = Repo.firstBoardReclaimObservations
+            fun hitLists(code: String): List<String> = buildList {
+                if (scan.strict.any { it.code == code }) add("快扫-严格")
+                if (scan.relaxed.any { it.code == code }) add("快扫-宽松")
+                if (scan.fiveOneThree.any { it.code == code }) add("513形态")
+                if (scan.trend.any { it.code == code }) add("趋势精选")
+            }
+            fun matchesQuery(code: String, name: String): Boolean =
+                code.contains(query, ignoreCase = true) || name.contains(query, ignoreCase = true)
+
+            // 同代码多策略各存一条（观察池键 = 策略:代码）；搜索按代码合并，
+            // 与观察池卡片同一去重口径（取最优代表，合并来源/评分/板块）。
+            val poolDeduped = ObservationEligibility.deduplicateCandidates(pool)
+            val poolMatches = poolDeduped.filter { matchesQuery(it.code, it.name) }.take(5)
+            // 三个扫描列表元素类型不同，统一成 (code, name, price) 再匹配。
+            val scanEntries: List<Triple<String, String, Double>> = buildList {
+                scan.strict.forEach { add(Triple(it.code, it.name, it.price)) }
+                scan.relaxed.forEach { add(Triple(it.code, it.name, it.price)) }
+                scan.fiveOneThree.forEach { add(Triple(it.code, it.name, it.price)) }
+                scan.trend.forEach { add(Triple(it.code, it.name, it.price)) }
+            }
+            val scanOnlyMatches = scanEntries
+                .filter { matchesQuery(it.first, it.second) && pool.none { p -> p.code == it.first } }
+                .distinctBy { it.first }
+                .take(5)
+            // 同票多天的晋级记录归成一组，不拆成多块。
+            val reclaimOnly = reclaims
+                .filter { matchesQuery(it.code, it.name) }
+                .filter { r -> poolMatches.none { it.code == r.code } && scanOnlyMatches.none { it.first == r.code } }
+                .groupBy { it.code }
+                .values
+                .map { group -> group.sortedByDescending { it.tradingDay } }
+                .take(5)
+            if (poolMatches.isEmpty() && scanOnlyMatches.isEmpty() && reclaimOnly.isEmpty()) {
+                line("「$query」不在候选池，快扫/深扫命中和涨停晋级记录里也没有。", R.color.text_secondary)
+                return
+            }
+            poolMatches.forEach { candidate ->
+                line("【候选池】${candidate.name}（${candidate.code}）", R.color.brand_primary, 13f)
+                val stageText = buildString {
+                    append(candidate.stage.label)
+                    candidate.highestStage?.takeIf { it != candidate.stage }?.let {
+                        append("｜曾达 ${it.label}${candidate.highestStageDate?.let { d -> "（$d）" } ?: ""}")
+                    }
+                }
+                line(
+                    "${if (candidate.stage == com.example.stockmonitor.core.ObservationStage.ELIMINATED) "已淘汰" else "在池"}·$stageText" +
+                        "｜策略 ${candidate.strategy.label}｜结构 ${candidate.structureQuality.label}",
+                )
+                line(
+                    "评分 ${candidate.score}｜技术 ${candidate.technicalScore ?: "—"}" +
+                        "｜周/月 ${candidate.weeklyTrendLabel ?: "—"}/${candidate.monthlyTrendLabel ?: "—"}" +
+                        "｜相对强 ${candidate.relativeStrengthPct?.let { String.format(Locale.CHINA, "%+.1f%%", it) } ?: "—"}",
+                )
+                line(
+                    "入池 ${candidate.addedDate}（${candidate.allSources.joinToString("、")}）" +
+                        "｜观察 ${candidate.observedDays} 天" +
+                        "｜止损参考 ${candidate.stopPrice?.let { String.format(Locale.CHINA, "%.2f", it) } ?: "—"}" +
+                        "｜板块 ${candidate.boards.joinToString("、").ifBlank { "—" }}",
+                )
+                if (candidate.reason.isNotBlank()) {
+                    line("状态原因：${candidate.reason}", R.color.text_secondary, 11.5f)
+                }
+                hitLists(candidate.code).takeIf { it.isNotEmpty() }?.let {
+                    line("扫描命中：${it.joinToString("、")}", R.color.text_secondary, 11.5f)
+                }
+                reclaims.filter { it.code == candidate.code }.forEach { record ->
+                    line(
+                        "涨停晋级：${record.tradingDay} 触发（首板后第${record.tradingDaysAfterBoard ?: "?"}交易日）" +
+                            "｜触发价 ${String.format(Locale.CHINA, "%.2f", record.price)}" +
+                            "｜${record.fundFlowReason.ifBlank { record.fundFlowEvidence }.ifBlank { "资金数据暂缺" }}",
+                        R.color.text_secondary,
+                        11.5f,
+                    )
+                }
+            }
+            scanOnlyMatches.forEach { (code, name, price) ->
+                line("【扫描命中】$name（$code）", R.color.brand_primary, 13f)
+                line(
+                    "不在候选池；命中：${hitLists(code).joinToString("、")}" +
+                        "｜现价 ${String.format(Locale.CHINA, "%.2f", price)}",
+                    R.color.text_secondary,
+                    11.5f,
+                )
+            }
+            reclaimOnly.forEach { records ->
+                val head = records.first()
+                line("【涨停晋级】${head.name}（${head.code}）", R.color.brand_primary, 13f)
+                line("不在候选池；最近 ${records.size} 条晋级记录：", R.color.text_secondary, 11.5f)
+                records.forEach { record ->
+                    line(
+                        "${record.tradingDay} 触发（首板后第${record.tradingDaysAfterBoard ?: "?"}交易日）" +
+                            "｜触发价 ${String.format(Locale.CHINA, "%.2f", record.price)}",
+                        R.color.text_secondary,
+                        11.5f,
+                    )
+                }
+            }
+        }
+        screenCard(context, "pool_search", "🔎 候选池搜索").apply {
+            add(
+                android.widget.EditText(context).apply {
+                    hint = "输入股票名称或代码，如：科达制造 / 600499"
+                    setText(searchQuery)
+                    addTextChangedListener(
+                        object : android.text.TextWatcher {
+                            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
+                            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) = Unit
+                            override fun afterTextChanged(s: android.text.Editable?) {
+                                searchQuery = s?.toString().orEmpty()
+                                refreshSearchResults()
+                            }
+                        },
+                    )
+                },
+            )
+            add(searchResults)
+            container.addView(view)
+        }
+        refreshSearchResults()
 
         screenCard(context, "scan_status", "📡 扫描状态").apply {
             addKeyValue("当前状态", Repo.screenStatus)
@@ -975,7 +1131,13 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                 pageKey = "observation:status:risk",
                 titleColor = R.color.risk_alert,
             )
-            container.addView(view)
+            val priority = SelectionCardPriority.poolCardPriority(
+                buyCount = buyItems.size,
+                nearCount = nearItems.size,
+                priorityReentryCount = priorityReentryItems.size,
+                observingCount = observingItems.size,
+            )
+            if (priority.visible) stockCards.add(priority to view)
         }
 
         screenCard(context, "limit_promotion_observation", "🔥 涨停晋级观察").apply {
@@ -999,15 +1161,50 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                 11.5f,
                 UiKit.color(context, R.color.brand_primary),
             )
-            val byDay = reclaimRecords
+            addText(
+                "卡片只列当前有参与价值的（时效内、承接下探与守稳成立、资金未持续流出）；" +
+                    "没价值参与买入的过滤掉只留计数，记录仍全量保留。",
+                11.5f,
+                UiKit.color(context, R.color.text_secondary),
+            )
+            // 展示层校验（2026-11-26）：只列当前有参与价值的，没价值参与买入的过滤掉；
+            // 记录全量保留，过滤只影响展示并给原因计数（FirstBoardReclaimValidationPolicy）。
+            val verdictByRecord = reclaimRecords.associateWith { record ->
+                FirstBoardReclaimValidationPolicy.evaluate(
+                    record = record,
+                    currentPrice = Repo.quotes[record.code]?.price,
+                    today = TimeUtils.todayText(),
+                    tradingDates = Repo.marketTradingDates,
+                    latestMainNetPct = Repo.fundFlowHistory[record.code].orEmpty().lastOrNull()?.mainNetPct,
+                )
+            }
+            val visibleRecords = reclaimRecords.filter { verdictByRecord[it]?.participate == true }
+            val filteredCounts = reclaimRecords
+                .mapNotNull { verdictByRecord[it] }
+                .filter { !it.participate }
+                .groupingBy { it.category }
+                .eachCount()
+            val byDay = visibleRecords
                 .groupBy { it.tradingDay }
                 .toSortedMap(compareByDescending { it })
             if (reclaimRecords.isEmpty()) {
                 addText("近期还没有满足首板承接转强的股票。", 12f)
+            } else if (visibleRecords.isEmpty()) {
+                addText("近期记录均未通过参与价值校验，仅作复核（原因见下方计数）。", 12f)
             } else {
                 addKeyValue(
                     "记录",
-                    "${byDay.size}个交易日 · ${reclaimRecords.size}只（最新 ${byDay.keys.first()}）",
+                    "${byDay.size}个交易日 · ${visibleRecords.size}只可参与（最新 ${byDay.keys.first()}）",
+                )
+            }
+            if (filteredCounts.isNotEmpty()) {
+                val breakdown = FirstBoardReclaimValidationPolicy.Category.values()
+                    .mapNotNull { category -> filteredCounts[category]?.let { "${category.label} $it" } }
+                    .joinToString("｜")
+                addText(
+                    "已过滤 ${filteredCounts.values.sum()} 只：$breakdown；记录仍全量保留可复核。",
+                    11.5f,
+                    UiKit.color(context, R.color.text_secondary),
                 )
             }
             byDay.forEach { (day, dayRecords) ->
@@ -1090,7 +1287,8 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                     )
                 }
             }
-            container.addView(view)
+            val priority = SelectionCardPriority.reclaimCardPriority(visibleRecords.size)
+            if (priority.visible) stockCards.add(priority to view)
         }
 
         screenCard(context, "indicator_scan", "📊 指标两档 · 快扫").apply {
@@ -1199,7 +1397,8 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                 pageKey = "indicator:relaxed",
                 emptyText = "暂无符合宽松预警的股票。",
             )
-            container.addView(view)
+            val priority = SelectionCardPriority.scanCardPriority(strictRows.size + relaxedRows.size)
+            if (priority.visible) stockCards.add(priority to view)
         }
 
         screenCard(context, "trend_scan", "🔭 513 与趋势 · 深扫").apply {
@@ -1294,7 +1493,13 @@ class ScreenFragment : BaseFragment(R.layout.fragment_scroll) {
                 pageKey = "deep:trend",
                 emptyText = "暂无通过趋势精选条件的股票。",
             )
-            container.addView(view)
+            val priority = SelectionCardPriority.scanCardPriority(deep513Rows.size + trendRows.size)
+            if (priority.visible) stockCards.add(priority to view)
+        }
+
+        // 股票卡片按买点优先级统一挂载（买点最好的在最上面；无买点的卡已跳过）。
+        SelectionCardPriority.sortByBuyPoint(stockCards) { it.first }.forEach { (_, cardView) ->
+            container.addView(cardView)
         }
 
         screenCard(context, "help", "ℹ️ 说明").apply {

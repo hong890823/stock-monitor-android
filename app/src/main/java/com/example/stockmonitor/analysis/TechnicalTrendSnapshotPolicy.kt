@@ -31,6 +31,12 @@ data class TechnicalTrendSnapshot(
     val ma60: Double = 0.0,
     val volumeRatio: Double? = null,
     val atrPct: Double? = null,
+    /** 筹码摘要行（[ChipDistributionPolicy] 获利盘/压力位/近20日浮盈）；旧缓存缺省 null。 */
+    val chipLine: String? = null,
+    /** 上方套牢密度副行；旧缓存缺省 null。 */
+    val chipTrappedLine: String? = null,
+    /** 增强动量证据行（红绿柱形态/Squeeze/CMF/Aroon，[EnhancedMomentumPolicy]）；旧缓存缺省 null。 */
+    val momentumLine: String? = null,
 ) {
     val summary: String
         get() = "技术 $technicalScore/100｜周K${weeklyTrend.label}｜月K${monthlyTrend.label}"
@@ -109,6 +115,9 @@ object TechnicalTrendSnapshotPolicy {
             ma60 = analyzed.ma60,
             volumeRatio = analyzed.volumeRatio,
             atrPct = analyzed.volatility.atrPct,
+            chipLine = analyzed.chipDistribution?.summaryLine,
+            chipTrappedLine = analyzed.chipDistribution?.trappedLine,
+            momentumLine = analyzed.momentumDetail?.summaryLine,
         )
     }
 }

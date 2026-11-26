@@ -343,6 +343,37 @@ object Notifier {
         return posted
     }
 
+    /**
+     * 仅记录（不弹系统通知）：观察/评估级提醒的留痕通道（[AlertPushPolicy] 的 RECORD_ONLY 档）。
+     * 记录照常进提醒账本（提醒历史可回看），不需要通知权限、不占推送预算；
+     * 与推送通道的区别只在投递方式——执行守卫与去重口径不变。
+     */
+    fun recordOnly(
+        context: Context,
+        id: Int,
+        title: String,
+        text: String,
+        kind: String = "observation",
+        triggerType: String = "record_only",
+    ): Boolean {
+        val store =
+            com.example.stockmonitor.core
+                .Store(context)
+        if (!store.alertsEnabled) return false
+        val record =
+            newAlertRecord(
+                notificationId = id,
+                kind = kind,
+                title = title,
+                text = text,
+                level = "RECORD_ONLY",
+                triggerType = triggerType,
+            )
+        return runCatching { store.appendAlertRecord(record) }
+            .onFailure { error -> Log.e(TAG, "仅记录提醒落账失败: id=${record.id}", error) }
+            .getOrDefault(false)
+    }
+
     /** 大盘风险预警：高优先级通知，并使用应用直接震动避免厂商通道差异。 */
     fun marketRisk(
         context: Context,

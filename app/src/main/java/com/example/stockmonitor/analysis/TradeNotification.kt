@@ -189,6 +189,10 @@ object TradeNotification {
         } else {
             input.sellableQuantity ?: 0.0
         }
+        // 门控条件按维度记录（能力快照口径，2026-11-26 权限解耦）：这些是**买侧**条件，
+        // 只拦买入/加仓/接回；做T卖出是减风险动作，不适用「不允许新增买入 / 大趋势向下
+        // 不接回」类拦截（否则跌势里的反弹减仓被连带封死，与深套做T框架相反）。
+        // 做T卖出的守卫一个不少：15/30分钟卖点证据、净收益门槛、可卖量与同日计划额度。
         val blocked = mutableListOf<String>()
         if (input.weakEnv) blocked += "大盘或板块环境转弱"
         if (input.fundamentalHealth?.level == HealthLevel.ALERT) blocked += "基本面亮红灯"
@@ -230,7 +234,9 @@ object TradeNotification {
                 allowBuy = blocked.isEmpty(),
                 allowAdd = blocked.isEmpty(),
                 allowReentry = blocked.isEmpty(),
-                allowT = blocked.isEmpty(),
+                // 做T卖出不设买侧门（见上方门控注释）；它自己的守卫在 TradeActionGuard 的
+                // 卖点证据、净收益与数量检查里。
+                allowT = true,
                 blockers = blocked,
             ),
         )

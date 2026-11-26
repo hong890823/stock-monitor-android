@@ -571,7 +571,7 @@ object UiKit {
     data class DetailRow(
         val label: String,
         val value: String,
-        /** 用于把操作建议、持仓视角等相关信息组成独立的视觉区块。 */
+        /** 用于把操作建议等相关信息组成独立的视觉区块。 */
         val dividerBefore: Boolean = false,
         val dividerAfter: Boolean = false,
     )

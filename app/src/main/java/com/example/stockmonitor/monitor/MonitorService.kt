@@ -11,6 +11,7 @@ import com.example.stockmonitor.analysis.DailyReview
 import com.example.stockmonitor.analysis.AccelerationPolicy
 import com.example.stockmonitor.analysis.AdviceDirection
 import com.example.stockmonitor.analysis.AdviceKind
+import com.example.stockmonitor.analysis.AlertPushPolicy
 import com.example.stockmonitor.analysis.DailyAdvicePolicy
 import com.example.stockmonitor.core.RiskExitReview
 import com.example.stockmonitor.analysis.DayPnl
@@ -1238,9 +1239,6 @@ class MonitorService : Service() {
                         val platform = closes.takeLast(20).maxOrNull() ?: return@forEach
                         val averageVolume = history.takeLast(5).map { it.volume }.average()
                         val ma5 = (closes.takeLast(4).sum() + stock.price) / 5.0
-                        val sealed = isSealedAtLimit(
-                            stock.code, stock.name, stock.price, stock.high, stock.prevClose,
-                        )
                         val alert = launchDiscoveryTracker.update(
                             LaunchDiscoveryTracker.Sample(
                                 code = stock.code,
@@ -1253,7 +1251,10 @@ class MonitorService : Service() {
                                     VolumeRatio.of(stock.volume, averageVolume, elapsedTradingMinutes),
                                 biasFromMa5Pct = if (ma5 > 0.0) (stock.price / ma5 - 1.0) * 100.0 else null,
                                 timestamp = System.currentTimeMillis(),
-                                limitUp = sealed,
+                                // 封板票在预筛已被 isSealedAtLimit 跳过（省日线拉取配额），
+                                // 走到这里的必未封板；tracker 的 limitUp 分支（封板不计时、
+                                // 炸板续计）留给未来直传封板样本的调用方与单测使用。
+                                limitUp = false,
                             ),
                         ) ?: return@forEach
                         // 形态站稳只是“值得看”；主力借突破出货且无近端承接时，不打扰、先不入池。
@@ -1294,6 +1295,11 @@ class MonitorService : Service() {
     }
 
     /** 与 ObservationEligibility.isAtLimitUp 同口径，作用于活跃股快照而不是 Quote。 */
+    /**
+     * 此刻是否**封死**在涨停价（±容差）且在日内高点。
+     * 只排除扫描时点封死的票——曾触板后回落（炸板）的不排除，下一轮扫描照常进入观察入口；
+     * 排除的目的是省日线拉取配额 + 不追排板，不是把触板股拉黑（封死的走涨停池/首板承接路径）。
+     */
     private fun isSealedAtLimit(
         code: String,
         name: String,
@@ -2323,6 +2329,28 @@ class MonitorService : Service() {
     }
 
     /**
+     * 仅记录投递（[AlertPushPolicy] 的 RECORD_ONLY 档）：观察/评估级提醒只留痕进
+     * 提醒账本（提醒历史可回看），不弹系统通知、不占推送预算。
+     * 同一 [type]+[code] 当日只留一条（避免每轮盘中扫描重复记账）。
+     */
+    private fun recordOnlyAlert(type: String, code: String, title: String, body: String): Boolean {
+        if (!store.alertsEnabled) return false
+        val today = TimeUtils.todayText()
+        val key = "record:$type:$code"
+        if (!store.reserveAlertEventKey("$today:$key", today)) return false
+        val recorded = Notifier.recordOnly(
+            this,
+            NotificationIds.of(ALERT_ID_SIGNAL, key),
+            title,
+            body,
+            kind = "observation",
+            triggerType = type,
+        )
+        if (!recorded) store.releaseAlertEventKey("$today:$key", today)
+        return recorded
+    }
+
+    /**
      * 通知里统一显示股票名称。候选名可能缺失，或被旧缓存/外部导入写成代码，
      * 此时用行情、自选和持仓里的名称兜底；实在拿不到才退回代码。
      */
@@ -2483,9 +2511,17 @@ class MonitorService : Service() {
                     ),
                     today,
                     intradayFundFlowTracker.context(code),
+                    marketChangePct = currentQuotes["sh000001"]?.changePct,
+                    resistance = Repo.portfolioResults.firstOrNull { it.code == code }?.resistance,
                 ) ?: continue
             volumePriceAnomalyAtMs[code] = nowMs
             val id = NotificationIds.of(ALERT_ID_VOLUME_PRICE_ANOMALY, code)
+            // 点火分级双段（2026-11-26）：点火观察（含四维诱多评级）与点火结果只留痕不弹窗，
+            // 只有确认窗内守住平台上沿、量能延续的「点火确认」才弹强提醒。
+            if (alert.strong && alert.phase != VolumePriceAnomalyTracker.Phase.CONFIRM) {
+                recordOnlyAlert("ignition|${alert.phase}", code, alert.title, alert.body)
+                continue
+            }
             if (code in heldCodes) {
                 if (alert.strong) {
                     Notifier.intradayIgnition(this, id, alert.title, alert.body)
@@ -2772,6 +2808,7 @@ class MonitorService : Service() {
                     atrPct = level?.volatility?.atrPct,
                     brokenSupport = breakFlags.broken,
                     reclaimedSupport = breakFlags.reclaimed,
+                    supportValid = level?.supportValidity?.valid,
                     sectorChangePct = sectorChange?.pct,
                     sectorTurnoverRatio = sectorChange?.turnoverRatio,
                     sectorMainNetInflow = sectorFlow?.mainNetInflow,
@@ -2885,7 +2922,35 @@ class MonitorService : Service() {
                 )
                 continue
             }
-            if (guarded.level != GuardedActionLevel.ACTIONABLE) continue
+            // 投递分级（2026-11-26 口径，AlertPushPolicy）：非处置档不再静默丢弃——
+            // T+1 次日处置是处置指令级按推送送达；观察/风险观察级只留痕进提醒账本回看。
+            if (guarded.level != GuardedActionLevel.ACTIONABLE) {
+                val decision = AlertPushPolicy.classify(
+                    level = guarded.level,
+                    riskFactPush = signal.type == IntradaySignalType.BREAK_NOTICE ||
+                        signal.type == IntradaySignalType.GAP_FADE,
+                )
+                if (decision.isPush) {
+                    sendCheckedAlert(
+                        type = "nextDayReview",
+                        code = position.code,
+                        id = NotificationIds.of(ALERT_ID_SIGNAL, "nextDayReview|${position.code}|${signal.type}"),
+                        title = signal.title,
+                        body = guarded.text,
+                        signal = false,
+                        consumeBudget = false,
+                        eventKey = "nextDayReview|${signal.type}",
+                    )
+                } else {
+                    recordOnlyAlert(
+                        type = "intradayObservation|${signal.type}",
+                        code = position.code,
+                        title = signal.title,
+                        body = guarded.text + "｜仅记录：${decision.reason}",
+                    )
+                }
+                continue
+            }
             // 同一「放量」事件去重：量价异动通道刚提醒过的，短窗内不再从 BREAKOUT 通道
             // 重复推送——两套量能基准（3×短窗均量 vs 量比1.3/20日均量）相互独立，
             // 不去重的话同一次放量突破用户会收到两条口径不同的通知。
@@ -2948,6 +3013,23 @@ class MonitorService : Service() {
                 false
             }
             if (allowed) {
+                // 支撑有效性门槛（2026-11-26 口径）：站回/接回/回踩类买点依赖支撑，
+                // 支撑未被验证（SupportValidityPolicy）时只留痕不推送，预算回滚。
+                val supportOp = signal.type in setOf(
+                    IntradaySignalType.RECLAIM_SUPPORT,
+                    IntradaySignalType.T_BUY,
+                    IntradaySignalType.PULLBACK,
+                )
+                if (supportOp && !AlertPushPolicy.classifySupportOp(tacticsInput.supportValid).isPush) {
+                    recordOnlyAlert(
+                        type = "supportOpUnverified|${signal.type}",
+                        code = position.code,
+                        title = signal.title,
+                        body = guarded.text + "｜仅记录：支撑未验证（${level?.supportValidity?.reason ?: "数据不足"}）",
+                    )
+                    if (budgetConsumed) refundPushBudget(position.code)
+                    continue
+                }
                 val advice = when {
                     guarded.action == GuardedAction.RISK_EXIT -> AdviceDirection.SELL to AdviceKind.EXIT
                     guarded.action == GuardedAction.RISK_REDUCE -> AdviceDirection.SELL to AdviceKind.REDUCE
